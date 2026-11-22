@@ -16,20 +16,36 @@ public sealed class LibraryPane : UserControl
     private readonly MusicService _music;
     private readonly IShell _shell;
     private readonly AppSettings _settings;
-    private readonly StackPanel _items = new() { Spacing = 2 };
+    private readonly ItemsRepeater _items;
+    private readonly HashSet<Button> _shown = []; // the items' buttons that exist now (those in view and around)
     private readonly TextBox _find = new() { PlaceholderText = "在音乐库中搜索", MinWidth = 0 };
     private readonly ComboBox _sort = new() { MinWidth = 120 };
     private readonly Chips _chips;
     private readonly StackPanel _tools;
     private readonly TextBlock _title;
     private bool _rail;
+    private Grid? _head;
+    private Button? _titleButton, _create;
 
     public LibraryPane(MusicService music, IShell shell, AppSettings settings)
     {
         _music = music; _shell = shell; _settings = settings;
-        var head = new Grid { Padding = new Thickness(16, 12, 8, 4) };
-        _title = Ui.Text("音乐库", size: 16, foreground: Ui.Brush("TextSecondaryBrush"), bold: true);
-        var titleButton = new Button { Content = Ui.Row(10, Ui.Icon(Glyphs.Library, 18), _title), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0), Padding = new Thickness(4) };
+        // only the items in view (and a screen or so around) are built: a library can have thousands of albums
+        _items = Ui.Repeater<Entry>(new StackLayout { Spacing = 2 }, Item, el => { if (el is Button b) { _shown.Add(b); Mark(b); } }, el => { if (el is Button b) _shown.Remove(b); });
+        // edges line up: the title's icon, the chips, the search box and the items all start 16 px in; "+" and the sort box end 16 px in
+        var head = new Grid { Padding = new Thickness(12, 12, 16, 4), RowSpacing = 8 };
+        head.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        head.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        _head = head;
+        _title = Ui.Text("音乐库", size: 15, foreground: Ui.Brush("TextSecondaryBrush"), bold: true);
+        var titleIcon = Ui.Icon(Glyphs.Library, 20);
+        titleIcon.VerticalAlignment = VerticalAlignment.Center; _title.VerticalAlignment = VerticalAlignment.Center;
+        var titleButton = new Button { Content = Ui.Row(12, titleIcon, _title), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0), Padding = new Thickness(4), Height = 36, VerticalAlignment = VerticalAlignment.Center };
+        // muted, the text colour under the pointer (foobar2k's)
+        titleButton.Resources["ButtonBackgroundPointerOver"] = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        titleButton.Resources["ButtonBackgroundPressed"] = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        titleButton.PointerEntered += (_, _) => { _title.Foreground = Ui.Brush("TextPrimaryBrush"); titleIcon.Foreground = Ui.Brush("TextPrimaryBrush"); };
+        titleButton.PointerExited += (_, _) => { _title.Foreground = Ui.Brush("TextSecondaryBrush"); titleIcon.Foreground = Ui.Brush("TextSecondaryBrush"); };
         AutomationProperties.SetName(titleButton, "收起或展开音乐库");
         ToolTipService.SetToolTip(titleButton, "收起或展开音乐库");
         titleButton.Click += (_, _) => SetRail(!_rail);
@@ -38,21 +54,46 @@ public sealed class LibraryPane : UserControl
             var p = await music.CreatePlaylistAsync($"我的歌单 #{music.Playlists.Count(x => x.Kind == PlaylistKind.User) + 1}", []);
             shell.Navigate($"playlist:{p.Id}");
         }), 32, 14);
-        create.HorizontalAlignment = HorizontalAlignment.Right;
+        create.HorizontalAlignment = HorizontalAlignment.Right; create.VerticalAlignment = VerticalAlignment.Center;
+        create.Background = Ui.Brush("RaisedBrush"); // foobar2k's round raised "+"
+        create.Resources["ButtonBackgroundPointerOver"] = Ui.Brush("RaisedHiBrush");
+        create.Resources["ButtonBackgroundPressed"] = Ui.Brush("RaisedHiBrush");
+        create.Resources["ButtonForegroundPointerOver"] = Ui.Brush("TextPrimaryBrush");
         head.Children.Add(titleButton); head.Children.Add(create);
+        _titleButton = titleButton; _create = create;
 
-        _chips = new Chips("筛选", [("playlist", "歌单"), ("album", "专辑"), ("artist", "艺人")], settings.LibraryFilter.Length > 0 ? settings.LibraryFilter : null) { Margin = new Thickness(16, 4, 16, 4) };
+        _chips = new Chips("筛选", [("playlist", "歌单"), ("album", "专辑"), ("artist", "艺人")], settings.LibraryFilter.Length > 0 ? settings.LibraryFilter : null) { Margin = new Thickness(16, 6, 16, 6) };
         _chips.Changed += v => { settings.LibraryFilter = v ?? ""; settings.Save(); Render(); };
         AutomationProperties.SetName(_find, "在音乐库中搜索");
         _find.TextChanged += (_, _) => Render();
         foreach (var (v, l) in new[] { ("recent", "最近播放"), ("added", "最近添加"), ("alpha", "字母顺序"), ("creator", "创作者") }) _sort.Items.Add(new ComboBoxItem { Content = l, Tag = v });
         _sort.SelectedIndex = Math.Max(0, new[] { "recent", "added", "alpha", "creator" }.ToList().IndexOf(settings.LibrarySort));
         AutomationProperties.SetName(_sort, "排序");
+        // the find field and the sort box: no box of their own until used, as foobar2k's (the field gets the raised colour
+        // while typing); both 32 high, so they line up
+        // its natural height (32) so the text sits on the middle line; room at the start for the search icon
+        _find.FontSize = 13; _find.CornerRadius = new CornerRadius(6); _find.BorderThickness = new Thickness(0);
+        _find.Padding = new Thickness(32, 6, 8, 6); _find.VerticalAlignment = VerticalAlignment.Center;
+        var clear = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        foreach (var key in new[] { "TextControlBackground", "TextControlBorderBrush", "TextControlBorderBrushPointerOver", "TextControlBorderBrushFocused" }) _find.Resources[key] = clear;
+        _find.Resources["TextControlBackgroundPointerOver"] = Ui.Brush("HoverBrush");
+        _find.Resources["TextControlBackgroundFocused"] = Ui.Brush("RaisedBrush");
+        _find.Resources["TextControlBorderThemeThicknessFocused"] = new Thickness(0);
+        foreach (var key in new[] { "TextControlPlaceholderForeground", "TextControlPlaceholderForegroundPointerOver", "TextControlPlaceholderForegroundFocused" }) _find.Resources[key] = Ui.Brush("TextSecondaryBrush");
+        _sort.Height = 32; _sort.MinHeight = 0; _sort.FontSize = 13; _sort.CornerRadius = new CornerRadius(6); _sort.BorderThickness = new Thickness(0);
+        _sort.Background = clear; _sort.Foreground = Ui.Brush("TextSecondaryBrush");
+        _sort.Resources["ComboBoxBackgroundPointerOver"] = Ui.Brush("HoverBrush");
+        _sort.Resources["ComboBoxBackgroundPressed"] = Ui.Brush("HoverBrush");
+        _sort.Resources["ComboBoxBorderBrushPointerOver"] = clear;
+        _sort.Resources["ComboBoxBorderBrushPressed"] = clear;
         _sort.SelectionChanged += (_, _) => { if (_sort.SelectedItem is ComboBoxItem { Tag: string s }) { settings.LibrarySort = s; settings.Save(); Render(); } };
-        var findRow = new Grid { ColumnSpacing = 8, Margin = new Thickness(16, 4, 12, 6) };
+        var findRow = new Grid { ColumnSpacing = 8, Margin = new Thickness(16, 2, 16, 6) };
         findRow.ColumnDefinitions.Add(new ColumnDefinition());
         findRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        findRow.Children.Add(_find); Grid.SetColumn(_sort, 1); findRow.Children.Add(_sort);
+        var glass = Ui.Icon(Glyphs.Search, 14, Ui.Brush("TextTertiaryBrush"));
+        glass.IsHitTestVisible = false; glass.VerticalAlignment = VerticalAlignment.Center; glass.HorizontalAlignment = HorizontalAlignment.Left; glass.Margin = new Thickness(10, 0, 0, 0);
+        _sort.VerticalAlignment = VerticalAlignment.Center;
+        findRow.Children.Add(_find); findRow.Children.Add(glass); Grid.SetColumn(_sort, 1); findRow.Children.Add(_sort);
         _tools = Ui.Column(0, _chips, findRow);
 
         var scroller = new ScrollViewer { Content = _items, Padding = new Thickness(8, 0, 8, 8), HorizontalScrollMode = ScrollMode.Disabled };
@@ -81,6 +122,11 @@ public sealed class LibraryPane : UserControl
         if (_rail == rail) return;
         _rail = rail;
         _tools.Visibility = rail ? Visibility.Collapsed : Visibility.Visible;
+        // the rail (80 px): the icon and "+" one above the other, centred, as foobar2k's; the covers centred below them
+        _head!.Padding = rail ? new Thickness(8, 12, 8, 4) : new Thickness(12, 12, 16, 4);
+        _titleButton!.HorizontalAlignment = rail ? HorizontalAlignment.Center : HorizontalAlignment.Left;
+        _create!.HorizontalAlignment = rail ? HorizontalAlignment.Center : HorizontalAlignment.Right;
+        Grid.SetRow(_create, rail ? 1 : 0);
         _title.Visibility = rail ? Visibility.Collapsed : Visibility.Visible;
         RailChanged?.Invoke(rail, byUser);
         Render();
@@ -107,7 +153,6 @@ public sealed class LibraryPane : UserControl
 
     private void Render()
     {
-        _items.Children.Clear();
         string find = _find.Text.Trim();
         var list = Entries().Where(e => _chips.Value is null || e.Type == _chips.Value)
             .Where(e => find.Length == 0 || e.Name.Contains(find, StringComparison.CurrentCultureIgnoreCase) || e.Sub.Contains(find, StringComparison.CurrentCultureIgnoreCase));
@@ -121,9 +166,16 @@ public sealed class LibraryPane : UserControl
             "creator" => pinned.ThenBy(e => e.Creator, StringComparer.CurrentCulture),
             _ => pinned.ThenByDescending(e => e.Recent),
         };
-        foreach (var e in list.Take(400)) _items.Children.Add(Item(e));
-        Mark();
+        var items = list.ToList();
+        // the same items as shown (a refresh that changed nothing here): keep them, rather than build them all again
+        // (the rail is part of it: its items are built without their text)
+        var shown = items.Select(x => (x.Route, x.Name, x.Sub, x.Cover, _rail)).ToList();
+        if (_items.ItemsSource is not null && shown.SequenceEqual(_shownItems)) return;
+        _shownItems = shown;
+        _items.ItemsSource = items;
     }
+
+    private List<(string Route, string Name, string Sub, string? Cover, bool Rail)> _shownItems = [];
 
     private Button Item(Entry e)
     {
@@ -139,8 +191,7 @@ public sealed class LibraryPane : UserControl
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         row.Children.Add(art);
         Grid.SetColumn(text, 1); row.Children.Add(text);
-        var playing = Ui.Icon(Glyphs.Volume, 14, Ui.Brush("AccentTextBrush"));
-        playing.Visibility = Visibility.Collapsed; playing.VerticalAlignment = VerticalAlignment.Center;
+        var playing = new Border { Width = 16, Height = 16, VerticalAlignment = VerticalAlignment.Center }; // level bars while its context plays
         Grid.SetColumn(playing, 2); row.Children.Add(playing);
         if (_rail) { text.Visibility = Visibility.Collapsed; }
         var b = new Button
@@ -165,15 +216,17 @@ public sealed class LibraryPane : UserControl
     }
 
     /// <summary>Marks the playing context: amber name and a speaker.</summary>
-    private void Mark()
+    private void Mark() { foreach (var b in _shown) Mark(b); }
+
+    private void Mark(Button b)
     {
-        foreach (var b in _items.Children.OfType<Button>())
-        {
-            if (b.Tag is not ValueTuple<Entry, TextBlock, FontIcon> tag) continue;
-            var (e, name, icon) = tag;
-            bool current = _music.IsContext(e.Type, e.Id);
-            name.Foreground = current ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextPrimaryBrush");
-            icon.Visibility = current && _music.IsActive && !_rail ? Visibility.Visible : Visibility.Collapsed;
-        }
+        if (b.Tag is not ValueTuple<Entry, TextBlock, Border> tag) return;
+        var (e, name, host) = tag;
+        bool current = _music.IsContext(e.Type, e.Id);
+        name.Foreground = current ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextPrimaryBrush");
+        string state = current && !_rail ? _music.IsActive ? "playing" : "paused" : "";
+        if (Equals(host.Tag, state)) return; // new bars only when it changes, so the moving ones keep moving
+        host.Tag = state;
+        host.Child = state.Length == 0 ? null : new EqBars(state == "playing", 13);
     }
 }

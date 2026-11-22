@@ -11,40 +11,63 @@
             </ResourceDictionary.MergedDictionaries>
 
             <!--
-                Visual language (CreeperUX, Spotify's layout): three rounded panels on a near-black window, the playback
-                bar along the bottom, one amber accent for what is playing, progress and the main Play buttons.
+                Visual language: the CreeperUX design tokens (fb2k's vendor/creeperux-gui/tokens.json, dark mode) with
+                foobar2k's own (f2k-*): three rounded panels on a near-black window, the playback bar along the bottom,
+                one amber accent (#f8b700) for what is playing, progress and the main Play buttons.
+                WinUI fills accent controls (AccentButton, radio, toggle, slider) with SystemAccentColorLight2 in the dark
+                theme and writes accent text with Light3: both are the brand amber here, not lighter tints of it.
             -->
             <Color x:Key="SystemAccentColor">#FFF8B700</Color>
-            <Color x:Key="SystemAccentColorLight1">#FFFFC233</Color>
-            <Color x:Key="SystemAccentColorLight2">#FFFFCF5C</Color>
-            <Color x:Key="SystemAccentColorLight3">#FFFFDD8A</Color>
+            <Color x:Key="SystemAccentColorLight1">#FFFFC522</Color>
+            <Color x:Key="SystemAccentColorLight2">#FFF8B700</Color>
+            <Color x:Key="SystemAccentColorLight3">#FFF8B700</Color>
             <Color x:Key="SystemAccentColorDark1">#FFE5A800</Color>
             <Color x:Key="SystemAccentColorDark2">#FFC48F00</Color>
-            <Color x:Key="SystemAccentColorDark3">#FF9C7100</Color>
+            <Color x:Key="SystemAccentColorDark3">#FF8A6200</Color>
 
-            <SolidColorBrush x:Key="AppBackgroundBrush" Color="#FF040607" />
-            <SolidColorBrush x:Key="PanelBrush" Color="#FF121518" />
-            <SolidColorBrush x:Key="RaisedBrush" Color="#FF1F2529" />
-            <SolidColorBrush x:Key="RaisedHiBrush" Color="#FF2A3237" />
-            <SolidColorBrush x:Key="HoverBrush" Color="#14EFEBE5" />
-            <SolidColorBrush x:Key="LineBrush" Color="#1FFFFFFF" />
-            <SolidColorBrush x:Key="TextPrimaryBrush" Color="#FFEFEBE5" />
-            <SolidColorBrush x:Key="TextSecondaryBrush" Color="#FFA9A59D" />
-            <SolidColorBrush x:Key="TextTertiaryBrush" Color="#FF77736C" />
-            <SolidColorBrush x:Key="AccentBrush" Color="#FFF8B700" />
-            <SolidColorBrush x:Key="AccentTextBrush" Color="#FFFFC233" />
-            <SolidColorBrush x:Key="OnAccentBrush" Color="#FF111416" />
-            <SolidColorBrush x:Key="BadBrush" Color="#FFE5484D" />
-            <SolidColorBrush x:Key="GoodBrush" Color="#FF3DD68C" />
+            <Color x:Key="PanelColor">#FF151B1F</Color>
+            <Color x:Key="RaisedColor">#FF20272C</Color>
+            <Color x:Key="RaisedHiColor">#FF2A3338</Color>
+            <Color x:Key="TextColor">#FFF4F1EB</Color>
+            <Color x:Key="QuietColor">#FF839196</Color>                                    <!-- cx-panel -->
+            <SolidColorBrush x:Key="AppBackgroundBrush" Color="#FF040607" />                <!-- f2k-bg -->
+            <SolidColorBrush x:Key="PanelBrush" Color="{StaticResource PanelColor}" />
+            <SolidColorBrush x:Key="RaisedBrush" Color="#FF20272C" />                       <!-- f2k-raise: chips, cards, round buttons -->
+            <SolidColorBrush x:Key="RaisedHiBrush" Color="#FF2A3338" />                     <!-- f2k-raise-hi: their hover -->
+            <SolidColorBrush x:Key="HoverBrush" Color="#12EFEBE5" />                        <!-- f2k-hover: rgba(239,235,229,.07) -->
+            <SolidColorBrush x:Key="SurfaceBrush" Color="#17F4F1EB" />                      <!-- quick tiles: text at 9 % -->
+            <SolidColorBrush x:Key="SurfaceHoverBrush" Color="#2BF4F1EB" />                 <!-- … at 17 % under the pointer -->
+            <SolidColorBrush x:Key="LineBrush" Color="#24EFEBE5" />                         <!-- cx-line -->
+            <SolidColorBrush x:Key="TextPrimaryBrush" Color="#FFF4F1EB" />                  <!-- cx-text -->
+            <SolidColorBrush x:Key="TextSecondaryBrush" Color="#FFA9B0B3" />                <!-- cx-muted -->
+            <SolidColorBrush x:Key="TextTertiaryBrush" Color="#FF839196" />                 <!-- cx-quiet -->
+            <SolidColorBrush x:Key="AccentBrush" Color="#FFF8B700" />                       <!-- cx-accent -->
+            <SolidColorBrush x:Key="AccentHiBrush" Color="#FFFFC522" />                     <!-- cx-accent-hi: hover -->
+            <SolidColorBrush x:Key="AccentTextBrush" Color="#FFF8B700" />                   <!-- cx-accent-text -->
+            <Color x:Key="OnAccentColor">#FF111416</Color>
+            <SolidColorBrush x:Key="OnAccentBrush" Color="{StaticResource OnAccentColor}" />  <!-- cx-on-accent -->
+            <SolidColorBrush x:Key="BadBrush" Color="#FFC1877C" />                          <!-- cx-bad -->
+            <SolidColorBrush x:Key="GoodBrush" Color="#FF80AB9E" />                         <!-- cx-good -->
+            <SolidColorBrush x:Key="WarnBrush" Color="#FFD9A441" />                         <!-- cx-warn -->
+            <SolidColorBrush x:Key="InfoBrush" Color="#FF6497A7" />                         <!-- cx-info -->
+            <SolidColorBrush x:Key="ToastBrush" Color="#FF1B2227" />                        <!-- cx-raised: toasts -->
+
+            <!-- Accent buttons (Play, sign in): the amber, brighter under the pointer (cx-accent-hi), as foobar2k's -->
+            <SolidColorBrush x:Key="AccentButtonBackground" Color="#FFF8B700" />
+            <SolidColorBrush x:Key="AccentButtonBackgroundPointerOver" Color="#FFFFC522" />
+            <SolidColorBrush x:Key="AccentButtonBackgroundPressed" Color="#FFF8B700" />
+            <SolidColorBrush x:Key="AccentButtonForeground" Color="#FF111416" />
+            <SolidColorBrush x:Key="AccentButtonForegroundPointerOver" Color="#FF111416" />
+            <SolidColorBrush x:Key="AccentButtonForegroundPressed" Color="#FF111416" />
 
             <!-- Menus: solid, as Spotify's (acrylic would also not show in RenderTargetBitmap screenshots) -->
-            <SolidColorBrush x:Key="MenuFlyoutPresenterBackground" Color="#FF242A2E" />
-            <SolidColorBrush x:Key="MenuFlyoutPresenterBorderBrush" Color="#1FFFFFFF" />
+            <SolidColorBrush x:Key="MenuFlyoutPresenterBackground" Color="#FF20272C" />
+            <SolidColorBrush x:Key="MenuFlyoutPresenterBorderBrush" Color="#24EFEBE5" />
 
             <!-- Lists: selection is shown by the playing song, not by the system highlight -->
             <SolidColorBrush x:Key="ListViewItemBackgroundSelected" Color="#1FEFEBE5" />
             <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPointerOver" Color="#29EFEBE5" />
-            <SolidColorBrush x:Key="ListViewItemBackgroundPointerOver" Color="#14EFEBE5" />
+            <SolidColorBrush x:Key="ListViewItemBackgroundPointerOver" Color="#12EFEBE5" />
             <SolidColorBrush x:Key="ListViewItemSelectionIndicatorBrush" Color="#00000000" />
             <SolidColorBrush x:Key="ListViewItemSelectionIndicatorPointerOverBrush" Color="#00000000" />
 
@@ -54,7 +77,8 @@
             -->
             <FontFamily x:Key="ContentControlThemeFontFamily">Segoe UI Variable Text, Microsoft YaHei UI</FontFamily>
             <FontFamily x:Key="AppTextFont">Segoe UI Variable Text, Microsoft YaHei UI</FontFamily>
-            <FontFamily x:Key="AppDisplayFont">Segoe UI Variable Display, Microsoft YaHei UI</FontFamily>
+            <!-- headings and the brand: foobar2k's display face, Chakra Petch (SemiBold, Latin; Assets/Fonts, SIL OFL 1.1) -->
+            <FontFamily x:Key="AppDisplayFont">ms-appx:///Assets/Fonts/ChakraPetch-SemiBold.ttf#Chakra Petch, Microsoft YaHei UI</FontFamily>
             <FontFamily x:Key="AppFigureFont">Cascadia Mono, Consolas, Microsoft YaHei UI</FontFamily>
 
             <Style x:Key="HeroTitleStyle" TargetType="TextBlock">

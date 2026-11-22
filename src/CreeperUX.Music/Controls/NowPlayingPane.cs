@@ -14,7 +14,7 @@ public sealed class NowPlayingPane : UserControl
     private readonly MusicService _music;
     private readonly IShell _shell;
     private readonly TextBlock _heading = Ui.Text("正在播放", size: 15, foreground: Ui.Brush("TextPrimaryBrush"), bold: true);
-    private readonly ContentControl _body = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
+    private readonly ContentControl _body = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch, IsTabStop = false };
     private string _mode = "now";
     private string? _shownTrack;
     private IReadOnlyList<LyricLine>? _lyrics;
@@ -25,11 +25,13 @@ public sealed class NowPlayingPane : UserControl
     public NowPlayingPane(MusicService music, IShell shell)
     {
         _music = music; _shell = shell;
-        var head = new Grid { Padding = new Thickness(16, 12, 8, 8) };
+        // the same head as the library's: a 36 px line 12 px down (so both titles sit on one line), the button 16 px in
+        var head = new Grid { Padding = new Thickness(16, 12, 16, 8), MinHeight = 56 };
         head.Children.Add(_heading);
         _heading.VerticalAlignment = VerticalAlignment.Center;
         var close = Ui.IconButton(Glyphs.Close, "关闭右侧面板", (_, _) => CloseRequested?.Invoke(), 32, 12);
-        close.HorizontalAlignment = HorizontalAlignment.Right;
+        close.HorizontalAlignment = HorizontalAlignment.Right; close.VerticalAlignment = VerticalAlignment.Center;
+        close.Resources["ButtonForegroundPointerOver"] = Ui.Brush("TextPrimaryBrush");
         head.Children.Add(close);
         var root = new Grid();
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -63,6 +65,7 @@ public sealed class NowPlayingPane : UserControl
     {
         var t = _music.Current;
         if (!force && t?.Id == _shownTrack && _body.Content is not null) return;
+        bool another = t?.Id != _shownTrack; // a new song comes in; the same one redrawn (liked, say) does not move
         _shownTrack = t?.Id;
         _lyrics = null; _lyricLines = null; _lyricAt = -2; CurrentLyric = null;
         if (t is null)
@@ -72,14 +75,14 @@ public sealed class NowPlayingPane : UserControl
             return;
         }
         var body = new StackPanel { Spacing = 16, Padding = new Thickness(16, 0, 16, 24) };
-        var art = new Artwork(280, false, Glyphs.Album, 8) { Url = _music.CoverUrl(t.AlbumId, 600), HorizontalAlignment = HorizontalAlignment.Stretch };
-        art.Width = double.NaN; art.Height = double.NaN;
         var artBox = new Viewbox { Child = new Grid { Width = 300, Height = 300, Children = { new Artwork(300, false, Glyphs.Album, 8) { Url = _music.CoverUrl(t.AlbumId, 600) } } }, Stretch = Stretch.Uniform };
         body.Children.Add(artBox);
+        if (another) Motion.ScaleIn(artBox, 0.9f);
 
         var title = Ui.Link(t.Title, () => _shell.Navigate($"album:{t.AlbumId}"), 22, Ui.Brush("TextPrimaryBrush"), bold: true);
         var artist = Ui.Link(t.Artist, () => _shell.Navigate($"artist:{t.ArtistId}"), 14);
-        var like = Ui.IconButton(t.Liked ? Glyphs.HeartFill : Glyphs.Heart, t.Liked ? "取消喜欢" : "喜欢", async (_, _) => await _shell.Run(() => _music.SetLikedAsync(t.Id, !t.Liked)));
+        Button? like = null;
+        like = Ui.IconButton(t.Liked ? Glyphs.HeartFill : Glyphs.Heart, t.Liked ? "取消喜欢" : "喜欢", async (_, _) => { Motion.Pop(like!); await _shell.Run(() => _music.SetLikedAsync(t.Id, !t.Liked)); });
         like.Foreground = t.Liked ? Ui.Brush("AccentBrush") : Ui.Brush("TextSecondaryBrush");
         var titleRow = new Grid();
         titleRow.ColumnDefinitions.Add(new ColumnDefinition());
@@ -120,6 +123,7 @@ public sealed class NowPlayingPane : UserControl
         body.Children.Add(Card("接下来播放", _nextBox, openQueue));
         RenderNext();
         _body.Content = new ScrollViewer { Content = body, HorizontalScrollMode = ScrollMode.Disabled };
+        if (another) Motion.Enter(body, rise: 8);
     }
 
     private void RenderNext()
@@ -153,8 +157,10 @@ public sealed class NowPlayingPane : UserControl
         if (_lyrics is not { Count: > 0 }) { _lyricLines.Children.Add(Ui.Text("这首歌没有歌词", "MutedTextStyle")); return; }
         foreach (var l in _lyrics)
         {
-            var tb = Ui.Text(l.Text.Length > 0 ? l.Text : "♪", size: 15, foreground: Ui.Brush("TextTertiaryBrush"), bold: true);
+            var tb = Ui.Text(l.Text.Length > 0 ? l.Text : "♪", size: 15, foreground: Ui.Brush("TextPrimaryBrush"), bold: true);
             tb.TextWrapping = TextWrapping.Wrap;
+            tb.Opacity = Dim;
+            Motion.OpacityFade(tb);
             _lyricLines.Children.Add(tb);
         }
         FollowLyrics(_music.Position);
@@ -167,15 +173,17 @@ public sealed class NowPlayingPane : UserControl
         if (at == _lyricAt) return;
         _lyricAt = at;
         for (int i = 0; i < _lyricLines.Children.Count; i++)
-            if (_lyricLines.Children[i] is TextBlock tb) tb.Foreground = i == at ? Ui.Brush("TextPrimaryBrush") : Ui.Brush("TextTertiaryBrush");
+            if (_lyricLines.Children[i] is TextBlock tb) tb.Opacity = i == at ? 1 : Dim;
         CurrentLyric = at >= 0 && _lyricLines.Children[at] is TextBlock line ? line.Text : null;
         if (at >= 0 && _lyricLines.Children[at] is FrameworkElement el)
         {
             _lyricScroll.UpdateLayout(); // lines just added are not measured yet: scrolling to them would do nothing
             var p = el.TransformToVisual(_lyricLines).TransformPoint(new Windows.Foundation.Point(0, 0));
-            _lyricScroll.ChangeView(null, Math.Max(0, p.Y - 50), null, disableAnimation: true);
+            _lyricScroll.ChangeView(null, Math.Max(0, p.Y - 50), null, disableAnimation: !Motion.Enabled);
         }
     }
+
+    private const double Dim = 0.45; // lines that are not being sung
 
     /// <summary>The lyrics card's lit line (tests read it), or null.</summary>
     public string? CurrentLyric { get; private set; }
@@ -240,6 +248,7 @@ public sealed class NowPlayingPane : UserControl
             var remove = Ui.IconButton(Glyphs.Close, $"从队列中移除 {t.Title}", (_, _) => _music.QueueRemove([entry.Id]), 30, 11);
             Grid.SetColumn(remove, 2); g.Children.Add(remove);
             g.DoubleTapped += (_, _) => _music.QueueJump(entry.Id);
+            Motion.BrushFade(g);
             g.PointerEntered += (_, _) => g.Background = Ui.Brush("HoverBrush");
             g.PointerExited += (_, _) => g.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
             var menu = new MenuFlyout();

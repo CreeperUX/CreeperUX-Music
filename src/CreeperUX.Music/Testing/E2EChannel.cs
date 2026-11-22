@@ -9,6 +9,7 @@ using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 
 namespace CreeperUX.Music.Testing;
@@ -71,7 +72,7 @@ internal static class E2EChannel
         ui.TryEnqueue(async () =>
         {
             try { done.SetResult(line.StartsWith("shot ", StringComparison.Ordinal) ? await Shot(line[5..].Trim()) : Execute(line.Trim())); }
-            catch (Exception ex) { done.SetResult("error: " + ex.Message); }
+            catch (Exception ex) { Log.Write($"[e2e] {line}: {ex}"); done.SetResult("error: " + ex.Message); }
         });
         return done.Task;
     }
@@ -80,18 +81,31 @@ internal static class E2EChannel
     /// popups (menus, dialogs) composed on top. Silent: nothing is shown or activated.</summary>
     private static async Task<string> Shot(string path)
     {
+        bool full = path.EndsWith(" full", StringComparison.Ordinal); // "shot x.png full": at the screen's resolution, not half
+        if (full) path = path[..^5];
         if (W?.Content is not FrameworkElement root) return "error: no window";
         var layers = new List<(UIElement Element, Windows.Foundation.Point At)> { (root, new(0, 0)) };
         foreach (var popup in VisualTreeHelper.GetOpenPopupsForXamlRoot(root.XamlRoot))
-            if (popup.Child is FrameworkElement child && child.ActualWidth > 0)
+        {
+            if (popup.Child is not FrameworkElement child) continue;
+            // a menu that has just opened may not be laid out yet: RenderTargetBitmap refuses an element without a size
+            for (int i = 0; i < 20 && (child.ActualWidth <= 0 || child.ActualHeight <= 0); i++) await Task.Delay(25);
+            if (child.ActualWidth > 0 && child.ActualHeight > 0)
                 layers.Add((child, child.TransformToVisual(root).TransformPoint(new Windows.Foundation.Point(0, 0))));
+        }
         double scale = root.XamlRoot.RasterizationScale;
         int width = (int)(root.ActualWidth * scale), height = (int)(root.ActualHeight * scale);
         var canvas = new byte[width * height * 4];
         foreach (var (element, at) in layers)
         {
             var rtb = new Microsoft.UI.Xaml.Media.Imaging.RenderTargetBitmap();
-            await rtb.RenderAsync(element);
+            try { await rtb.RenderAsync(element); }
+            catch (ArgumentException) when (element != root)
+            {
+                // a popup XAML cannot render into a bitmap (one in its own window, a tooltip say): left out of the shot
+                Log.Write($"[e2e] shot: popup {element.GetType().Name} ({VisualTreeHelper.GetParent(element)?.GetType().Name}) could not be rendered");
+                continue;
+            }
             var pixels = System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeBufferExtensions.ToArray(await rtb.GetPixelsAsync());
             int ox = (int)(at.X * scale), oy = (int)(at.Y * scale);
             for (int y = 0; y < rtb.PixelHeight; y++)
@@ -111,7 +125,7 @@ internal static class E2EChannel
         using var file = new Windows.Storage.Streams.InMemoryRandomAccessStream();
         var encoder = await Windows.Graphics.Imaging.BitmapEncoder.CreateAsync(Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId, file);
         encoder.SetPixelData(Windows.Graphics.Imaging.BitmapPixelFormat.Bgra8, Windows.Graphics.Imaging.BitmapAlphaMode.Ignore, (uint)width, (uint)height, 96, 96, canvas);
-        encoder.BitmapTransform.ScaledWidth = (uint)(width / 2); encoder.BitmapTransform.ScaledHeight = (uint)(height / 2);
+        if (!full) { encoder.BitmapTransform.ScaledWidth = (uint)(width / 2); encoder.BitmapTransform.ScaledHeight = (uint)(height / 2); }
         encoder.BitmapTransform.InterpolationMode = Windows.Graphics.Imaging.BitmapInterpolationMode.Fant;
         await encoder.FlushAsync();
         var bytes = new byte[file.Size];
@@ -148,10 +162,18 @@ internal static class E2EChannel
             "popups" => W?.Content is UIElement root ? VisualTreeHelper.GetOpenPopupsForXamlRoot(root.XamlRoot).Count.ToString(System.Globalization.CultureInfo.InvariantCulture) : "0",
             "closepopups" => W?.Content is UIElement r2 ? Done(() => { foreach (var p in VisualTreeHelper.GetOpenPopupsForXamlRoot(r2.XamlRoot)) p.IsOpen = false; }) : "error: no window",
             "resize" => Resize(arg),
+            "tabs" => Tabs(arg),
+            "iconcolor" => IconColor(arg),
+            "bounds" => W?.Content is UIElement broot ? string.Join(Separator, Named().Where(x => Matches(x.Name, arg)).Select(x =>
+                { var r = x.Element.TransformToVisual(broot).TransformBounds(new Windows.Foundation.Rect(0, 0, x.Element.ActualWidth, x.Element.ActualHeight));
+                  return FormattableString.Invariant($"{x.Name} [{x.Element.GetType().Name}] {r.X:0.#},{r.Y:0.#} {r.Width:0.#}x{r.Height:0.#}"); })) : "error: no window",
             // managed memory after a full collection, in KB (pages left behind must not pile up)
             "memory" => Done(() => { GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); }) is var _ ? (GC.GetTotalMemory(true) / 1024).ToString(System.Globalization.CultureInfo.InvariantCulture) : "",
+            "ws" => (Environment.WorkingSet / (1024 * 1024)).ToString(System.Globalization.CultureInfo.InvariantCulture), // MB
             "elements" => W?.Content is UIElement el ? Descend(el).Count().ToString(System.Globalization.CultureInfo.InvariantCulture) : "0",
             "window" => W is { } ww ? FormattableString.Invariant($"{ww.AppWindow.Size.Width} {ww.AppWindow.Size.Height} {ww.Title}") : "error: no window",
+            // the title bar's insets for the window buttons (physical px) and the scale: what the top bar must leave free
+            "insets" => W is { } wi && wi.Content is FrameworkElement ri ? FormattableString.Invariant($"left {wi.AppWindow.TitleBar.LeftInset} right {wi.AppWindow.TitleBar.RightInset} scale {ri.XamlRoot.RasterizationScale} width {ri.ActualWidth}") : "error: no window",
             "close" => W is { } wc && PostMessage(WinRT.Interop.WindowNative.GetWindowHandle(wc), 0x0010, IntPtr.Zero, IntPtr.Zero) ? "closing" : "error: no window",
             _ => "error: unknown command " + command,
         };
@@ -241,10 +263,19 @@ internal static class E2EChannel
         }
     }
 
-    private static IEnumerable<(string Name, FrameworkElement Element, AutomationPeer Peer)> Named() =>
-        Live().OfType<FrameworkElement>().Where(e => e.ActualWidth > 0 && e.Opacity > 0)
-            .Select(e => (Element: e, Peer: FrameworkElementAutomationPeer.CreatePeerForElement(e)))
-            .Where(x => x.Peer is not null).Select(x => (Name: x.Peer.GetName(), x.Element, x.Peer)).Where(x => x.Name.Length > 0);
+    private static IEnumerable<(string Name, FrameworkElement Element, AutomationPeer Peer)> Named()
+    {
+        foreach (var e in Live().OfType<FrameworkElement>())
+        {
+            if (e.ActualWidth <= 0 || e.Opacity <= 0) continue;
+            AutomationPeer? peer;
+            string name;
+            // an element on its way out (a list row in its remove transition) can refuse a peer: it is not there to find
+            try { peer = FrameworkElementAutomationPeer.CreatePeerForElement(e); name = peer?.GetName() ?? ""; }
+            catch (ArgumentException) { continue; }
+            if (peer is not null && name.Length > 0) yield return (name, e, peer);
+        }
+    }
 
     private static bool Matches(string name, string pattern) => pattern.EndsWith('*') ? name.StartsWith(pattern[..^1], StringComparison.Ordinal) : name == pattern;
 
@@ -321,6 +352,44 @@ internal static class E2EChannel
         double fraction = double.TryParse(percent, System.Globalization.CultureInfo.InvariantCulture, out var p) ? p / 100 : 1;
         viewer.ChangeView(null, viewer.ScrollableHeight * Math.Clamp(fraction, 0, 1), null, disableAnimation: true);
         return "scrolled";
+    }
+
+    /// <summary>"tabs <name> <n>": the keyboard's Tab order from that element, n steps, as the focus manager computes it
+    /// (focus moves inside the app only; nothing is typed or activated).</summary>
+    private static string Tabs(string arg)
+    {
+        int cut = arg.LastIndexOf(' ');
+        if (cut <= 0 || !int.TryParse(arg[(cut + 1)..], out int n) || W?.Content is not UIElement root) return "error: tabs <name> <n>";
+        string name = arg[..cut];
+        // the first control with that name (a text with the same words is not a place the keyboard can be)
+        // programmatic focus: keyboard focus would open the elements' tooltips, which are windows of their own
+        if (Named().Select(x => x.Element).OfType<Control>().FirstOrDefault(c => Matches(FrameworkElementAutomationPeer.CreatePeerForElement(c)?.GetName() ?? "", name)) is not { } c
+            || !c.Focus(FocusState.Programmatic)) return "error: cannot focus " + name;
+        var order = new List<string>();
+        for (int i = 0; i < n; i++)
+        {
+            if (FocusManager.FindNextElement(FocusNavigationDirection.Next, new FindNextElementOptions { SearchRoot = root }) is not Control next || !next.Focus(FocusState.Programmatic)) break;
+            var peer = FrameworkElementAutomationPeer.CreatePeerForElement(next);
+            order.Add($"{peer?.GetName()} [{next.GetType().Name}]");
+        }
+        return string.Join(Separator, order);
+    }
+
+    /// <summary>"iconcolor <name>": the colour the icon inside that control is drawn in, as #AARRGGBB (what the screen shows,
+    /// not what the control asks for).</summary>
+    private static string IconColor(string name)
+    {
+        foreach (var (_, element, _) in Named().Where(x => Matches(x.Name, name)))
+        {
+            var icon = element as Controls.KitIcon ?? Controls.Ui.Descendant<Controls.KitIcon>(element);
+            if (icon is null) continue;
+            // what PathIcon fills its outline with (or FontIcon writes its glyph in)
+            var shape = Controls.Ui.Descendant<Microsoft.UI.Xaml.Shapes.Shape>(icon);
+            var brush = shape is not null ? shape.Fill : Controls.Ui.Descendant<TextBlock>(icon)?.Foreground;
+            if (brush is SolidColorBrush { Color: var c }) return FormattableString.Invariant($"#{c.A:X2}{c.R:X2}{c.G:X2}{c.B:X2}");
+            return "error: the icon has no colour";
+        }
+        return "error: no icon in " + name;
     }
 
     private static string Resize(string size)

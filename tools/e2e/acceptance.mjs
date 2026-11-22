@@ -91,6 +91,12 @@ try {
       assert(await hasName('快捷入口'), '没有快捷入口');
       await shot('home');
     });
+    await check('刚启动时图标就是该有的颜色：播放键是深色，其他按钮是灰色', async () => {
+      const color = async name => (await app.send(`iconcolor ${name}`)).toUpperCase();
+      assert((await color('播放')) === '#FF111416', `播放键图标是 ${await color('播放')}`);
+      for (const name of ['上一首', '下一首', '随机播放', '循环播放', '设置'])
+        assert((await color(name)) === '#FFA9B0B3', `${name} 图标是 ${await color(name)}`);
+    });
     quiet(app);
   }
 
@@ -113,6 +119,12 @@ try {
         await shot(`page-${route.replace(/[:]/g, '-').replace(/-$/, '')}`);
       });
     }
+    await check('键盘：歌曲列表就是页面的滚动区，Tab 仍从页头的播放按钮进到列表', async () => {
+      await app.send('nav album:al0'); await sleep(800);
+      const order = (await app.send('tabs 林间信号 5')).split('');
+      const play = order.indexOf('播放 雾中山脉 [Button]'), row = order.findIndex(x => x.endsWith('[ListViewItem]'));
+      assert(play >= 0 && row > play, order.join(' → '));
+    });
     await check('别人的歌单只能播放：没有重命名和删除', async () => {
       await app.send('nav playlist:pl5'); await sleep(600);
       assert(!(await hasName('朋友的歌单 的更多选项')), '出现了“更多选项”');
@@ -128,6 +140,17 @@ try {
       log(`    界面元素 ${e1} → ${e2}，托管内存 ${(m1 / 1024).toFixed(1)} MB → ${(m2 / 1024).toFixed(1)} MB`);
       assert(e2 <= e1 * 1.05, `元素 ${e1} → ${e2}`);
       assert(m2 <= m1 * 1.25 + 2048, `内存 ${m1} KB → ${m2} KB`);
+    });
+    await check('界面缩放：设置里选 90%，整个窗口按 90% 重新排版，选回 100% 复原', async () => {
+      const width = async () => Number((await app.send('insets')).match(/width ([\d.]+)/)[1]);
+      await app.send('nav settings'); await sleep(600);
+      const before = await width();
+      await app.invoke('90%'); await sleep(600);
+      const zoomed = await width();
+      assert(Math.abs(zoomed - before / 0.9) < 2, `排版宽度 ${before} → ${zoomed}（应为 ${(before / 0.9).toFixed(1)}）`);
+      await shot('zoom-90');
+      await app.invoke('100%'); await sleep(600);
+      assert(Math.abs((await width()) - before) < 2, '没有复原');
     });
     await check('后退回到上一个页面', async () => {
       await app.send('nav album:al1'); await sleep(300);
@@ -176,6 +199,20 @@ try {
       const streams = (await server.log()).streams.filter(x => x.id === 't22');
       assert(streams.length >= 1, '没有请求 t22');
     });
+    await check('播放时打开别的专辑，封面照样马上去取（歌曲的连接不占满图片下载）', async () => {
+      // an album whose big cover (the page's: 512 px or more, by the screen) has not been fetched yet in this run, since a
+      // cached one needs no request
+      const big = c => Number(c.size) >= 512;
+      const seen = new Set((await server.log()).covers.filter(big).map(c => c.id));
+      const album = (await api('getAlbumList2', { type: 'alphabeticalByName', size: 500 })).albumList2.album.filter(a => a.coverArt).map(a => a.id).find(id => !seen.has(id));
+      assert(album, '每张专辑的大封面都已经取过了');
+      const t0 = Date.now();
+      await app.send(`nav album:${album}`);
+      try { await until(async () => (await server.log()).covers.some(c => c.id === album && big(c) && c.at >= t0), 'cover requested', 2000); }
+      catch (e) { const l = await server.log(); throw new Error(`${e.message}; streams open ${l.open}; album ${album}; latest covers ${JSON.stringify(l.covers.slice(-4).map(c => [c.id, c.size, c.at - t0]))}; view ${(await state()).view}`); }
+      const open = (await server.log()).open;
+      assert(open >= 1, `没有在播放（打开的音频流 ${open}）`);
+    });
     await check('下一首 / 上一首', async () => {
       await app.invoke('下一首');
       await until(async () => (await state()).track === 't23', 'next t23');
@@ -184,10 +221,13 @@ try {
       await until(async () => (await state()).track === 't22', 'previous t22');
     });
     await check('随机与循环按钮切换播放顺序', async () => {
+      const color = async name => (await app.send(`iconcolor ${name}`)).toUpperCase();
       await app.invoke('随机播放');
       await until(async () => (await state()).order === 'ShuffleTracks', 'shuffle');
+      await until(async () => (await color('随机播放')) === '#FFF8B700', 'the shuffle icon in amber'); // on: the accent
       await app.invoke('随机播放');
       await until(async () => (await state()).order === 'Default', 'shuffle off');
+      await until(async () => (await color('随机播放')) === '#FFA9B0B3', 'the shuffle icon grey again');
       await app.invoke('循环播放'); await until(async () => (await state()).order === 'RepeatPlaylist', 'repeat all');
       await app.invoke('列表循环'); await until(async () => (await state()).order === 'RepeatTrack', 'repeat one');
       await app.invoke('单曲循环'); await until(async () => (await state()).order === 'Default', 'repeat off');
@@ -384,6 +424,8 @@ try {
       assert(!n.some(x => x.startsWith('关闭右侧面板 [')), '右侧面板还在');
       assert(!n.some(x => x.startsWith('在音乐库中搜索 [TextBox')), '音乐库没有收起');
       assert(n.some(x => x.startsWith('搜索 [TextBox')), '窄窗口里没有搜索框');
+      // the rail's items are covers only: no names or subtitles
+      assert(!(await app.texts()).some(t => /^媒体库 · \d+ 首歌曲$/.test(t)), '封面栏里还显示着文字');
       await shot('narrow');
     });
     await check('窗口变回宽：右侧面板和音乐库恢复成原来的样子（自动收起不改设置）', async () => {
@@ -391,6 +433,7 @@ try {
       const n = await names();
       assert(n.some(x => x.startsWith('关闭右侧面板 [')), '右侧面板没有回来');
       assert(n.some(x => x.startsWith('在音乐库中搜索 [TextBox')), '音乐库还是封面栏');
+      assert((await app.texts()).some(t => /^媒体库 · \d+ 首歌曲$/.test(t)), '音乐库的文字没有回来');
       const saved = JSON.parse(readFileSync(join(app.data, 'settings.json'), 'utf8'));
       assert(saved.LibraryOpen === true && saved.PanelOpen === true, JSON.stringify({ LibraryOpen: saved.LibraryOpen, PanelOpen: saved.PanelOpen }));
     });

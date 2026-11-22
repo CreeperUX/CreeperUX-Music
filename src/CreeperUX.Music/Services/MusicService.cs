@@ -12,8 +12,8 @@ public sealed record ToastMessage(string Text, bool IsError = false, string? Act
 
 /// <summary>
 /// Everything the window shows and does with the music: the server (client), the library and playlists, the queue, the
-/// player. Lives on the UI thread; every event is raised there. Pages read it and call it; nothing changes on screen
-/// until the server or the engine confirms it.
+/// player. Lives on the UI thread; every event is raised there. Pages read it and call it. What it shows is what the server
+/// and the engine report, except a like: that shows at once and goes back if the server refuses it.
 /// </summary>
 public sealed class MusicService : IDisposable
 {
@@ -94,9 +94,19 @@ public sealed class MusicService : IDisposable
     // ---------------------------------------------------------------- start and stay in step
     public async Task StartAsync()
     {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         Server = await Client.ConnectAsync();
-        Library = await Client.LoadLibraryAsync();
-        await LoadPlaylistsAsync();
+        long connected = clock.ElapsedMilliseconds;
+        // the library and the playlists at the same time (songs of playlists are matched against the library afterwards)
+        var library = Client.LoadLibraryAsync();
+        var playlists = Client.GetPlaylistsAsync(Remember);
+        try { Library = await library; }
+        catch { _ = playlists.ContinueWith(p => _ = p.Exception, TaskScheduler.Default); throw; } // its failure is not ours to report
+        long loaded = clock.ElapsedMilliseconds;
+        var server = await playlists;
+        MergeUnknown();
+        Playlists = [LikedPlaylist(), LibraryPlaylist(), .. server];
+        Log.Write($"[start] connected in {connected} ms, library in {loaded - connected} ms, playlists done at {clock.ElapsedMilliseconds} ms");
         _refreshedAt = DateTimeOffset.Now;
         Volume = _settings.Volume;
         ApplyVolume();
@@ -106,22 +116,30 @@ public sealed class MusicService : IDisposable
         }
     }
 
+    private readonly List<JsonElement> _unknown = [];
+
+    /// <summary>A song from a playlist, the play queue or a radio: called by the client on any thread. Songs the library does
+    /// not have are kept aside and added by <see cref="MergeUnknown"/> on the UI thread, all at once.</summary>
     private string Remember(JsonElement song)
     {
         string id = song.GetProperty("id").GetString()!;
-        if (Library.Track(id) is null)
-        {
-            var albums = Library.AlbumById.ToDictionary(x => x.Key, x => x.Value);
-            var t = LibraryBuilder.TrackOf(song, albums);
-            Library = LibraryBuilder.Group([.. Library.Tracks, t], albums);
-        }
+        if (!Library.TrackById.ContainsKey(id)) lock (_unknown) _unknown.Add(song.Clone());
         return id;
     }
 
-    private async Task LoadPlaylistsAsync()
+    /// <summary>Adds the songs <see cref="Remember"/> kept aside to the library (one regrouping, on the UI thread).</summary>
+    private void MergeUnknown()
     {
-        var server = await Client.GetPlaylistsAsync(Remember);
-        Playlists = [LikedPlaylist(), LibraryPlaylist(), .. server];
+        List<JsonElement> songs;
+        lock (_unknown) { songs = [.. _unknown]; _unknown.Clear(); }
+        // songs set aside while the library was still loading are mostly in it now: only the rest are read
+        songs = songs.Where(s => !Library.TrackById.ContainsKey(s.GetProperty("id").GetString()!)).ToList();
+        if (songs.Count == 0) return;
+        var albums = Library.AlbumById.ToDictionary(x => x.Key, x => x.Value);
+        var added = songs.Select(s => LibraryBuilder.TrackOf(s, albums)).DistinctBy(t => t.Id).ToList();
+        if (added.Count == 0) return;
+        Library = LibraryBuilder.Group([.. Library.Tracks, .. added], albums);
+        Log.Write($"[library] {added.Count} songs from playlists or the queue were not in the library: added");
     }
 
     private Playlist LikedPlaylist() => new()
@@ -154,6 +172,7 @@ public sealed class MusicService : IDisposable
                 LibraryChanged?.Invoke();
             }
             var server = await Client.GetPlaylistsAsync(Remember);
+            MergeUnknown();
             Playlists = [LikedPlaylist(), LibraryPlaylist(), .. server];
             PlaylistsChanged?.Invoke();
         }
@@ -402,6 +421,7 @@ public sealed class MusicService : IDisposable
     {
         if (Library.Track(trackId) is not { } seed) return false;
         var ids = (await Client.SimilarSongsAsync(trackId, Remember)).Where(id => id != trackId).ToList();
+        MergeUnknown();
         if (ids.Count == 0)
             ids = Library.Tracks.Where(x => x.Id != trackId && (x.ArtistId == seed.ArtistId || x.Genre == seed.Genre)).OrderBy(_ => Random.Shared.Next()).Take(50).Select(x => x.Id).ToList();
         if (ids.Count == 0) return false;
@@ -441,7 +461,12 @@ public sealed class MusicService : IDisposable
 
     public DateTimeOffset QueueSavedAt => _savedAt;
 
-    public Task<RemoteQueue?> RemoteQueueAsync() => Client.GetPlayQueueAsync(Remember);
+    public async Task<RemoteQueue?> RemoteQueueAsync()
+    {
+        var q = await Client.GetPlayQueueAsync(Remember);
+        MergeUnknown();
+        return q;
+    }
 
     /// <summary>Takes over a saved queue: its song at its position, paused.</summary>
     public void ContinueQueue(RemoteQueue q, string label)
@@ -450,14 +475,38 @@ public sealed class MusicService : IDisposable
     }
 
     // ---------------------------------------------------------------- likes and playlists
+    // likes wanted but not yet sent, and the songs whose like is on its way to the server
+    private readonly Dictionary<string, bool> _likeWanted = [];
+    private readonly HashSet<string> _likeSending = [];
+
+    /// <summary>
+    /// Likes or unlikes a song. The heart changes at once and the server is told after. One request per song is on its way
+    /// at a time and the last wish is sent last (liking and unliking quickly could otherwise reach the server the other way
+    /// round); if the server refuses or cannot be reached, the heart shows what the server has.
+    /// </summary>
     public async Task SetLikedAsync(string trackId, bool liked)
     {
-        if (Library.Track(trackId) is not { } t) return;
-        await Client.SetStarredAsync(trackId, liked);
-        t.Liked = liked;
-        t.StarredAt = liked ? DateTimeOffset.Now : null;
-        TrackChanged?.Invoke(t);
-        RebuildSpecialPlaylists();
+        if (Library.Track(trackId) is not { } t || t.Liked == liked) return;
+        var before = t.StarredAt;
+        void Show(bool on, DateTimeOffset? at) { t.Liked = on; t.StarredAt = at; TrackChanged?.Invoke(t); RebuildSpecialPlaylists(); }
+        Show(liked, liked ? DateTimeOffset.Now : null);
+        _likeWanted[trackId] = liked;
+        if (!_likeSending.Add(trackId)) return; // the request on its way sends this wish after it
+        bool server = !liked; // what the server has
+        try
+        {
+            while (_likeWanted[trackId] is var want && want != server)
+            {
+                await Client.SetStarredAsync(trackId, want);
+                server = want;
+            }
+        }
+        catch
+        {
+            if (Library.Track(trackId) is { } now && now.Liked != server) { t = now; Show(server, server ? before ?? DateTimeOffset.Now : null); }
+            throw;
+        }
+        finally { _likeSending.Remove(trackId); _likeWanted.Remove(trackId); }
     }
 
     private Playlist Own(string id) =>
@@ -467,6 +516,7 @@ public sealed class MusicService : IDisposable
     {
         string? id = await Client.CreatePlaylistAsync(name, trackIds);
         var server = await Client.GetPlaylistsAsync(Remember);
+        MergeUnknown();
         Playlists = [LikedPlaylist(), LibraryPlaylist(), .. server];
         PlaylistsChanged?.Invoke();
         return (id is not null ? Playlist(id) : server.Where(p => p.Name == name).MaxBy(p => p.Changed)) ?? throw new InvalidOperationException("歌单已创建，但没能读回来。");

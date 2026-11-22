@@ -21,6 +21,9 @@ public interface IShell
     void ShowProperties(Track track);
     Task<string?> AskText(string title, string label, string value);
     Task<bool> Confirm(string title, string message, string action);
+    /// <summary>The interface zoom (1 = 100 %).</summary>
+    double Zoom { get; }
+    void SetZoom(double zoom);
 }
 
 /// <summary>A page in the main panel. Subscriptions made with <see cref="On"/> end when the page is left.</summary>
@@ -37,10 +40,12 @@ public abstract class View : UserControl
     public void Leave() { foreach (var c in _cleanups) c(); _cleanups.Clear(); OnLeave(); }
     protected virtual void OnLeave() { }
 
+    private static Border NewTint() => new() { Background = Ui.Tint(Ui.NeutralTint), Height = 420, VerticalAlignment = VerticalAlignment.Top, IsHitTestVisible = false };
+
     /// <summary>The page body: a scroller with the page's tint behind the top of the content.</summary>
     protected (ScrollViewer Scroller, StackPanel Body, Border TintLayer) Scaffold(double padding = 24)
     {
-        var tint = new Border { Background = Ui.Tint(Ui.NeutralTint), Height = 420, VerticalAlignment = VerticalAlignment.Top, IsHitTestVisible = false };
+        var tint = NewTint();
         var body = new StackPanel { Padding = new Thickness(padding, padding, padding, 32), Spacing = 18 };
         var grid = new Grid();
         grid.Children.Add(tint);
@@ -50,10 +55,44 @@ public abstract class View : UserControl
         return (scroller, body, tint);
     }
 
-    /// <summary>Tints the page from an album's cover, once its colour is known.</summary>
+    private Grid? _listPage;
+    private double _listPadding;
+
+    /// <summary>
+    /// The body of a page that is mostly one long list of songs (an album, a playlist, a genre, search results). The list is
+    /// the page's scroller, so only the rows on screen (and a screen or so around them) exist, even for thousands of songs;
+    /// <c>Head</c> scrolls above the rows as the list's header, and the tint follows. Finish it with <see cref="ShowList"/>.
+    /// </summary>
+    protected (StackPanel Head, Border TintLayer) ListScaffold(double padding = 24)
+    {
+        var tint = NewTint();
+        var head = new StackPanel { Spacing = 18, Padding = new Thickness(0, padding, 0, 0) };
+        _listPage = new Grid();
+        _listPage.Children.Add(tint);
+        // the tint moves up with the rows: keep it inside the page
+        _listPage.SizeChanged += (s, e) => ((Grid)s).Clip = new RectangleGeometry { Rect = new(0, 0, e.NewSize.Width, e.NewSize.Height) };
+        _listPadding = padding;
+        Content = _listPage;
+        return (head, tint);
+    }
+
+    /// <summary>Puts the list (with <paramref name="head"/> above and <paramref name="foot"/> below its rows) in the page.</summary>
+    protected void ShowList(TrackList list, StackPanel head, Border tint, UIElement? foot = null)
+    {
+        list.AsPage(head, foot, _listPadding);
+        _listPage!.Children.Add(list);
+        list.ScrollWith(tint);
+    }
+
+    /// <summary>Tints the page from an album's cover, once its colour is known: the colour fades in over the neutral one
+    /// (foobar2k's .6 s), moving with the page.</summary>
     protected async void TintFrom(Border layer, string? albumId)
     {
-        if (await ArtworkColor.GetAsync(Music.CoverUrl(albumId, 64)) is { } c) layer.Background = Ui.Tint(c);
+        if (await ArtworkColor.GetAsync(Music.CoverUrl(albumId, 64)) is not { } c) return;
+        var over = new Border { Background = Ui.Tint(c), Opacity = Motion.Enabled ? 0 : 1 };
+        Motion.OpacityFade(over, Motion.Tint);
+        layer.Child = over;
+        over.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => over.Opacity = 1);
     }
 }
 
@@ -79,11 +118,11 @@ public static class Cards
     public static string? PlaylistCover(MusicService music, Playlist? p) =>
         p is null || p.Kind is PlaylistKind.Liked or PlaylistKind.Library ? null : music.CoverUrl(p.TrackIds.Select(id => music.Library.Track(id)?.AlbumId).FirstOrDefault(a => a is not null));
 
-    /// <summary>Liked songs and the library show a colour and a glyph, not art.</summary>
+    /// <summary>Liked songs and the library show a gradient and a glyph, not art (foobar2k's special covers).</summary>
     public static void Decorate(Artwork art, Playlist? p)
     {
-        if (p?.Kind == PlaylistKind.Liked) art.Special(Ui.Rgb(0xC7, 0x8B, 0x00), Glyphs.HeartFill, Ui.Rgb(0x11, 0x14, 0x16));
-        else if (p?.Kind == PlaylistKind.Library) art.Special(Ui.Rgb(0x34, 0x42, 0x4b), Glyphs.Library, Ui.Rgb(0xEF, 0xEB, 0xE5));
+        if (p?.Kind == PlaylistKind.Liked) art.Special([Ui.Rgb(0x8a, 0x62, 0x00), Ui.Rgb(0xf8, 0xb7, 0x00), Ui.Rgb(0xff, 0xe0, 0x8a)], Glyphs.HeartFill, Ui.ColorOf("OnAccentColor"));
+        else if (p?.Kind == PlaylistKind.Library) art.Special([Ui.Rgb(0x2c, 0x3a, 0x42), Ui.Rgb(0x5f, 0x7b, 0x88)], Glyphs.Library, Ui.Rgb(0xe8, 0xee, 0xf0));
     }
 
     public static string RouteOf(CardRef r) => $"{r.Type}:{r.Id}";
@@ -96,7 +135,7 @@ public static class Cards
         if (r.Type == "playlist") Decorate(art, music.Playlist(r.Id));
         var play = Ui.PlayButton($"播放 {title}", (_, _) => music.TogglePlayContext(r.Type, r.Id), 44);
         play.HorizontalAlignment = HorizontalAlignment.Right; play.VerticalAlignment = VerticalAlignment.Bottom; play.Margin = new Thickness(0, 0, 8, 8);
-        play.Opacity = music.IsContext(r.Type, r.Id) ? 1 : 0;
+        Motion.Reveal(play, music.IsContext(r.Type, r.Id));
         Ui.SetPlaying(play, music.IsContextPlaying(r.Type, r.Id), title);
         var artBox = new Grid { Width = size, Height = size };
         artBox.Children.Add(art); artBox.Children.Add(play);
@@ -108,6 +147,8 @@ public static class Cards
             Content = Ui.Column(10, artBox, text), Padding = new Thickness(10), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
             BorderThickness = new Thickness(0), CornerRadius = new CornerRadius(8), HorizontalContentAlignment = HorizontalAlignment.Left, Width = size + 20,
         };
+        open.Resources["ButtonBackgroundPointerOver"] = Ui.Brush("HoverBrush");
+        open.Resources["ButtonBackgroundPressed"] = Ui.Brush("HoverBrush");
         AutomationProperties.SetName(open, title);
         open.Click += (_, _) => shell.Navigate(RouteOf(r));
         var root = new Grid();
@@ -115,9 +156,10 @@ public static class Cards
         // the Play button sits over the card's art, outside the card button (a button in a button is not reachable)
         var overlay = new Grid { Width = size, Height = size, Margin = new Thickness(10), HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
         artBox.Children.Remove(play); overlay.Children.Add(play); root.Children.Add(overlay);
-        root.PointerEntered += (_, _) => play.Opacity = 1;
-        root.PointerExited += (_, _) => play.Opacity = music.IsContext(r.Type, r.Id) ? 1 : 0;
-        play.GotFocus += (_, _) => play.Opacity = 1;
+        root.PointerEntered += (_, _) => { Motion.Reveal(play, true); Motion.Lift(art, true); };
+        root.PointerExited += (_, _) => { Motion.Reveal(play, music.IsContext(r.Type, r.Id) || play.FocusState != FocusState.Unfocused); Motion.Lift(art, false); };
+        play.GotFocus += (_, _) => Motion.Reveal(play, true);
+        play.LostFocus += (_, _) => Motion.Reveal(play, music.IsContext(r.Type, r.Id));
         void Sync() { Ui.SetPlaying(play, music.IsContextPlaying(r.Type, r.Id), title); titleText.Foreground = music.IsContext(r.Type, r.Id) ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextPrimaryBrush"); }
         root.Loaded += (_, _) => music.PlayerChanged += Sync;
         root.Unloaded += (_, _) => music.PlayerChanged -= Sync;
@@ -137,7 +179,8 @@ public static class Cards
             head.Children.Add(all);
         }
         var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Margin = new Thickness(-10, 0, 0, 0) };
-        foreach (var r in refs.Take(limit)) row.Children.Add(Card(music, shell, r));
+        int index = 0;
+        foreach (var r in refs.Take(limit)) { var card = Card(music, shell, r); Motion.Stagger(card, index++); row.Children.Add(card); }
         var scroller = new ScrollViewer { Content = row, HorizontalScrollMode = ScrollMode.Enabled, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalScrollMode = ScrollMode.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled };
         var shelf = Ui.Column(8, head, scroller);
         AutomationProperties.SetName(shelf, title);
@@ -145,12 +188,14 @@ public static class Cards
         return shelf;
     }
 
-    /// <summary>A wrapping grid of cards (show-all pages, an artist's releases, search results by kind).</summary>
+    /// <summary>A wrapping grid of cards (show-all pages, an artist's releases, search results by kind). Only the cards in
+    /// view (and a screen or so around) are built: "最近添加" of a large library is every album.</summary>
     public static FrameworkElement Grid(MusicService music, IShell shell, IEnumerable<CardRef> refs)
     {
-        var wrap = new VariableSizedWrapGrid { Orientation = Orientation.Horizontal, ItemWidth = 192, ItemHeight = 250, Margin = new Thickness(-10, 0, 0, 0) };
-        foreach (var r in refs) wrap.Children.Add(Card(music, shell, r));
-        return wrap;
+        var grid = Ui.Repeater<CardRef>(new UniformGridLayout { MinItemWidth = 188, MinItemHeight = 250, MinColumnSpacing = 4, MinRowSpacing = 0 }, r => Card(music, shell, r), stagger: true);
+        grid.Margin = new Thickness(-10, 0, 0, 0);
+        grid.ItemsSource = refs.ToList();
+        return grid;
     }
 }
 
@@ -166,6 +211,7 @@ public static class Hero
         {
             art.Shadow = new ThemeShadow();
             art.Translation = new System.Numerics.Vector3(0, 0, 24);
+            Motion.ScaleIn(art, 0.9f); // the cover comes forward as the page fades in
             g.Children.Add(art);
         }
         var text = new StackPanel { VerticalAlignment = VerticalAlignment.Bottom, Spacing = 8 };
@@ -194,12 +240,14 @@ public static class Hero
     {
         var play = Ui.PlayButton($"播放 {name}", (_, _) => music.TogglePlayContext(kind, id));
         play.Name = "PagePlay";
-        var shuffle = Ui.IconButton(Glyphs.Shuffle, $"随机播放 {name}", (_, _) => music.PlayContext(kind, id, shuffle: true), 44, 20);
-        var row = Ui.Row(20, play, shuffle);
+        var shuffle = Ui.IconButton(Glyphs.Shuffle, $"随机播放 {name}", (_, _) => music.PlayContext(kind, id, shuffle: true), 48, 20);
+        Motion.Press(shuffle);
+        var row = Ui.Row(16, play, shuffle);
         if (more is not null)
         {
-            var m = Ui.IconButton(Glyphs.More, $"{name} 的更多选项", null, 44, 20);
+            var m = Ui.IconButton(Glyphs.More, $"{name} 的更多选项", null, 48, 20);
             m.Flyout = more;
+            Motion.Press(m);
             row.Children.Add(m);
         }
         row.Margin = new Thickness(0, 8, 0, 4);
@@ -224,7 +272,11 @@ public sealed class Chips : StackPanel
         foreach (var (v, l) in options)
         {
             var b = new ToggleButton { Content = l, Style = Ui.Style("ChipStyle"), IsChecked = v == value, Tag = v };
-            Ui.QuietChecked(b, Ui.Brush("TextPrimaryBrush"), Ui.Brush("OnAccentBrush")); // the chosen chip: light, as in Spotify
+            Ui.QuietChecked(b, Ui.Brush("TextPrimaryBrush"), Ui.Brush("PanelBrush")); // the chosen chip: light, as in foobar2k
+            b.Resources["ToggleButtonBackgroundPointerOver"] = Ui.Brush("RaisedHiBrush");
+            b.Resources["ToggleButtonBackgroundPressed"] = Ui.Brush("RaisedHiBrush");
+            b.Resources["ToggleButtonForegroundPointerOver"] = Ui.Brush("TextPrimaryBrush");
+            b.Resources["ToggleButtonForegroundPressed"] = Ui.Brush("TextPrimaryBrush");
             b.Click += (_, _) =>
             {
                 Value = b.IsChecked == true ? v : null;

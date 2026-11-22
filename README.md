@@ -19,6 +19,7 @@ npm run demo             # 演示服务器 + Windows 程序（第一次会先编
 - 键盘上的播放、暂停、上一首、下一首键，以及音量浮窗里的媒体卡片都能控制它。
 - 歌曲的“更多选项”→ **开始电台**：从这首歌开始，接着是相似的歌。
 - 艺人页底部的**简介**；右栏的歌词卡片和“全屏查看歌词”。
+- **界面缩放**：设置 → 显示（80%–125%），或 Ctrl + = / Ctrl + - / Ctrl + 0，像浏览器一样整窗重新排版。
 - **换设备接着听**：播一会儿再暂停，然后用 `npm run demo:browser` 在浏览器里（网页版客户端）登录同一个演示服务器，会停在同一首歌的同一位置，并提示“接着播放”。
 
 ## 连接你自己的 Navidrome
@@ -57,7 +58,7 @@ npm run demo             # 演示服务器 + Windows 程序（第一次会先编
 | `tools/e2e/` | 静默的端到端测试：`acceptance.mjs`（多轮验收）、`e2e.mjs`（测试实例、管道、截图） |
 | `tools/demo.mjs` | 一键演示 |
 | `web/` | 网页版客户端（同一套功能的浏览器版本，演示服务器在 `/` 提供它）；`tools/check-web.mjs` 是它的验收 |
-| `assets/` | 图标（`tools/icon.mjs` 生成） |
+| `assets/` | 图标（`tools/icon.mjs` 生成，与 foobar2k 同一款：深色底上的琥珀色圆环和播放符号）。`node tools/icon.mjs preview` 生成所有候选设计的对照图，`node tools/icon.mjs build <设计>` 换图标 |
 
 ## 编译
 
@@ -68,11 +69,13 @@ dotnet test tests/CreeperUX.Music.Core.Tests
 
 程序是不打包、自带运行库的 WinUI 3 应用（与 Lumen 相同的设置），编译输出可以直接运行。数据目录是 `%LOCALAPPDATA%\CreeperUX Music`（设置、日志）。
 
+界面的颜色、字体和动效时长取自 foobar2k 用的 CreeperUX 设计令牌（`vendor/creeperux-gui/tokens.json`，深色模式），写在 `App.xaml` 和 `Controls/Motion.cs` 里。图标也是 foobar2k 那一套（CreeperUX 套件的 24 px 网格、1.6 px 圆头线条，播放控件实心）：`node tools/kit-icons.mjs` 从 fb2k 的 `vendor/creeperux-gui` 读出图标，再由 `tools/kit-outline`（调用 Windows 自带的 Direct2D）把 1.6 px 的圆头线条加粗成填充轮廓，和实心部分合并成一条路径，写进 `Controls/KitIcons.g.cs`。程序用 XAML 自带的 `PathIcon` 显示它们，颜色像文字一样从按钮继承，悬停、按下、选中都由框架处理；菜单里用的也是同一套图标。标题字体 Chakra Petch（SIL OFL 1.1，许可在 `Assets/Fonts/`）是用 Windows 自带的 DirectWrite 从 foobar2k 的 WOFF2 解包成 TTF 的；数字字体 Share Tech Mono 保留了字体名，转换后的版本不能沿用原名，所以这里仍用 Cascadia Mono。
+
 ## 验收
 
 ```bash
 npm install
-dotnet test tests/CreeperUX.Music.Core.Tests     # 35 项：队列逻辑、歌词、格式、令牌，以及对演示服务器的集成测试
+dotnet test tests/CreeperUX.Music.Core.Tests     # 43 项：队列逻辑、歌词、格式、令牌，以及对演示服务器的集成测试
 npm run check                                   # Windows 程序的多轮验收（本机架构；--arch=x64|ARM64）
 npm run check:web                               # 网页版客户端
 ```
@@ -84,6 +87,10 @@ npm run check:web                               # 网页版客户端
 - 截图由程序自己渲染（RenderTargetBitmap），保存在 `tools/e2e/.work/shots/acc-*.png`。每一轮结束都检查测试窗口仍然隐藏，并且没有成为前台窗口。
 
 `node tools/e2e/stress-load.mjs` 连续切换 40 首歌，统计每首从载入到开始播放的时间。这项检查发现过一个真实的问题：旧歌曲的 HTTP 连接没有释放，连续切歌时会越积越多；现在中位数约 0.55 秒，最长不到 0.81 秒。
+
+`node tools/e2e/perf.mjs` 用 8 倍的演示曲库（2344 首、272 张专辑，接近真实曲库的规模）测界面线程被占住多久：每 50 毫秒发一次 ping，回得慢就是窗口卡住了。它发现过真实曲库上的卡顿：歌曲列表和音乐库侧栏一次建出所有行，打开“媒体库 · 全部歌曲”会卡 8 秒、内存涨到 1.2 GB；服务器的回应也在界面线程上解析。现在列表、卡片网格和侧栏只建出看得见的部分，解析放在后台线程，每一步最长卡顿在 0.3 秒以内（含约 40 毫秒的测量开销），内存约 370 MB。
+
+验收里还有一项“播放时打开别的专辑，封面照样马上去取”：XAML 自带的图片下载走 WinINet，和从同一台服务器传来的音频流共用很少的几个连接，播放期间封面会一直加载不出来。现在封面由程序自己下载（`Controls/Covers.cs`，.NET HttpClient，同一地址只请求一次，最近用过的放在 48 MB 的内存缓存里），并按它在屏幕上实际占的像素（尺寸 × 显示缩放 × 界面缩放）向服务器要 64 / 128 / 256 / 512 / 1024 中够用的一档，不会把小图放大显示。
 
 验收分十轮：首次启动与登录、每个页面（含可访问性审查和切换 60 次页面后的内存检查）、播放（暂停、拖动、计播放次数、无缝切歌、队列、电台、DSD 转码、错误、回放增益、歌词）、歌单增删改、搜索、第二台设备接着听、窄窗口、服务器断开与恢复、系统媒体控制、重启与退出登录。功能检查都会回读服务器状态来确认。
 演示服务器是按 Subsonic / OpenSubsonic 文档写的，**不是 Navidrome 本身**。
@@ -99,3 +106,4 @@ npm run check:web                               # 网页版客户端
 - 只在演示服务器上验证过，还没有在真实的 Navidrome 上跑过（需要你的服务器和测试账号）。
 - 媒体键和锁屏上的媒体卡片只用只读查询确认过（Windows 媒体会话里有这个程序和歌名），真正按键需要在真机上试。
 - 测试截图由程序自己渲染，菜单的弹出动画、真实的鼠标悬停和键盘焦点效果需要在真机上看一遍。
+- 动效（换页淡入、列表行和卡片依次上浮、页面颜色渐变、封面淡入和放大、卡片悬停抬起、播放按钮滑出和回弹、喜欢的弹跳、正在播放的跳动电平条、开关下的圆点、歌词当前行放大变亮）都在合成器上运行，截图只拍到结束状态，手感需要在真机上看。Windows 关闭“动画效果”时，这些都直接显示结果。

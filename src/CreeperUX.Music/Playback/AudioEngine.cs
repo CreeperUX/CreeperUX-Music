@@ -103,7 +103,11 @@ public sealed class AudioEngine : IDisposable
         _player = new MediaPlayer { AudioCategory = MediaPlayerAudioCategory.Media, AutoPlay = false, Volume = _volume, IsMuted = _muted };
         _list = NewList();
         _player.Source = _list;
-        _player.MediaOpened += (_, _) => Do(ApplyPendingSeek);
+        _player.MediaOpened += (_, _) => Do(() =>
+        {
+            if (_loadClock is { } c && _openedAt < 0) _openedAt = c.ElapsedMilliseconds;
+            ApplyPendingSeek();
+        });
         _player.MediaEnded += (_, _) =>
         {
             int g = Volatile.Read(ref _generation);
@@ -212,9 +216,14 @@ public sealed class AudioEngine : IDisposable
             Remember();
             _nudges = 0;
             _loadingSince = autoplay ? DateTime.UtcNow : DateTime.MaxValue;
+            _loadClock = autoplay ? System.Diagnostics.Stopwatch.StartNew() : null; _openedAt = -1;
             if (autoplay) _player.Play();
         });
     }
+
+    // how long the song being loaded took to open and to start (the log)
+    private System.Diagnostics.Stopwatch? _loadClock;
+    private long _openedAt = -1;
 
     /// <summary>Replaces what comes after the current song (the queue changed).</summary>
     public void SetNext(EngineItem? next)
@@ -288,7 +297,10 @@ public sealed class AudioEngine : IDisposable
         if (s == MediaPlaybackState.Playing) ApplyPendingSeek();
         switch (s)
         {
-            case MediaPlaybackState.Playing: SetState(EngineState.Playing); break;
+            case MediaPlaybackState.Playing:
+                if (_loadClock is { } c) { Log.Write($"[engine] {_currentId} playing after {c.ElapsedMilliseconds} ms (opened after {_openedAt} ms)"); _loadClock = null; }
+                SetState(EngineState.Playing);
+                break;
             case MediaPlaybackState.Paused when _state == EngineState.Playing: _wantPlay = false; SetState(EngineState.Paused); break; // the media keys
             case MediaPlaybackState.Opening or MediaPlaybackState.Buffering when _wantPlay: SetState(EngineState.Loading); break;
         }

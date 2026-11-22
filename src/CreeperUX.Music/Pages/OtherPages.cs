@@ -19,12 +19,22 @@ public sealed class SearchPage : View
     public SearchPage(MusicService music, IShell shell, string query) : base(music, shell)
     {
         _query = query.Trim();
-        var (_, body, tint) = Scaffold();
-        tint.Background = Ui.Tint(Ui.Rgb(0x2b, 0x34, 0x39));
-        if (_query.Length == 0) { Browse(body); return; }
+        var searchTint = Ui.Tint(Ui.Rgb(0x2b, 0x34, 0x39));
+        if (_query.Length == 0)
+        {
+            var (_, body, tint) = Scaffold();
+            tint.Background = searchTint;
+            Browse(body);
+            return;
+        }
+        // the results are the head of a list of songs, which fills when "歌曲" is chosen (up to 200: only those in view are built)
+        var (head, listTint) = ListScaffold();
+        listTint.Background = searchTint;
         var status = Ui.Text("正在搜索…", "MutedTextStyle");
-        body.Children.Add(status);
-        _ = Results(body, status);
+        head.Children.Add(status);
+        var songs = new TrackList(music, shell, "search", _query, [], covers: true, label: "歌曲");
+        ShowList(songs, head, listTint);
+        _ = Results(head, status, songs);
     }
 
     private void Browse(StackPanel body)
@@ -68,7 +78,7 @@ public sealed class SearchPage : View
         if (await ArtworkColor.GetAsync(Music.CoverUrl(albumId, 64)) is { } c) tile.Background = new SolidColorBrush(Ui.Shade(c, -0.15));
     }
 
-    private async Task Results(StackPanel body, TextBlock status)
+    private async Task Results(StackPanel body, TextBlock status, TrackList songList)
     {
         SearchResult r;
         try { r = await Music.SearchAsync(_query); }
@@ -93,6 +103,7 @@ public sealed class SearchPage : View
         void Render(string? kind)
         {
             host.Children.Clear();
+            songList.SetIds(kind == "track" ? r.Tracks : []);
             if (kind is null)
             {
                 var top = new Grid { ColumnSpacing = 24 };
@@ -112,8 +123,7 @@ public sealed class SearchPage : View
                 host.Children.Add(Cards.Shelf(Music, Shell, "专辑", r.Albums.Select(id => new CardRef("album", id)).ToList()));
                 host.Children.Add(Cards.Shelf(Music, Shell, "歌单", playlists.Select(id => new CardRef("playlist", id)).ToList()));
             }
-            else if (kind == "track") host.Children.Add(new TrackList(Music, Shell, "search", _query, r.Tracks, covers: true, label: "歌曲"));
-            else host.Children.Add(Cards.Grid(Music, Shell, (kind == "artist" ? r.Artists : kind == "album" ? r.Albums : playlists).Select(id => new CardRef(kind, id))));
+            else if (kind != "track") host.Children.Add(Cards.Grid(Music, Shell, (kind == "artist" ? r.Artists : kind == "album" ? r.Albums : playlists).Select(id => new CardRef(kind, id))));
         }
         chips.Changed += Render;
         Render(null);
@@ -146,20 +156,21 @@ public sealed class CollectionPage : View
 
     public CollectionPage(MusicService music, IShell shell, string kind, string id) : base(music, shell)
     {
-        var (_, body, tint) = Scaffold();
         if (kind == "genre")
         {
+            var (head, genreTint) = ListScaffold();
             _title = id;
             var albums = music.Library.Albums.Where(a => a.Genre == id).ToList();
-            TintFrom(tint, albums.FirstOrDefault()?.Id);
+            TintFrom(genreTint, albums.FirstOrDefault()?.Id);
             var ids = music.Library.Tracks.Where(t => t.Genre == id).OrderByDescending(t => t.PlayCount).Select(t => t.Id).ToList();
-            body.Children.Add(Hero.Build("流派", id, [Hero.Fact($"{albums.Count} 张专辑"), Hero.Fact(Formats.Songs(ids.Count))], null));
-            body.Children.Add(Hero.Actions(music, "genre", id, id, null, sync => On(() => music.PlayerChanged += sync, () => music.PlayerChanged -= sync)));
-            body.Children.Add(Cards.Shelf(music, shell, "专辑", albums.Select(a => new CardRef("album", a.Id)).ToList(), limit: 50));
-            body.Children.Add(Ui.Text("歌曲", "SectionTitleStyle"));
-            body.Children.Add(new TrackList(music, shell, "genre", id, ids, covers: true, label: $"{id} 的歌曲"));
+            head.Children.Add(Hero.Build("流派", id, [Hero.Fact($"{albums.Count} 张专辑"), Hero.Fact(Formats.Songs(ids.Count))], null));
+            head.Children.Add(Hero.Actions(music, "genre", id, id, null, sync => On(() => music.PlayerChanged += sync, () => music.PlayerChanged -= sync)));
+            head.Children.Add(Cards.Shelf(music, shell, "专辑", albums.Select(a => new CardRef("album", a.Id)).ToList(), limit: 50));
+            head.Children.Add(Ui.Text("歌曲", "SectionTitleStyle"));
+            ShowList(new TrackList(music, shell, "genre", id, ids, covers: true, label: $"{id} 的歌曲"), head, genreTint);
             return;
         }
+        var (_, body, tint) = Scaffold();
         var col = HomeShelves.From(music.Library, music.Playlists);
         (string title, IReadOnlyList<CardRef> refs) = id switch
         {
@@ -212,14 +223,30 @@ public sealed class LyricsPage : View
             var line = new Button
             {
                 Content = new TextBlock { Text = l.Text.Length > 0 ? l.Text : "♪", FontSize = 28, FontWeight = Microsoft.UI.Text.FontWeights.Bold, TextWrapping = TextWrapping.Wrap, FontFamily = (FontFamily)Application.Current.Resources["AppDisplayFont"] },
-                Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0), Padding = new Thickness(0), Foreground = Ui.Brush("TextTertiaryBrush"),
+                Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0), Padding = new Thickness(0), Foreground = Ui.Brush("TextPrimaryBrush"),
+                Opacity = Ahead,
             };
+            // a line is lit by its opacity (the change fades); under the pointer it brightens instead of getting a box
+            foreach (var key in new[] { "ButtonBackgroundPointerOver", "ButtonBackgroundPressed" }) line.Resources[key] = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+            foreach (var key in new[] { "ButtonForegroundPointerOver", "ButtonForegroundPressed" }) line.Resources[key] = Ui.Brush("TextPrimaryBrush");
+            Motion.OpacityFade(line);
+            Motion.ScaleFade(line);
+            line.Scale = new System.Numerics.Vector3(Behind, Behind, 1);
+            line.SizeChanged += (_, e) => line.CenterPoint = new System.Numerics.Vector3(0, (float)e.NewSize.Height / 2, 0); // from its start
+            int index = _lines.Children.Count;
+            line.PointerEntered += (_, _) => line.Opacity = Math.Max(line.Opacity, 0.85);
+            line.PointerExited += (_, _) => line.Opacity = OpacityOf(index);
             AutomationProperties.SetName(line, l.Text.Length > 0 ? l.Text : "间奏");
             if (l.Time is { } time) line.Click += (_, _) => Music.Seek(time);
             _lines.Children.Add(line);
         }
         Follow(Music.Position);
     }
+
+    private const double Sung = 0.6, Ahead = 0.38; // the lit line is 1
+    private const float Behind = 0.94f;              // the other lines' size: the sung one comes forward
+
+    private double OpacityOf(int line) => line == _current ? 1 : line < _current ? Sung : Ahead;
 
     private void Follow(double position)
     {
@@ -228,7 +255,7 @@ public sealed class LyricsPage : View
         if (at == _current) return;
         _current = at;
         for (int i = 0; i < _lines.Children.Count; i++)
-            if (_lines.Children[i] is Button b) b.Foreground = i == at ? Ui.Brush("TextPrimaryBrush") : i < at ? Ui.Brush("TextSecondaryBrush") : Ui.Brush("TextTertiaryBrush");
+            if (_lines.Children[i] is Button b) { b.Opacity = OpacityOf(i); float s = i == at ? 1 : Behind; b.Scale = new System.Numerics.Vector3(s, s, 1); }
         if (at >= 0 && _lines.Children[at] is FrameworkElement el)
         {
             _scroller.UpdateLayout();
@@ -245,7 +272,7 @@ public sealed class SettingsPage : View
 
     public SettingsPage(MusicService music, IShell shell, Func<Task> signOut) : base(music, shell)
     {
-        var (_, body, _) = Scaffold(32);
+        var (_, body, _) = Scaffold();
         body.MaxWidth = 820; body.HorizontalAlignment = HorizontalAlignment.Left;
         var heading = Ui.Text("设置", "PageTitleStyle");
         AutomationProperties.SetHeadingLevel(heading, AutomationHeadingLevel.Level1);
@@ -281,6 +308,14 @@ public sealed class SettingsPage : View
         void SyncPlay() { order.SelectedIndex = (int)music.Queue.Order; stop.IsOn = music.Queue.StopAfterCurrent; }
         On(() => music.PlayerChanged += SyncPlay, () => music.PlayerChanged -= SyncPlay);
 
+        var look = Section("显示", "整个窗口一起缩放，像浏览器的缩放一样；也可以按 Ctrl + = 和 Ctrl + -，Ctrl + 0 恢复 100%。");
+        var zoom = new RadioButtons { Header = "界面缩放", MaxColumns = 5 };
+        foreach (var z in Zooms) zoom.Items.Add(new RadioButton { Content = $"{z * 100:0}%", Tag = z });
+        void SyncZoom() => zoom.SelectedIndex = Array.FindIndex(Zooms, z => Math.Abs(z - shell.Zoom) < 0.001);
+        SyncZoom();
+        zoom.SelectionChanged += (_, _) => { if (zoom.SelectedItem is RadioButton { Tag: double z } && Math.Abs(z - shell.Zoom) > 0.001) shell.SetZoom(z); };
+        look.Children.Add(zoom);
+
         var output = Section("输出设备", "这台电脑上的音频输出设备。选“系统默认设备”时跟随 Windows 的设置。");
         var devices = new ComboBox { Header = "输出设备", MinWidth = 360 };
         output.Children.Add(devices);
@@ -297,7 +332,7 @@ public sealed class SettingsPage : View
         acc.Children.Add(signOutButton);
 
         var keys = Section("键盘快捷键");
-        foreach (var (k, what) in new[] { ("空格", "播放 / 暂停"), ("Ctrl + →  /  Ctrl + ←", "下一首 / 上一首"), ("Ctrl + ↑  /  Ctrl + ↓", "音量"), ("Ctrl + K  或  /", "搜索"), ("Alt + ←", "后退"), ("Alt + Shift + B", "喜欢正在播放的歌曲"), ("媒体键", "播放、暂停、上一首、下一首") })
+        foreach (var (k, what) in new[] { ("空格", "播放 / 暂停"), ("Ctrl + →  /  Ctrl + ←", "下一首 / 上一首"), ("Ctrl + ↑  /  Ctrl + ↓", "音量"), ("Ctrl + K  或  /", "搜索"), ("Alt + ←", "后退"), ("Alt + Shift + B", "喜欢正在播放的歌曲"), ("Ctrl + =  /  Ctrl + -  /  Ctrl + 0", "放大 / 缩小 / 恢复 100%"), ("媒体键", "播放、暂停、上一首、下一首") })
             keys.Children.Add(Fact(k, what));
 
         var about = Section("关于");
@@ -308,6 +343,9 @@ public sealed class SettingsPage : View
         var note = Ui.Text("媒体库文件夹、转码、用户和 Last.fm 在 Navidrome 自己的网页里设置。", "MutedTextStyle"); note.TextWrapping = TextWrapping.Wrap;
         about.Children.Add(note);
     }
+
+    /// <summary>The zoom steps offered (the keyboard steps through the same ones).</summary>
+    public static readonly double[] Zooms = [0.8, 0.9, 1.0, 1.1, 1.25];
 
     private static Grid Fact(string key, string value)
     {

@@ -12,23 +12,31 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- The title bar holds the top bar: brand, Home and search in the middle, connection / settings / panel at the end -->
-        <TitleBar x:Name="AppTitleBar" Height="60" IsBackButtonVisible="False" IsPaneToggleButtonVisible="False">
-            <TitleBar.LeftHeader>
-                <StackPanel Orientation="Horizontal" Spacing="10" Margin="16,0,8,0" VerticalAlignment="Center">
-                    <Image Source="ms-appx:///Assets/Logo-64.png" Width="26" Height="26" />
-                    <TextBlock x:Name="BrandName" VerticalAlignment="Center" FontSize="17" FontWeight="Bold" FontFamily="{StaticResource AppDisplayFont}">
-                        <Run Text="CreeperUX " /><Run Text="Music" Foreground="{StaticResource AccentTextBrush}" />
-                    </TextBlock>
-                </StackPanel>
-            </TitleBar.LeftHeader>
-            <TitleBar.Content>
-                <StackPanel x:Name="TopCenter" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center" />
-            </TitleBar.Content>
-            <TitleBar.RightHeader>
-                <StackPanel x:Name="TopEnd" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center" Margin="0,0,8,0" />
-            </TitleBar.RightHeader>
-        </TitleBar>
+        <!--
+            The title bar holds the top bar, as foobar2k's (64 px): the brand, its mark on the same line as the library's
+            contents below; Home (48) and the search pill (48) centred on the window, not just between the two ends; the
+            connection, settings and the panel toggle (36 each, 6 apart) before the window buttons.
+        -->
+        <!--
+            (Its own grid rather than WinUI's TitleBar control, which leaves the window buttons twice the room they take at
+            200 % and so pushed the middle off centre.) The two sides are equal columns, so the middle is the window's middle;
+            the window buttons' room (AppWindow.TitleBar.RightInset) is kept free at the end of the right one.
+        -->
+        <Grid x:Name="TopBar" Height="64" Background="Transparent">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <StackPanel x:Name="Brand" Orientation="Horizontal" Spacing="10" Margin="24,0,16,0" VerticalAlignment="Center" HorizontalAlignment="Left">
+                <Image Source="ms-appx:///Assets/Logo-64.png" Width="26" Height="26" />
+                <TextBlock x:Name="BrandName" VerticalAlignment="Center" FontSize="17" FontWeight="SemiBold" FontFamily="{StaticResource AppDisplayFont}">
+                    <Run Text="CreeperUX " /><Run Text="Music" Foreground="{StaticResource AccentTextBrush}" />
+                </TextBlock>
+            </StackPanel>
+            <StackPanel x:Name="TopCenter" Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" />
+            <StackPanel x:Name="TopEnd" Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,12,0" />
+        </Grid>
 
         <Grid x:Name="Panels" Grid.Row="1" Margin="8,0,8,0" ColumnSpacing="8">
             <Grid.ColumnDefinitions>
@@ -46,6 +54,7 @@
         <!-- Signed out: the sign-in page covers the panels and the bar -->
         <Border x:Name="LoginHost" Grid.Row="1" Grid.RowSpan="2" Background="{StaticResource AppBackgroundBrush}" Visibility="Collapsed" />
 
-        <StackPanel x:Name="ToastHost" Grid.Row="1" Grid.RowSpan="2" VerticalAlignment="Bottom" HorizontalAlignment="Center" Margin="0,0,0,104" Spacing="8" />
+        <!-- toasts: where the kit puts them, the bottom right corner (here above the playback bar) -->
+        <StackPanel x:Name="ToastHost" Grid.Row="1" Grid.RowSpan="2" VerticalAlignment="Bottom" HorizontalAlignment="Right" Margin="0,0,16,100" Spacing="8" />
     </Grid>
 </Window>

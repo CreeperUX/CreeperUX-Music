@@ -74,7 +74,9 @@ public sealed class HomePage : View
         name.VerticalAlignment = VerticalAlignment.Center;
         var play = Ui.PlayButton($"播放 {title}", (_, _) => Music.TogglePlayContext(r.Type, r.Id), 36);
         play.Margin = new Thickness(0, 0, 12, 0);
-        var g = new Grid { Background = Ui.Brush("HoverBrush"), CornerRadius = new CornerRadius(6), ColumnSpacing = 12 };
+        // foobar2k's quick tiles: the text colour at 9 %, 17 % under the pointer
+        var g = new Grid { Background = Ui.Brush("SurfaceBrush"), CornerRadius = new CornerRadius(6), ColumnSpacing = 12 };
+        Motion.BrushFade(g);
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         g.ColumnDefinitions.Add(new ColumnDefinition());
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -90,7 +92,8 @@ public sealed class HomePage : View
             bool current = Music.IsContext(r.Type, r.Id);
             Ui.SetPlaying(play, Music.IsContextPlaying(r.Type, r.Id), title);
             name.Foreground = current ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextPrimaryBrush");
-            play.Opacity = hover || current || play.FocusState != FocusState.Unfocused ? 1 : 0;
+            g.Background = hover || play.FocusState != FocusState.Unfocused ? Ui.Brush("SurfaceHoverBrush") : Ui.Brush("SurfaceBrush");
+            Motion.Reveal(play, hover || current || play.FocusState != FocusState.Unfocused);
         }
         g.PointerEntered += (_, _) => { hover = true; Sync(); };
         g.PointerExited += (_, _) => { hover = false; Sync(); };
@@ -109,8 +112,8 @@ public sealed class AlbumPage : View
 
     public AlbumPage(MusicService music, IShell shell, string id) : base(music, shell)
     {
-        var (_, body, tint) = Scaffold();
-        if (music.Library.Album(id) is not { } a) { body.Children.Add(Ui.Text("找不到这张专辑。", "SectionTitleStyle")); return; }
+        if (music.Library.Album(id) is not { } a) { Scaffold().Body.Children.Add(Ui.Text("找不到这张专辑。", "SectionTitleStyle")); return; }
+        var (body, tint) = ListScaffold();
         _title = a.Title;
         TintFrom(tint, a.Id);
         double total = a.TrackIds.Sum(t => music.Library.Track(t)?.Duration ?? 0);
@@ -123,8 +126,13 @@ public sealed class AlbumPage : View
         more.Items.Add(Ui.Item("查看艺人", Glyphs.Artist, () => shell.Navigate($"artist:{a.ArtistId}")));
         body.Children.Add(Hero.Actions(music, "album", a.Id, a.Title, more, sync => On(() => music.PlayerChanged += sync, () => music.PlayerChanged -= sync)));
         if (first is not null) body.Children.Add(Ui.Text(Formats.Quality(first) + (first.IsHiRes ? " · Hi-Res" : ""), "FigureTextStyle"));
-        body.Children.Add(new TrackList(music, shell, "album", a.Id, a.TrackIds, showAlbum: false, label: $"{a.Title} 的歌曲"));
-        if (a.Label.Length > 0 || a.Year > 0) body.Children.Add(Ui.Text($"{(a.Year > 0 ? $"发行于 {a.Year} 年" : "")}{(a.Label.Length > 0 ? $"  ©  {a.Label}" : "")}", "MutedTextStyle"));
+        TextBlock? label = null;
+        if (a.Label.Length > 0 || a.Year > 0)
+        {
+            label = Ui.Text($"{(a.Year > 0 ? $"发行于 {a.Year} 年" : "")}{(a.Label.Length > 0 ? $"  ©  {a.Label}" : "")}", "MutedTextStyle");
+            label.Margin = new Thickness(0, 18, 0, 0);
+        }
+        ShowList(new TrackList(music, shell, "album", a.Id, a.TrackIds, showAlbum: false, label: $"{a.Title} 的歌曲"), body, tint, label);
     }
 }
 
@@ -136,18 +144,20 @@ public sealed class PlaylistPage : View
 
     public PlaylistPage(MusicService music, IShell shell, string id) : base(music, shell)
     {
-        var (_, body, tint) = Scaffold();
-        if (music.Playlist(id) is not { } p) { body.Children.Add(Ui.Text("找不到这个歌单。", "SectionTitleStyle")); return; }
+        if (music.Playlist(id) is not { } p) { Scaffold().Body.Children.Add(Ui.Text("找不到这个歌单。", "SectionTitleStyle")); return; }
+        var (body, tint) = ListScaffold();
         _title = p.Name;
         var ids = p.TrackIds;
-        if (p.Kind == PlaylistKind.Liked) tint.Background = Ui.Tint(Ui.Rgb(0x6b, 0x4e, 0x0a));
-        else if (p.Kind == PlaylistKind.Library) tint.Background = Ui.Tint(Ui.Rgb(0x34, 0x42, 0x4b));
+        if (p.Kind == PlaylistKind.Liked) tint.Background = Ui.Tint(Ui.Rgb(0x8a, 0x62, 0x00)); // the special covers' colours
+        else if (p.Kind == PlaylistKind.Library) tint.Background = Ui.Tint(Ui.Rgb(0x3c, 0x4f, 0x59));
         else TintFrom(tint, music.Library.Track(ids.FirstOrDefault())?.AlbumId);
         var art = new Artwork(220, false, Glyphs.Playlist, 8) { Url = Cards.PlaylistCover(music, p) };
         Cards.Decorate(art, p);
         string kind = p.Kind switch { PlaylistKind.Library => "媒体库", PlaylistKind.ReadOnly => "歌单（只读）", _ => "歌单" };
-        double total = ids.Sum(t => music.Library.Track(t)?.Duration ?? 0);
-        body.Children.Add(Hero.Build(kind, p.Name, [Hero.Fact(p.Owner, strong: true), Hero.Fact($"{Formats.Songs(ids.Count)}，{Formats.LongDuration(total)}")], art,
+        // "12 首歌曲，约 48 分钟"; an empty playlist has no length
+        string Size(IReadOnlyList<string> songs) => songs.Count == 0 ? Formats.Songs(0) : $"{Formats.Songs(songs.Count)}，{Formats.LongDuration(songs.Sum(t => music.Library.Track(t)?.Duration ?? 0))}";
+        var size = Hero.Fact(Size(ids));
+        body.Children.Add(Hero.Build(kind, p.Name, [Hero.Fact(p.Owner, strong: true), size], art,
             p.Comment ?? (p.Kind == PlaylistKind.ReadOnly ? $"{p.Owner} 的歌单，只能播放。" : null)));
         MenuFlyout? more = null;
         if (p.IsEditable)
@@ -157,15 +167,19 @@ public sealed class PlaylistPage : View
             more.Items.Add(Ui.Item("删除歌单", Glyphs.Delete, () => _ = Delete(p)));
         }
         body.Children.Add(Hero.Actions(music, "playlist", p.Id, p.Name, more, sync => On(() => music.PlayerChanged += sync, () => music.PlayerChanged -= sync)));
-        if (ids.Count == 0)
-        {
-            body.Children.Add(Ui.Column(6, Ui.Text("这个歌单还是空的", "SectionTitleStyle"), Ui.Text("在任意歌曲的“更多选项”里选择“加入歌单”。", "MutedTextStyle")));
-            return;
-        }
+        var empty = Ui.Column(6, Ui.Text("这个歌单还是空的", "SectionTitleStyle"), Ui.Text("在任意歌曲的“更多选项”里选择“加入歌单”。", "MutedTextStyle"));
         var list = new TrackList(music, shell, "playlist", p.Id, ids, covers: true, reorderable: p.IsEditable, label: $"{p.Name} 的歌曲") { PlaylistId = p.Kind is PlaylistKind.User or PlaylistKind.Liked ? p.Id : null };
         list.Reordered += (moved, before) => _ = shell.Run(() => music.ReorderPlaylistAsync(p.Id, list.Ids, moved, before));
-        body.Children.Add(list);
-        void Sync() { if (music.Playlist(id) is { } now) list.SetIds(now.TrackIds); }
+        empty.Visibility = list.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        body.Children.Add(empty);
+        ShowList(list, body, tint);
+        void Sync()
+        {
+            if (music.Playlist(id) is not { } now) return;
+            list.SetIds(now.TrackIds);
+            size.Text = Size(now.TrackIds);
+            empty.Visibility = list.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
         On(() => music.PlaylistsChanged += Sync, () => music.PlaylistsChanged -= Sync);
     }
 
@@ -215,7 +229,7 @@ public sealed class ArtistPage : View
         }
 
         body.Children.Add(Ui.Text("唱片", "SectionTitleStyle"));
-        var host = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch };
+        var host = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch, IsTabStop = false };
         void Releases(string? filter) => host.Content = Cards.Grid(music, shell, albums.Where(x => filter is null || (filter == "album" ? x.Type == AlbumType.Album : x.Type != AlbumType.Album)).Select(x => new CardRef("album", x.Id)));
         if (albums.Any(x => x.Type != AlbumType.Album))
         {

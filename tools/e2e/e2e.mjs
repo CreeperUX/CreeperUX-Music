@@ -15,20 +15,22 @@ export const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export const work = join(root, 'tools/e2e/.work');
 export const shots = join(work, 'shots');
 export const sleep = ms => new Promise(r => setTimeout(r, ms));
-export const exeFor = (arch = 'x64') => join(work, 'build', arch, 'CreeperUX Music.exe');
+// CXMUSIC_E2E_BUILD: another folder under .work for the test builds (when a copy in build/ is open and locked)
+const BUILD = process.env.CXMUSIC_E2E_BUILD || 'build';
+export const exeFor = (arch = 'x64') => join(work, BUILD, arch, 'CreeperUX Music.exe');
 
 /** Builds the app for tests; returns the result line. */
 export function build(arch = 'x64') {
-  const out = join(work, 'build', arch);
+  const out = join(work, BUILD, arch);
   const r = spawnSync('dotnet', ['build', join(root, 'src/CreeperUX.Music/CreeperUX.Music.csproj'), `-p:Platform=${arch}`, `-p:OutDir=${out}\\`, '-nologo', '-v:q'], { encoding: 'utf8' });
   const problems = [...new Set((r.stdout + r.stderr).split(/\r?\n/).filter(l => /\b(error|warning) [A-Z]+\d+/.test(l)).map(l => l.replace(/\s*\[[^\]]+\]\s*$/, '').trim()))];
   return { ok: r.status === 0, line: `BUILD ${arch} exit=${r.status}`, problems };
 }
 
 /** The demo server on a free port. */
-export async function startDemoServer() {
+export async function startDemoServer({ scale = 1 } = {}) {
   const port = 4700 + Math.floor(Math.random() * 200);
-  const p = spawn(process.execPath, [join(root, 'server/demo-server.mjs'), String(port)], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const p = spawn(process.execPath, [join(root, 'server/demo-server.mjs'), String(port), `--scale=${scale}`], { stdio: ['ignore', 'pipe', 'inherit'] });
   await new Promise((ok, fail) => { p.stdout.on('data', d => { if (String(d).includes('demo server')) ok(); }); p.on('exit', fail); });
   const url = `http://127.0.0.1:${port}`;
   return { url, process: p, log: async () => (await fetch(`${url}/__test/log`)).json(), offline: on => fetch(`${url}/__test/offline?on=${on ? 1 : 0}`), stop: () => p.kill() };

@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Markup;
+using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Media;
 
 namespace CreeperUX.Music.Controls;
@@ -15,7 +16,8 @@ namespace CreeperUX.Music.Controls;
 public sealed class TrackRow(Track track, int index) : INotifyPropertyChanged
 {
     public Track Track { get; } = track;
-    public int Index { get; set; } = index;
+    private int _index = index;
+    public int Index { get => _index; set { if (_index == value) return; _index = value; Raise(nameof(IndexText)); } }
     public string Title => Track.Title;
     public string Artist => Track.Artist;
     public string Album => Track.Album;
@@ -24,8 +26,12 @@ public sealed class TrackRow(Track track, int index) : INotifyPropertyChanged
     public bool IsCurrent { get; private set; }
     public bool IsPlaying { get; private set; }
 
-    public string IndexText => IsCurrent ? IsPlaying ? Glyphs.Volume : Glyphs.Pause : Index.ToString(System.Globalization.CultureInfo.InvariantCulture);
-    public FontFamily IndexFont => IsCurrent ? (FontFamily)Application.Current.Resources["SymbolThemeFontFamily"] : (FontFamily)Application.Current.Resources["AppFigureFont"];
+    public string IndexText => Index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    /// <summary>The playing row shows level bars in place of its number (moving while it plays), as foobar2k's.</summary>
+    public UIElement? Indicator => IsCurrent ? new EqBars(IsPlaying) : null;
+    public Visibility NumberVisibility => IsCurrent ? Visibility.Collapsed : Visibility.Visible;
+    public UIElement HeartIcon => new KitIcon(Track.Liked ? Glyphs.HeartFill : Glyphs.Heart, 15);
+    public UIElement MoreIcon => new KitIcon(Glyphs.More, 16);
     public Brush TitleBrush => IsCurrent ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextPrimaryBrush");
     public Brush IndexBrush => IsCurrent ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextSecondaryBrush");
     public string HeartGlyph => Track.Liked ? Glyphs.HeartFill : Glyphs.Heart;
@@ -37,10 +43,10 @@ public sealed class TrackRow(Track track, int index) : INotifyPropertyChanged
     {
         if (IsCurrent == current && IsPlaying == playing) return;
         IsCurrent = current; IsPlaying = playing;
-        Raise(nameof(IndexText), nameof(IndexFont), nameof(TitleBrush), nameof(IndexBrush));
+        Raise(nameof(Indicator), nameof(NumberVisibility), nameof(TitleBrush), nameof(IndexBrush));
     }
 
-    public void RefreshLike() => Raise(nameof(HeartGlyph), nameof(HeartBrush), nameof(HeartName));
+    public void RefreshLike() => Raise(nameof(HeartGlyph), nameof(HeartIcon), nameof(HeartBrush), nameof(HeartName));
 
     private void Raise(params string[] names) { foreach (var n in names) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(n)); }
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -57,7 +63,9 @@ public sealed class TrackRow(Track track, int index) : INotifyPropertyChanged
 public sealed class TrackList : UserControl
 {
     private readonly ListView _list;
-    private readonly ObservableCollection<TrackRow> _rows = [];
+    private ObservableCollection<TrackRow> _rows = [];
+    private readonly Grid? _columns;
+    private DateTime _shownAt = DateTime.MaxValue.AddDays(-1);
     private readonly MusicService _music;
     private readonly IShell _shell;
     private readonly Func<IReadOnlyList<string>>? _contextIds;
@@ -76,18 +84,21 @@ public sealed class TrackList : UserControl
               <ColumnDefinition Width="32"/><ColumnDefinition Width="{{CoverWidth}}"/><ColumnDefinition Width="3*"/><ColumnDefinition Width="{{AlbumWidth}}"/>
               <ColumnDefinition Width="32"/><ColumnDefinition Width="48"/><ColumnDefinition Width="32"/>
             </Grid.ColumnDefinitions>
-            <TextBlock Text="{Binding IndexText}" FontFamily="{Binding IndexFont}" Foreground="{Binding IndexBrush}" FontSize="13" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+            <Grid>
+              <TextBlock Text="{Binding IndexText}" Visibility="{Binding NumberVisibility}" FontFamily="{StaticResource AppFigureFont}" Foreground="{Binding IndexBrush}" FontSize="13" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+              <ContentPresenter Content="{Binding Indicator}" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,1,0"/>
+            </Grid>
             <Border Grid.Column="1" Width="40" Height="40" CornerRadius="4" Background="{StaticResource RaisedBrush}" Visibility="{{CoverVisibility}}">
-              <Image Source="{Binding Cover}" Stretch="UniformToFill"/>
+              <Image x:Name="Cover" Stretch="UniformToFill"/>
             </Border>
             <StackPanel Grid.Column="2" VerticalAlignment="Center" Spacing="1">
               <TextBlock Text="{Binding Title}" Foreground="{Binding TitleBrush}" FontSize="14" TextTrimming="CharacterEllipsis"/>
               <TextBlock Text="{Binding Artist}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="12.5" TextTrimming="CharacterEllipsis"/>
             </StackPanel>
             <TextBlock Grid.Column="3" Text="{Binding Album}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="13" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
-            <Button x:Name="LikeButton" Grid.Column="4" Style="{StaticResource IconButtonStyle}" Width="32" Height="32" FontSize="14" Content="{Binding HeartGlyph}" Foreground="{Binding HeartBrush}" AutomationProperties.Name="{Binding HeartName}"/>
+            <Button x:Name="LikeButton" Grid.Column="4" Style="{StaticResource IconButtonStyle}" Width="32" Height="32" FontSize="14" Content="{Binding HeartIcon}" Foreground="{Binding HeartBrush}" AutomationProperties.Name="{Binding HeartName}"/>
             <TextBlock Grid.Column="5" Text="{Binding Duration}" Style="{StaticResource FigureTextStyle}" FontSize="13" HorizontalAlignment="Right" VerticalAlignment="Center"/>
-            <Button x:Name="MoreButton" Grid.Column="6" Style="{StaticResource IconButtonStyle}" Width="32" Height="32" Content="&#xE712;" AutomationProperties.Name="{Binding MoreName}"/>
+            <Button x:Name="MoreButton" Grid.Column="6" Style="{StaticResource IconButtonStyle}" Width="32" Height="32" Content="{Binding MoreIcon}" AutomationProperties.Name="{Binding MoreName}"/>
           </Grid>
         </DataTemplate>
         """;
@@ -102,6 +113,8 @@ public sealed class TrackList : UserControl
             ItemsSource = _rows, ItemTemplate = (DataTemplate)XamlReader.Load(xaml), SelectionMode = ListViewSelectionMode.Single,
             IsItemClickEnabled = false, CanReorderItems = reorderable, AllowDrop = reorderable, CanDragItems = reorderable, Padding = new Thickness(0),
         };
+        // rows come in with the page (Motion.Enter), not each from the side; adding, removing and dragging still animate
+        _list.ItemContainerTransitions = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection { new Microsoft.UI.Xaml.Media.Animation.AddDeleteThemeTransition(), new Microsoft.UI.Xaml.Media.Animation.ReorderThemeTransition() };
         ScrollViewer.SetVerticalScrollMode(_list, ScrollMode.Disabled);
         ScrollViewer.SetVerticalScrollBarVisibility(_list, ScrollBarVisibility.Disabled);
         AutomationProperties.SetName(_list, label);
@@ -115,19 +128,21 @@ public sealed class TrackList : UserControl
         if (reorderable) _list.DragItemsCompleted += OnDragged;
 
         var root = new StackPanel();
-        if (header) root.Children.Add(Header());
+        if (header) root.Children.Add(_columns = Header());
         root.Children.Add(_list);
         Content = root;
         SetIds(ids);
         music.PlayerChanged += SyncState;
         music.TrackChanged += OnTrackChanged;
         Unloaded += (_, _) => { music.PlayerChanged -= SyncState; music.TrackChanged -= OnTrackChanged; };
+        _list.Loaded += (_, _) => _shownAt = DateTime.UtcNow;
         Loaded += (_, _) => { music.PlayerChanged -= SyncState; music.TrackChanged -= OnTrackChanged; music.PlayerChanged += SyncState; music.TrackChanged += OnTrackChanged; SyncState(); };
     }
 
     private Grid Header()
     {
-        var g = new Grid { ColumnSpacing = 12, Padding = new Thickness(12, 0, 12, 8), BorderBrush = Ui.Brush("LineBrush"), BorderThickness = new Thickness(0, 0, 0, 1), Margin = new Thickness(0, 0, 0, 8) };
+        // lined up with the rows: a ListViewItem's content starts 16 px in and ends 12 px before its edge
+        var g = new Grid { ColumnSpacing = 12, Padding = new Thickness(16, 0, 12, 8), BorderBrush = Ui.Brush("LineBrush"), BorderThickness = new Thickness(0, 0, 0, 1), Margin = new Thickness(0, 0, 0, 8) };
         foreach (var w in new[] { new GridLength(32), new GridLength(_covers ? 40 : 0), new GridLength(3, GridUnitType.Star), _showAlbum ? new GridLength(2, GridUnitType.Star) : new GridLength(0), new GridLength(32), new GridLength(48), new GridLength(32) })
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = w });
         void Add(FrameworkElement e, int col) { Grid.SetColumn(e, col); g.Children.Add(e); }
@@ -138,14 +153,71 @@ public sealed class TrackList : UserControl
         return g;
     }
 
+    /// <summary>
+    /// Makes the list the page's scroller: <paramref name="head"/> (then the column header) scrolls above the rows and
+    /// <paramref name="foot"/> below them. Only the rows in view, and a screen or so around them, are created.
+    /// </summary>
+    public void AsPage(StackPanel head, UIElement? foot, double padding)
+    {
+        if (Content is StackPanel root) root.Children.Clear();
+        var top = new StackPanel { Spacing = head.Spacing };
+        top.Children.Add(head); // the page may still add to it (search results arrive later): the columns stay last
+        if (_columns is not null) top.Children.Add(_columns);
+        _list.Header = top;
+        _list.Footer = foot;
+        _list.Padding = new Thickness(padding, 0, padding, 32);
+        ScrollViewer.SetVerticalScrollMode(_list, ScrollMode.Enabled);
+        ScrollViewer.SetVerticalScrollBarVisibility(_list, ScrollBarVisibility.Auto);
+        Content = _list;
+    }
+
+    /// <summary>Moves <paramref name="layer"/> (the page's tint) with the rows as they scroll. It runs on the compositor, so
+    /// it keeps up with touch, the wheel and inertia without the UI thread.</summary>
+    public void ScrollWith(UIElement layer)
+    {
+        bool done = false;
+        _list.Loaded += (_, _) =>
+        {
+            if (done || Ui.Descendant<ScrollViewer>(_list) is not { } scroller) return;
+            done = true;
+            var scrolled = ElementCompositionPreview.GetScrollViewerManipulationPropertySet(scroller);
+            ElementCompositionPreview.SetIsTranslationEnabled(layer, true);
+            var visual = ElementCompositionPreview.GetElementVisual(layer);
+            var follow = visual.Compositor.CreateExpressionAnimation("s.Translation.Y");
+            follow.SetReferenceParameter("s", scrolled);
+            visual.StartAnimation("Translation.Y", follow);
+        };
+    }
+
+    /// <summary>Shows these songs. Rows that stay keep their place (and the list its scroll position): one song liked or
+    /// removed changes one row, not thousands.</summary>
     public void SetIds(IReadOnlyList<string> ids)
     {
-        _rows.Clear();
+        var rows = new List<TrackRow>(ids.Count);
         int i = 0;
         foreach (var id in ids)
             if (_music.Library.Track(id) is { } t)
-                _rows.Add(new TrackRow(t, _covers ? ++i : t.Number > 0 && ContextKind == "album" ? t.Number : ++i) { Cover = _covers ? _music.CoverUrl(t.AlbumId, 96) : null });
-        if (ContextKind != "album") for (int k = 0; k < _rows.Count; k++) _rows[k].Index = k + 1;
+                rows.Add(new TrackRow(t, _covers ? ++i : t.Number > 0 && ContextKind == "album" ? t.Number : ++i) { Cover = _covers ? _music.CoverUrl(t.AlbumId, 96) : null });
+        if (ContextKind != "album") for (int k = 0; k < rows.Count; k++) rows[k].Index = k + 1;
+
+        // the same songs (the same objects: a reloaded library has new ones) at the start and at the end stay
+        var old = _rows;
+        int prefix = 0, suffix = 0;
+        while (prefix < old.Count && prefix < rows.Count && old[prefix].Track == rows[prefix].Track) prefix++;
+        while (suffix < old.Count - prefix && suffix < rows.Count - prefix && old[old.Count - 1 - suffix].Track == rows[rows.Count - 1 - suffix].Track) suffix++;
+        int removed = old.Count - prefix - suffix, added = rows.Count - prefix - suffix;
+        if (removed + added > 64)
+        {
+            _rows = new ObservableCollection<TrackRow>(rows);
+            _list.ItemsSource = _rows;
+        }
+        else
+        {
+            for (int k = 0; k < removed; k++) old.RemoveAt(prefix);
+            for (int k = 0; k < added; k++) old.Insert(prefix + k, rows[prefix + k]);
+            for (int k = 0; k < old.Count; k++) old[k].Index = rows[k].Index;
+        }
+        if (_columns is not null) _columns.Visibility = _rows.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         SyncState();
     }
 
@@ -163,10 +235,15 @@ public sealed class TrackList : UserControl
 
     private void Wire(ListViewBase sender, ContainerContentChangingEventArgs args)
     {
-        if (args.InRecycleQueue || args.ItemContainer.ContentTemplateRoot is not Grid root || root.Tag is "wired") return;
+        if (args.ItemContainer.ContentTemplateRoot is not Grid root) return;
+        if (!args.InRecycleQueue && args.ItemIndex < 14 && DateTime.UtcNow - _shownAt < TimeSpan.FromMilliseconds(600)) Motion.Stagger(args.ItemContainer, args.ItemIndex, rise: 12);
+        // covers: downloaded by the app (Covers), set as a row comes into view, cleared when it is recycled
+        if (_covers && root.FindName("Cover") is Image cover)
+            Covers.Show(cover, args.InRecycleQueue ? null : (args.Item as TrackRow)?.Cover, 40);
+        if (args.InRecycleQueue || root.Tag is "wired") return;
         root.Tag = "wired";
         if (root.FindName("LikeButton") is Button like)
-            like.Click += async (s, _) => { if (((FrameworkElement)s).DataContext is TrackRow r) await _shell.Run(() => _music.SetLikedAsync(r.Track.Id, !r.Track.Liked)); };
+            like.Click += async (s, _) => { if (((FrameworkElement)s).DataContext is TrackRow r) { Motion.Pop((UIElement)s); await _shell.Run(() => _music.SetLikedAsync(r.Track.Id, !r.Track.Liked)); } };
         if (root.FindName("MoreButton") is Button more)
             more.Click += (s, _) => { if (((FrameworkElement)s).DataContext is TrackRow r) ShowMenu(r, (FrameworkElement)s, null); };
     }
@@ -209,7 +286,7 @@ public static class TrackMenu
         var one = ids.Count == 1 ? music.Library.Track(ids[0]) : null;
         menu.Items.Add(Ui.Item("加入播放队列", Glyphs.Queue, () => { music.QueueAdd(ids); shell.ShowToast(new(ids.Count > 1 ? $"已将 {ids.Count} 首加入播放队列" : "已加入播放队列")); }));
         menu.Items.Add(Ui.Item("下一首播放", Glyphs.Next, () => { music.QueueAdd(ids, next: true); shell.ShowToast(new("将在下一首播放")); }));
-        var add = new MenuFlyoutSubItem { Text = "加入歌单", Icon = new FontIcon { Glyph = Glyphs.Add } };
+        var add = new MenuFlyoutSubItem { Text = "加入歌单", Icon = KitIcon.Element(Glyphs.Add) };
         add.Items.Add(Ui.Item("新建歌单", Glyphs.Add, () => _ = shell.Run(async () =>
         {
             var p = await music.CreatePlaylistAsync($"我的歌单 #{music.Playlists.Count(x => x.Kind == PlaylistKind.User) + 1}", ids);

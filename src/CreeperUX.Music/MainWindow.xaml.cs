@@ -28,6 +28,8 @@ public sealed partial class MainWindow : Window, IShell
     private View? _view;
     private string _route = "home";
     private TextBox? _search;
+    private Border? _searchPill;
+    private UIElement? _browseSeparator;
     private Button? _connection;
     private Microsoft.UI.Xaml.Controls.Primitives.ToggleButton? _panelToggle;
     private DispatcherTimer? _searchTimer;
@@ -36,8 +38,17 @@ public sealed partial class MainWindow : Window, IShell
     {
         InitializeComponent();
         ExtendsContentIntoTitleBar = true;
-        SetTitleBar(AppTitleBar);
+        SetTitleBar(TopBar);
         AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
+        // the window buttons on the app's colours: no plate of their own, the raised colour under the pointer
+        var buttons = AppWindow.TitleBar;
+        buttons.ButtonBackgroundColor = buttons.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
+        buttons.ButtonForegroundColor = Ui.ColorOf("TextColor");
+        buttons.ButtonInactiveForegroundColor = Ui.ColorOf("QuietColor");
+        buttons.ButtonHoverBackgroundColor = Ui.ColorOf("RaisedColor");
+        buttons.ButtonHoverForegroundColor = Ui.ColorOf("TextColor");
+        buttons.ButtonPressedBackgroundColor = Ui.ColorOf("RaisedHiColor");
+        buttons.ButtonPressedForegroundColor = Ui.ColorOf("TextColor");
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
         SizeAndCenter(1440, 900);
         // below this the top bar cannot hold Home and the search field next to the window buttons
@@ -61,6 +72,9 @@ public sealed partial class MainWindow : Window, IShell
             Close();
         };
         RootGrid.SizeChanged += (_, _) => Fit();
+        foreach (var part in new FrameworkElement[] { TopBar, TopCenter, TopEnd, Brand }) part.SizeChanged += (_, _) => FitTopBar();
+        RootGrid.Loaded += (_, _) => { RootGrid.XamlRoot.Changed += (_, _) => ApplyZoom(); ApplyZoom(); };
+        AppWindow.Changed += (_, e) => { if (e.DidSizeChange || e.DidPresenterChange) FitTopBar(); };
         RootGrid.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(OnPointerPressed), true);
         RootGrid.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(OnKeyDown), true);
         _ = Start();
@@ -129,9 +143,10 @@ public sealed partial class MainWindow : Window, IShell
             return;
         }
         _music = music;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         Build(music);
         Navigate("home");
-        Log.Write($"[start] {music.Server.Version}: {music.Library.Tracks.Count} songs, {music.Library.Albums.Count} albums, {music.Playlists.Count - 2} playlists");
+        Log.Write($"[start] {music.Server.Version}: {music.Library.Tracks.Count} songs, {music.Library.Albums.Count} albums, {music.Playlists.Count - 2} playlists; window built in {clock.ElapsedMilliseconds} ms");
         Ready = true;
         await OfferContinue(atStart: true);
     }
@@ -174,7 +189,7 @@ public sealed partial class MainWindow : Window, IShell
         _library = new LibraryPane(music, this, _settings);
         _library.RailChanged += (rail, byUser) =>
         {
-            LibraryColumn.Width = new GridLength(rail ? 88 : 300);
+            LibraryColumn.Width = new GridLength(rail ? 80 : 300); // 80: a 48 px cover with 16 px either side
             if (byUser) { _settings.LibraryOpen = !rail; _settings.Save(); }
         };
         LibraryHost.Child = _library;
@@ -190,9 +205,18 @@ public sealed partial class MainWindow : Window, IShell
 
         // the top bar
         TopCenter.Children.Clear(); TopEnd.Children.Clear();
-        var home = Ui.IconButton(Glyphs.Home, "首页", (_, _) => Navigate("home"), 44, 18);
+        // foobar2k's top bar: a raised round Home button (48) that grows under the pointer, and the search pill (48): a search
+        // icon, the field (no box, no underline), a hairline, the Browse button
+        var home = Ui.IconButton(Glyphs.Home, "首页", (_, _) => Navigate("home"), 48, 20);
         home.Background = Ui.Brush("RaisedBrush");
-        _search = new TextBox { PlaceholderText = "想听什么？", Width = 420, Height = 44, CornerRadius = new CornerRadius(22), Padding = new Thickness(18, 11, 18, 0), FontSize = 15, VerticalContentAlignment = VerticalAlignment.Center };
+        home.Resources["ButtonBackgroundPointerOver"] = Ui.Brush("RaisedBrush");
+        home.Resources["ButtonBackgroundPressed"] = Ui.Brush("RaisedBrush");
+        home.Resources["ButtonForegroundPointerOver"] = Ui.Brush("TextPrimaryBrush");
+        home.VerticalAlignment = VerticalAlignment.Center;
+        Motion.Press(home);
+        _home = home;
+        _search = new TextBox { PlaceholderText = "想听什么？", FontSize = 14, BorderThickness = new Thickness(0), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), Padding = new Thickness(10, 6, 4, 6), VerticalAlignment = VerticalAlignment.Center };
+        Plain(_search);
         AutomationProperties.SetName(_search, "搜索");
         _search.TextChanged += (_, _) =>
         {
@@ -202,14 +226,49 @@ public sealed partial class MainWindow : Window, IShell
             _searchTimer.Start();
         };
         _search.GotFocus += (_, _) => { if (!_route.StartsWith("search:", StringComparison.Ordinal)) Navigate("search:" + _search.Text.Trim()); };
-        var browse = Ui.IconButton(Glyphs.Browse, "浏览全部", (_, _) => Navigate("search:"), 44, 16);
-        browse.Background = Ui.Brush("RaisedBrush");
-        TopCenter.Children.Add(home); TopCenter.Children.Add(_search); TopCenter.Children.Add(browse);
-        _browse = browse;
+        var browse = Ui.IconButton(Glyphs.Browse, "浏览全部", (_, _) => Navigate("search:"), 40, 18);
+        browse.Resources["ButtonForegroundPointerOver"] = Ui.Brush("TextPrimaryBrush");
+        browse.VerticalAlignment = VerticalAlignment.Center;
+        var glass = Ui.Icon(Glyphs.Search, 18);
+        glass.VerticalAlignment = VerticalAlignment.Center; glass.Margin = new Thickness(12, 0, 0, 0); glass.IsHitTestVisible = false;
+        var separator = new Microsoft.UI.Xaml.Shapes.Rectangle { Width = 1, Height = 24, Fill = Ui.Brush("LineBrush"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(4, 0, 2, 0) };
+        var pillRow = new Grid { ColumnSpacing = 0 };
+        foreach (var width in new[] { GridLength.Auto, new GridLength(1, GridUnitType.Star), GridLength.Auto, GridLength.Auto })
+            pillRow.ColumnDefinitions.Add(new ColumnDefinition { Width = width });
+        pillRow.Children.Add(glass);
+        Grid.SetColumn(_search, 1); pillRow.Children.Add(_search);
+        Grid.SetColumn(separator, 2); pillRow.Children.Add(separator);
+        Grid.SetColumn(browse, 3); pillRow.Children.Add(browse);
+        // the pill: raised, lighter with a hairline under the pointer, a ring in the text colour while typing (foobar2k's)
+        var pill = new Border
+        {
+            Height = 48, CornerRadius = new CornerRadius(24), Background = Ui.Brush("RaisedBrush"), BorderThickness = new Thickness(2),
+            BorderBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent), Padding = new Thickness(0, 0, 2, 0), Child = pillRow, VerticalAlignment = VerticalAlignment.Center,
+            BackgroundTransition = new BrushTransition { Duration = Motion.Control },
+        };
+        bool over = false;
+        void Ring()
+        {
+            bool typing = _search.FocusState != FocusState.Unfocused;
+            pill.Background = over && !typing ? Ui.Brush("RaisedHiBrush") : Ui.Brush("RaisedBrush");
+            pill.BorderBrush = typing ? Ui.Brush("TextPrimaryBrush") : over ? Ui.Brush("LineBrush") : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        }
+        pill.PointerEntered += (_, _) => { over = true; Ring(); };
+        pill.PointerExited += (_, _) => { over = false; Ring(); };
+        _search.GotFocus += (_, _) => Ring();
+        _search.LostFocus += (_, _) => Ring();
+        _searchPill = pill;
+        TopCenter.Children.Add(home); TopCenter.Children.Add(pill);
+        _browse = browse; _browseSeparator = separator;
 
         var dot = new Microsoft.UI.Xaml.Shapes.Ellipse { Width = 8, Height = 8, Fill = Ui.Brush("GoodBrush"), VerticalAlignment = VerticalAlignment.Center };
-        var label = Ui.Text(music.Server.Name, size: 13, foreground: Ui.Brush("TextPrimaryBrush"));
-        _connection = new Button { Content = Ui.Row(8, dot, label), Style = Ui.Style("PillButtonStyle"), Tag = (dot, label) };
+        // the connection: a quiet pill (muted text, the hover colour under the pointer), as foobar2k's
+        var label = Ui.Text(music.Server.Name, size: 12, foreground: Ui.Brush("TextSecondaryBrush"));
+        _connection = new Button { Content = Ui.Row(8, dot, label), Style = Ui.Style("PillButtonStyle"), Tag = (dot, label), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), Height = 36, CornerRadius = new CornerRadius(18), Padding = new Thickness(14, 0, 14, 0), VerticalAlignment = VerticalAlignment.Center };
+        _connection.Resources["ButtonBackgroundPointerOver"] = Ui.Brush("HoverBrush");
+        _connection.Resources["ButtonBackgroundPressed"] = Ui.Brush("HoverBrush");
+        _connection.PointerEntered += (_, _) => label.Foreground = Ui.Brush("TextPrimaryBrush");
+        _connection.PointerExited += (_, _) => label.Foreground = Ui.Brush("TextSecondaryBrush");
         _connection.Click += async (_, _) =>
         {
             if (!music.IsOnline) { await music.GoOnlineAsync(); return; }
@@ -221,8 +280,9 @@ public sealed partial class MainWindow : Window, IShell
             SyncConnection();
             ShowToast(music.IsOnline ? new("已重新连接服务器") : new("无法连接到音乐服务器。检查网络，然后重新连接。", true, "重新连接", () => _ = music.GoOnlineAsync()));
         };
-        var settings = Ui.IconButton(Glyphs.Settings, "设置", (_, _) => Navigate("settings"), 40, 16);
-        _panelToggle = Ui.IconToggle(Glyphs.Panel, "显示或隐藏正在播放", 40);
+        var settings = Ui.IconButton(Glyphs.Settings, "设置", (_, _) => Navigate("settings"), 36, 16);
+        settings.Resources["ButtonForegroundPointerOver"] = Ui.Brush("TextPrimaryBrush");
+        _panelToggle = Ui.IconToggle(Glyphs.Panel, "显示或隐藏正在播放", 36);
         _panelToggle.IsChecked = _settings.PanelOpen;
         _panelToggle.Click += (_, _) => { SetPanel(_panelToggle.IsChecked == true); if (_panelToggle.IsChecked == true) _panel?.Show("now"); };
         TopEnd.Children.Add(_connection); TopEnd.Children.Add(settings); TopEnd.Children.Add(_panelToggle);
@@ -230,6 +290,7 @@ public sealed partial class MainWindow : Window, IShell
         music.Toast += ShowToast;
         music.PlayerChanged += () => { if (_route == "lyrics") _bar?.SetPanelMode(_panel?.Mode == "queue" && PanelColumn.Width.Value > 0, true); };
         Fit();
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, FitTopBar); // once the new parts are measured
     }
 
     private void SearchTick(object? sender, object e)
@@ -254,11 +315,96 @@ public sealed partial class MainWindow : Window, IShell
 
     private void SetPanel(bool open, bool byUser = true)
     {
+        if (open && PanelColumn.Width.Value == 0) Motion.Enter(PanelHost, rise: 0, slide: 16); // it comes in from the side
         PanelColumn.Width = new GridLength(open ? 340 : 0);
         PanelHost.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
         if (_panelToggle is not null) _panelToggle.IsChecked = open;
         if (byUser) { _settings.PanelOpen = open; _settings.Save(); }
         _bar?.SetPanelMode(open && _panel?.Mode == "queue", _route == "lyrics");
+    }
+
+    private Button? _home;
+
+    /// <summary>A text field without its own box and underline (the search pill draws them).</summary>
+    private static void Plain(TextBox box)
+    {
+        var clear = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        foreach (var key in new[] { "TextControlBackground", "TextControlBackgroundPointerOver", "TextControlBackgroundFocused", "TextControlBorderBrush", "TextControlBorderBrushPointerOver", "TextControlBorderBrushFocused" })
+            box.Resources[key] = clear;
+        box.Resources["TextControlBorderThemeThicknessFocused"] = new Thickness(0);
+        foreach (var key in new[] { "TextControlPlaceholderForeground", "TextControlPlaceholderForegroundPointerOver", "TextControlPlaceholderForegroundFocused" })
+            box.Resources[key] = Ui.Brush("TextSecondaryBrush");
+    }
+
+    /// <summary>
+    /// The top bar's geometry: room for the window buttons at the end; the search pill as wide as it can be while Home and
+    /// the pill stay on the window's middle line clear of both ends (foobar2k's middle column: at most 544 px); and the
+    /// parts the pointer must reach (Home, the pill, the end's buttons) taken out of the window's drag area.
+    /// </summary>
+    private void FitTopBar()
+    {
+        if (TopBar.XamlRoot is not { } root) return;
+        double scale = root.RasterizationScale, width = TopBar.ActualWidth;
+        double caption = AppWindow.TitleBar.RightInset / (scale * Zoom); // in the zoomed layout's units
+        var end = new Thickness(0, 0, caption + 12, 0);
+        if (TopEnd.Margin != end) TopEnd.Margin = end;
+        if (_searchPill is not null && width > 0)
+        {
+            double left = Brand.ActualWidth + Brand.Margin.Left + Brand.Margin.Right;
+            double right = TopEnd.ActualWidth + end.Right + 16;
+            double pill = Math.Clamp(width - 2 * Math.Max(left, right) - 56, 120, 488);
+            if (double.IsNaN(_searchPill.Width) || Math.Abs(_searchPill.Width - pill) > 0.5) _searchPill.Width = pill;
+        }
+        // what the pointer must reach in the bar: everything else drags the window
+        var parts = new List<Windows.Graphics.RectInt32>();
+        foreach (var part in new FrameworkElement[] { TopCenter, TopEnd })
+        {
+            if (part.ActualWidth <= 0 || part.Visibility != Visibility.Visible) continue;
+            var r = part.TransformToVisual(null).TransformBounds(new Windows.Foundation.Rect(0, 0, part.ActualWidth, part.ActualHeight));
+            parts.Add(new Windows.Graphics.RectInt32((int)Math.Floor(r.X * scale), (int)Math.Floor(r.Y * scale), (int)Math.Ceiling(r.Width * scale), (int)Math.Ceiling(r.Height * scale)));
+        }
+        Microsoft.UI.Input.InputNonClientPointerSource.GetForWindowId(AppWindow.Id).SetRegionRects(Microsoft.UI.Input.NonClientRegionKind.Passthrough, [.. parts]);
+    }
+
+    public double Zoom => Math.Clamp(_settings.Zoom, 0.5, 2);
+
+    /// <summary>Zooms the whole window (1 = 100 %), as a browser does: the layout is made for the window's size divided by
+    /// the zoom and drawn scaled by it, the text rasterized at the final size so it stays sharp. Saved.</summary>
+    public void SetZoom(double zoom)
+    {
+        _settings.Zoom = Math.Round(Math.Clamp(zoom, 0.8, 1.25), 2);
+        _settings.Save();
+        ApplyZoom();
+        ShowToast(new($"界面缩放 {_settings.Zoom * 100:0}%"));
+    }
+
+    private void ApplyZoom()
+    {
+        if (RootGrid.XamlRoot is not { } root) return;
+        double z = Zoom, scale = root.RasterizationScale;
+        Covers.Zoom = z;
+        RootGrid.HorizontalAlignment = HorizontalAlignment.Left;
+        RootGrid.VerticalAlignment = VerticalAlignment.Top;
+        RootGrid.Width = root.Size.Width / z;
+        RootGrid.Height = root.Size.Height / z;
+        RootGrid.RenderTransform = Math.Abs(z - 1) < 0.001 ? null : new ScaleTransform { ScaleX = z, ScaleY = z };
+        RootGrid.RasterizationScale = scale * z;
+        // the narrowest window still has room for the layout made at 100 %
+        if (AppWindow.Presenter is OverlappedPresenter presenter)
+        {
+            presenter.PreferredMinimumWidth = (int)(760 * scale * Math.Max(1, z));
+            presenter.PreferredMinimumHeight = (int)(560 * scale * Math.Max(1, z));
+        }
+        FitTopBar();
+    }
+
+    private void StepZoom(int step)
+    {
+        var zooms = Pages.SettingsPage.Zooms;
+        int at = Array.FindIndex(zooms, z => Math.Abs(z - Zoom) < 0.001);
+        if (at < 0) at = Array.IndexOf(zooms, 1.0);
+        int next = step == 0 ? Array.IndexOf(zooms, 1.0) : Math.Clamp(at + step, 0, zooms.Length - 1);
+        if (next != at || step == 0) SetZoom(zooms[next]);
     }
 
     private bool _narrowPanel, _narrowLibrary;
@@ -270,8 +416,8 @@ public sealed partial class MainWindow : Window, IShell
     {
         double w = RootGrid.ActualWidth;
         BrandName.Visibility = w < 1000 ? Visibility.Collapsed : Visibility.Visible;
-        if (_search is not null) _search.Width = Math.Clamp(w - (w < 1000 ? 600 : 760), 100, 420);
-        if (_browse is not null) _browse.Visibility = w < 1000 ? Visibility.Collapsed : Visibility.Visible; // "浏览全部" is the empty search page too
+        if (_browse is not null) _browse.Visibility = _browseSeparator!.Visibility = w < 1000 ? Visibility.Collapsed : Visibility.Visible; // "浏览全部" is the empty search page too
+        FitTopBar();
         if (_connection?.Tag is ValueTuple<Microsoft.UI.Xaml.Shapes.Ellipse, TextBlock> parts) parts.Item2.Visibility = w < 760 ? Visibility.Collapsed : Visibility.Visible;
         if (_music is null) return;
         if (w < 1100 && PanelColumn.Width.Value > 0) { _narrowPanel = true; SetPanel(false, byUser: false); }
@@ -309,6 +455,7 @@ public sealed partial class MainWindow : Window, IShell
 
     private void Show(string route, MusicService music)
     {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         _view?.Leave();
         _route = route;
         int colon = route.IndexOf(':');
@@ -327,10 +474,12 @@ public sealed partial class MainWindow : Window, IShell
         };
         _view = view;
         MainHost.Child = view;
+        Motion.Enter(view, rise: 6, move: Motion.Push); // the page fades in; its rows and cards rise in after it
         Title = view.Title.Length > 0 ? $"{view.Title} · CreeperUX Music" : "CreeperUX Music";
         if (_search is not null && kind != "search" && _search.FocusState == FocusState.Unfocused) _search.Text = "";
         _bar?.SetPanelMode(_panel?.Mode == "queue" && PanelColumn.Width.Value > 0, kind == "lyrics");
         Navigated?.Invoke(route);
+        if (clock.ElapsedMilliseconds >= 150) Log.Write($"[page] {route} built in {clock.ElapsedMilliseconds} ms");
     }
 
     public event Action<string>? Navigated;
@@ -365,6 +514,10 @@ public sealed partial class MainWindow : Window, IShell
             case VirtualKey.Left when alt: GoBack(); e.Handled = true; break;
             case VirtualKey.Right when alt: GoForward(); e.Handled = true; break;
             case VirtualKey.B when alt && shift: if (m.Current is { } t) _ = Run(() => m.SetLikedAsync(t.Id, !t.Liked)); e.Handled = true; break;
+            // the zoom, as a browser's: Ctrl + = (or the keypad's +), Ctrl + -, Ctrl + 0
+            case (VirtualKey)187 or VirtualKey.Add when mods: StepZoom(+1); e.Handled = true; break;
+            case (VirtualKey)189 or VirtualKey.Subtract when mods: StepZoom(-1); e.Handled = true; break;
+            case VirtualKey.Number0 or VirtualKey.NumberPad0 when mods: StepZoom(0); e.Handled = true; break;
         }
     }
 
@@ -395,30 +548,45 @@ public sealed partial class MainWindow : Window, IShell
     // ---------------------------------------------------------------- toasts, dialogs, errors
     public void ShowToast(ToastMessage message)
     {
-        var text = Ui.Text(message.Text, size: 14, foreground: Ui.Brush("OnAccentBrush"));
-        text.TextWrapping = TextWrapping.Wrap; text.MaxWidth = 520; text.VerticalAlignment = VerticalAlignment.Center;
-        var row = Ui.Row(16, text);
+        var icon = Ui.Icon(message.IsError ? Glyphs.Error : Glyphs.Info, 14, message.IsError ? Ui.Brush("BadBrush") : Ui.Brush("InfoBrush"));
+        icon.VerticalAlignment = VerticalAlignment.Top; icon.Margin = new Thickness(0, 7, 0, 0);
+        var text = Ui.Text(message.Text, size: 13, foreground: Ui.Brush("TextPrimaryBrush"));
+        text.TextWrapping = TextWrapping.Wrap; text.TextTrimming = TextTrimming.None; text.VerticalAlignment = VerticalAlignment.Center; text.Margin = new Thickness(0, 4, 0, 4);
+        var row = new Grid { ColumnSpacing = 10 };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new ColumnDefinition());
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.Children.Add(icon);
+        Grid.SetColumn(text, 1); row.Children.Add(text);
+        var edge = new Border { Width = 3, Background = Ui.Brush("BadBrush"), HorizontalAlignment = HorizontalAlignment.Left, Visibility = message.IsError ? Visibility.Visible : Visibility.Collapsed };
         var toast = new Border
         {
-            Background = message.IsError ? Ui.Solid(Ui.Rgb(0xF2, 0xB8, 0xB5)) : Ui.Brush("TextPrimaryBrush"), CornerRadius = new CornerRadius(8),
-            Padding = new Thickness(16, 10, 10, 10), Child = row, Translation = new System.Numerics.Vector3(0, 0, 32), Shadow = new ThemeShadow(),
+            Background = Ui.Brush("ToastBrush"), BorderBrush = Ui.Brush("LineBrush"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(7), Width = 360,
+            Child = new Grid { Children = { edge, new Border { Padding = new Thickness(12, 6, 4, 6), Child = row } } },
+            Translation = new System.Numerics.Vector3(0, 0, 32), Shadow = new ThemeShadow(),
         };
         AutomationProperties.SetName(toast, message.Text);
         AutomationProperties.SetLiveSetting(toast, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
-        void Dismiss() => ToastHost.Children.Remove(toast);
+        bool gone = false;
+        void Dismiss() { if (gone) return; gone = true; Motion.Exit(toast, () => ToastHost.Children.Remove(toast)); }
         if (message.ActionLabel is { } label && message.Action is { } action)
         {
-            var b = new Button { Content = label, Padding = new Thickness(12, 4, 12, 4), CornerRadius = new CornerRadius(14), Background = Ui.Brush("OnAccentBrush"), Foreground = Ui.Brush("TextPrimaryBrush"), BorderThickness = new Thickness(0) };
+            var b = new Button { Content = label, Padding = new Thickness(10, 4, 10, 4), MinHeight = 28, CornerRadius = new CornerRadius(5), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), Foreground = Ui.Brush("AccentTextBrush"), BorderThickness = new Thickness(0), FontWeight = Microsoft.UI.Text.FontWeights.Bold, FontSize = 13, VerticalAlignment = VerticalAlignment.Top };
+            b.Resources["ButtonBackgroundPointerOver"] = Ui.Brush("HoverBrush");
+            b.Resources["ButtonForegroundPointerOver"] = Ui.Brush("AccentHiBrush");
+            b.Resources["ButtonBackgroundPressed"] = Ui.Brush("HoverBrush");
+            b.Resources["ButtonForegroundPressed"] = Ui.Brush("AccentTextBrush");
             AutomationProperties.SetName(b, label);
             b.Click += (_, _) => { Dismiss(); action(); };
-            row.Children.Add(b);
+            Grid.SetColumn(b, 2); row.Children.Add(b);
         }
-        var close = new Button { Content = Glyphs.Close, FontFamily = (FontFamily)Application.Current.Resources["SymbolThemeFontFamily"], FontSize = 10, Width = 28, Height = 28, Padding = new Thickness(0), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0), Foreground = Ui.Brush("OnAccentBrush") };
-        AutomationProperties.SetName(close, "关闭提示");
-        close.Click += (_, _) => Dismiss();
-        row.Children.Add(close);
+        var close = Ui.IconButton(Glyphs.Close, "关闭提示", (_, _) => Dismiss(), 28, 10);
+        close.VerticalAlignment = VerticalAlignment.Top;
+        Grid.SetColumn(close, 3); row.Children.Add(close);
         while (ToastHost.Children.Count >= 3) ToastHost.Children.RemoveAt(0);
         ToastHost.Children.Add(toast);
+        Motion.Enter(toast, rise: 12, transitions: true);
         var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(message.Action is null ? 5 : 12) };
         timer.Tick += (_, _) => { timer.Stop(); Dismiss(); };
         timer.Start();

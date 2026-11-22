@@ -27,6 +27,8 @@ public sealed class AppSettings
     public string LibraryFilter { get; set; } = "";
     public string LibrarySort { get; set; } = "recent";
     public string LastServer { get; set; } = "";
+    /// <summary>The interface zoom, as a browser's (0.8 … 1.25).</summary>
+    public double Zoom { get; set; } = 1;
 
     private static string FilePath => Path.Combine(AppPaths.DataDirectory, "settings.json");
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = true };

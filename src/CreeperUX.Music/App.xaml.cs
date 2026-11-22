@@ -11,6 +11,7 @@ public partial class App : Application
         InitializeComponent();
         // Logged and survived: losing the window (and the music playing) is worse than one action that did not finish
         UnhandledException += (_, e) => { Log.Write($"Unhandled: {e.Exception}"); e.Handled = true; };
+        Core.SubsonicClient.Slow = message => Log.Write($"[server] slow: {message}");
     }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)

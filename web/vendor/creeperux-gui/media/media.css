@@ -1,0 +1,213 @@
+/* @creeperux/gui/media (2.5.0, G68): the player layer. Load after ui.bundle.css and plus.bundle.css. */
+
+/* ---------- media buttons: pressed toggles carry a mark under the icon, not colour alone (G60) ---------- */
+:where(.cx-ui) .ui-media-button { position: relative; flex: none; }
+:where(.cx-ui) .ui-media-toggle[aria-pressed="true"] { background: transparent; border-color: transparent; color: var(--cx-accent-text); }
+:where(.cx-ui) .ui-media-toggle::before { content: ""; position: absolute; inset-block-end: 2px; inset-inline-start: 50%; width: 4px; height: 4px; margin-inline-start: -2px; border-radius: 50%; background: currentColor; scale: 0; transition: scale var(--cx-motion-control) var(--cx-ease-out); }
+:where(.cx-ui) .ui-media-toggle[aria-pressed="true"]::before { scale: 1; } /* the on dot grows in (D81); the motion tokens are 0ms under reduced motion */
+:where(.cx-ui) .ui-media-toggle.ui-track-like::before, :where(.cx-ui) .ui-pb-like::before, :where(.cx-ui) .ui-np-like::before { display: none; } /* a filled heart already differs by shape; ::after stays the hit area */
+:where(.cx-ui) .ui-media-button:disabled { opacity: .4; }
+@media (hover: hover) and (pointer: fine) { :where(.cx-ui) .ui-media-toggle[aria-pressed="true"]:hover:not(:disabled) { background: var(--cx-hover); } }
+@media (forced-colors: active) { :where(.cx-ui) .ui-media-toggle[aria-pressed="true"]::before { background: Highlight; } :where(.cx-ui) .ui-media-toggle[aria-pressed="true"] { color: Highlight; } }
+
+/* ---------- seek bar ---------- */
+:where(.cx-ui) .ui-seek { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; min-width: 0; }
+:where(.cx-ui) .ui-seek-time { min-width: 2.75rem; color: var(--cx-muted); font: var(--cx-fs-xs)/1 var(--cx-font-figure); font-variant-numeric: tabular-nums; white-space: nowrap; }
+:where(.cx-ui) .ui-seek-time:first-child { text-align: end; }
+:where(.cx-ui) .ui-seek[data-previewing] .ui-seek-time:first-child { color: var(--cx-text); }
+:where(.cx-ui) .ui-seek-track { min-width: 0; }
+:where(.cx-ui) .ui-seek-track .ui-field { gap: 0; }
+:where(.cx-ui) .ui-seek-track .ui-slider { margin-inline: 7px; }
+:where(.cx-ui) .ui-seek-buffer { position: absolute; inset-block-start: 50%; inset-inline-start: 0; height: 4px; margin-block-start: -2px; border-radius: 2px; background: color-mix(in srgb, var(--cx-accent-mark) 28%, var(--cx-boundary)); pointer-events: none; } /* buffered: a light tint of the fill, between the track and the played part in both themes */
+/* the thumb shows on hover, focus and drag; at rest the bar is a line */
+:where(.cx-ui) .ui-seek .ui-slider-thumb { width: 12px; height: 12px; margin-block-start: -6px; margin-inline-start: -6px; transition: scale var(--cx-motion-control) var(--cx-ease-out); }
+@media (hover: hover) and (pointer: fine) { :where(.cx-ui) .ui-seek .ui-slider:not(:hover, :focus-within, [data-dragging]) .ui-slider-thumb { scale: 0; } }
+:where(.cx-ui) .ui-seek .ui-slider:is(:hover, [data-dragging]) .ui-slider-fill { background: var(--cx-accent-mark); }
+:where(.cx-ui) .ui-seek .ui-slider[data-readonly] { cursor: default; }
+:where(.cx-ui) .ui-seek-tip { position: absolute; inset-block-end: calc(50% + 12px); inset-inline-start: var(--ui-pos); translate: -50% 0; padding: 2px 6px; border-radius: var(--cx-radius-chip); background: var(--cx-raised); color: var(--cx-text); box-shadow: var(--cx-shadow); font: var(--cx-fs-xs)/1.4 var(--cx-font-figure); white-space: nowrap; pointer-events: none; }
+:where(.cx-ui) .ui-seek-tip:where(:dir(rtl)) { translate: 50% 0; }
+
+/* ---------- volume ---------- */
+:where(.cx-ui) .ui-volume { display: flex; align-items: center; gap: 4px; min-width: 0; }
+:where(.cx-ui) .ui-volume-slider { flex: 1; min-width: 5rem; max-width: 8rem; }
+:where(.cx-ui) .ui-volume-slider .ui-slider { margin-inline: 7px; }
+:where(.cx-ui) .ui-volume .ui-slider-thumb { width: 12px; height: 12px; margin-block-start: -6px; margin-inline-start: -6px; }
+:where(.cx-ui) .ui-volume[data-muted] .ui-slider-fill { background: var(--cx-quiet); }
+
+/* ---------- playback bar ---------- */
+:where(.cx-ui) .ui-pb { box-sizing: border-box; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr); align-items: center; gap: 12px; min-height: 4.5rem; padding: 8px 16px; }
+:where(.cx-ui) .ui-pb-info { display: flex; align-items: center; gap: 12px; min-width: 0; }
+:where(.cx-ui) .ui-pb-art { flex: none; width: 3.5rem; }
+:where(.cx-ui) .ui-pb-text { display: flex; flex-direction: column; min-width: 0; }
+/* title and artist are one control (it opens the track): a 44 px target on touch screens without crowding the bar */
+:where(.cx-ui) .ui-pb-track { all: unset; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; min-width: 0; max-width: 100%; min-height: var(--cx-hit); cursor: pointer; }
+:where(.cx-ui) :is(.ui-pb-title, .ui-pb-artist) { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+:where(.cx-ui) .ui-pb-title { font-weight: 600; }
+:where(.cx-ui) .ui-pb-artist { color: var(--cx-muted); font-size: var(--cx-fs-sm); }
+:where(.cx-ui) .ui-pb-track:disabled { cursor: default; }
+:where(.cx-ui) .ui-pb-track:focus-visible { outline: 2px solid var(--cx-focus); outline-offset: 1px; border-radius: 2px; }
+@media (hover: hover) and (pointer: fine) { :where(.cx-ui) .ui-pb-track:not(:disabled):hover .ui-pb-title { text-decoration: underline; } }
+:where(.cx-ui) .ui-pb-status { margin: 0; overflow: hidden; color: var(--cx-text); font-size: var(--cx-fs-xs); text-overflow: ellipsis; white-space: nowrap; } /* one line; the full message is its title */
+:where(.cx-ui) .ui-pb-status::before { content: "! "; font-weight: 700; }
+:where(.cx-ui) .ui-pb-center { display: flex; flex-direction: column; align-items: stretch; gap: 2px; min-width: 0; }
+:where(.cx-ui) .ui-pb-transport { display: flex; align-items: center; justify-content: center; gap: max(8px, calc(var(--cx-hit) - var(--cx-ctl))); }
+/* the transport is round; the selectors match the kit's own button rules (.ui-button[data-icon-only]) so they win */
+:where(.cx-ui) .ui-pb-transport > .ui-button { border-radius: 50%; }
+:where(.cx-ui) .ui-button.ui-pb-play { width: max(2.25rem, var(--cx-hit)); height: max(2.25rem, var(--cx-hit)); padding: 0; border-radius: 50%; }
+:where(.cx-ui) .ui-button.ui-pb-play .ui-icon { width: 1.125rem; height: 1.125rem; }
+:where(.cx-ui) .ui-pb-play[aria-busy="true"] .ui-icon { opacity: .35; }
+:where(.cx-ui) .ui-pb-play[aria-busy="true"]::before { content: ""; position: absolute; inset: 4px; border: 2px solid transparent; border-block-start-color: currentColor; border-radius: 50%; animation: ui-pb-spin 0.9s linear infinite; }
+@keyframes ui-pb-spin { to { rotate: 360deg; } }
+@media (prefers-reduced-motion: reduce) { :where(.cx-ui:not([data-motion="full"])) .ui-pb-play[aria-busy="true"]::before { animation-duration: 3s; } }
+:where(.cx-ui) .ui-pb[data-state="error"] .ui-button.ui-pb-play { border-color: var(--cx-boundary); background: transparent; color: var(--cx-text); font-weight: 400; } /* Try again: a neutral ring, not the accent */
+@media (hover: hover) and (pointer: fine) { :where(.cx-ui) .ui-pb[data-state="error"] .ui-button.ui-pb-play:hover { background: var(--cx-hover); } }
+:where(.cx-ui) .ui-pb-extras { display: flex; align-items: center; justify-content: flex-end; gap: 4px; min-width: 0; }
+:where(.cx-ui) .ui-pb-actions { display: flex; align-items: center; gap: 4px; }
+:where(.cx-ui) .ui-pb-more { display: none; }
+:where(.cx-ui) .ui-pb[data-empty] .ui-pb-title { color: var(--cx-muted); font-weight: 400; }
+/* narrower: shuffle, repeat, actions and volume move into More; narrowest: the seek bar becomes a line along the top */
+:where(.cx-ui) .ui-pb[data-size="compact"] { grid-template-columns: minmax(0, 1fr) minmax(12rem, 1.5fr) auto; }
+:where(.cx-ui) .ui-pb[data-size="mini"] { grid-template-columns: minmax(0, 1fr) auto auto; }
+:where(.cx-ui) .ui-pb:is([data-size="compact"], [data-size="mini"]) :is(.ui-pb-transport > .ui-media-toggle, .ui-pb-actions, .ui-pb-volume) { display: none; }
+:where(.cx-ui) .ui-pb:is([data-size="compact"], [data-size="mini"]) .ui-pb-more { display: inline-flex; }
+:where(.cx-ui) .ui-pb[data-size="mini"] { grid-template-rows: auto auto; row-gap: 0; padding-block-start: 0; }
+:where(.cx-ui) .ui-pb[data-size="mini"] .ui-pb-center { display: contents; }
+:where(.cx-ui) .ui-pb[data-size="mini"] .ui-pb-seek { grid-row: 1; grid-column: 1 / -1; }
+:where(.cx-ui) .ui-pb[data-size="mini"] :is(.ui-pb-info, .ui-pb-transport, .ui-pb-extras) { grid-row: 2; }
+:where(.cx-ui) .ui-pb[data-size="mini"] .ui-seek-time { display: none; }
+:where(.cx-ui) .ui-pb[data-size="mini"] .ui-seek { grid-template-columns: minmax(0, 1fr); } /* without the times the track is the only column (it collapsed into an auto one) */
+:where(.cx-ui) .ui-pb:is([data-size="compact"], [data-size="mini"]) .ui-pb-like { display: none; } /* Like moves into More */
+:where(.cx-ui) .ui-pb[data-size="compact"] .ui-pb-art { width: 3rem; }
+:where(.cx-ui) .ui-pb[data-size="mini"] .ui-seek-track .ui-slider { margin-inline: 0; }
+:where(.cx-ui) .ui-pb[data-size="mini"] .ui-pb-transport > :is(.ui-pb-prev, .ui-pb-next) { display: none; }
+:where(.cx-ui) .ui-pb[data-size="mini"] .ui-pb-art { width: 2.75rem; }
+
+/* ---------- track list ---------- */
+:where(.cx-ui) .ui-tracklist { min-width: 0; }
+/* height: '100%': the list fills a container that has a height, and its rows scroll inside it */
+:where(.cx-ui) .ui-tracklist[data-fill] { box-sizing: border-box; display: flex; flex-direction: column; height: 100%; min-height: 0; }
+:where(.cx-ui) .ui-tracklist[data-fill] > .ui-table-wrap { flex: 1; min-height: 0; }
+:where(.cx-ui) .ui-tracklist[data-fill] .ui-table-scroll[data-virtual] { flex: 1; min-height: 0; height: auto !important; }
+:where(.cx-ui) .ui-tracklist .ui-tr:not(.ui-tr-group, .ui-tr-head) { min-height: max(3.25rem, var(--cx-hit)); }
+:where(.cx-ui) .ui-tracklist .ui-td:not([data-role="primary"]) { color: var(--cx-muted); font-weight: 400; }
+:where(.cx-ui) .ui-tracklist .ui-td[data-role="primary"] { display: flex; align-items: center; gap: 6px; font-weight: 400; }
+:where(.cx-ui) .ui-tracklist .ui-td[data-col="index"] { display: flex; align-items: center; justify-content: flex-end; }
+:where(.cx-ui) .ui-tracklist .ui-tr[data-unavailable] .ui-track-play { display: none; }
+:where(.cx-ui) .ui-track-off { display: none; color: var(--cx-quiet); }
+:where(.cx-ui) .ui-track-off .ui-icon { width: 1rem; height: 1rem; }
+:where(.cx-ui) .ui-tracklist .ui-tr[data-unavailable] .ui-track-num { display: none; }
+:where(.cx-ui) .ui-tracklist .ui-tr[data-unavailable] .ui-track-off { display: grid; visibility: visible !important; } /* the mark stands in the number's place, the row keeps its alignment */
+:where(.cx-ui) .ui-tracklist .ui-tr-mark { display: none; }
+/* narrow (the table's stacked layout): one line per track; the number gives way (the current track keeps its bar and colour) */
+:where(.cx-ui) .ui-tracklist .ui-table[data-stacked] .ui-td[data-col="index"] { display: none; }
+:where(.cx-ui) .ui-tracklist .ui-table[data-stacked] .ui-tr > .ui-td[data-role="primary"] { flex: 1 1 0; }
+:where(.cx-ui) .ui-tracklist .ui-table[data-stacked] .ui-td:is([data-col="like"], [data-col="duration"]) { order: 1; flex: none; }
+:where(.cx-ui) .ui-track-index { position: relative; display: inline-grid; place-items: center end; min-width: 1.75rem; min-height: 1.75rem; color: var(--cx-muted); font-variant-numeric: tabular-nums; }
+:where(.cx-ui) .ui-track-index > * { grid-area: 1 / 1; }
+:where(.cx-ui) .ui-track-play { all: unset; grid-area: 1 / 1; display: grid; place-items: center; width: 1.75rem; height: 1.75rem; border-radius: var(--cx-radius-control); color: var(--cx-text); cursor: pointer; opacity: 0; }
+:where(.cx-ui) .ui-track-play::after { content: ""; position: absolute; inset: min(0px, calc((100% - var(--cx-hit)) / 2)); }
+:where(.cx-ui) .ui-track-play .ui-icon { width: 1rem; height: 1rem; }
+:where(.cx-ui) .ui-track-play > .ui-icon:last-child, :where(.cx-ui) .ui-tracklist[data-playing] .ui-tr[data-current] .ui-track-play > .ui-icon:first-child { display: none; }
+:where(.cx-ui) .ui-tracklist[data-playing] .ui-tr[data-current] .ui-track-play > .ui-icon:last-child { display: block; }
+:where(.cx-ui) .ui-track-play:focus-visible { opacity: 1; outline: 2px solid var(--cx-focus); outline-offset: 0; }
+:where(.cx-ui) .ui-tr:focus-visible .ui-track-play, :where(.cx-ui) .ui-tr:focus-within .ui-track-play { opacity: 1; }
+:where(.cx-ui) .ui-tr:is(:focus-visible, :focus-within) .ui-track-index > :is(.ui-track-num, .ui-track-eq) { visibility: hidden; }
+@media (hover: hover) and (pointer: fine) {
+  :where(.cx-ui) .ui-tracklist .ui-tr:not([aria-disabled="true"]):hover .ui-track-play { opacity: 1; }
+  :where(.cx-ui) .ui-tracklist .ui-tr:not([aria-disabled="true"]):hover .ui-track-index > :is(.ui-track-num, .ui-track-eq) { visibility: hidden; }
+}
+@media (hover: none) { :where(.cx-ui) .ui-track-play { display: none; } }
+/* the current track: an equaliser where its number was; it moves while playing (still with reduced motion) */
+:where(.cx-ui) .ui-track-eq { display: none; align-items: end; gap: 2px; width: 14px; height: 14px; }
+:where(.cx-ui) .ui-track-eq > i { flex: 1; height: 40%; background: var(--cx-accent-mark); border-radius: 1px; }
+:where(.cx-ui) .ui-track-eq > i:nth-child(2) { height: 80%; } :where(.cx-ui) .ui-track-eq > i:nth-child(3) { height: 60%; }
+:where(.cx-ui) .ui-tr[data-current] .ui-track-num { display: none; }
+:where(.cx-ui) .ui-tr[data-current] .ui-track-eq { display: flex; }
+:where(.cx-ui) .ui-tracklist[data-playing] .ui-tr[data-current] .ui-track-eq > i { animation: ui-track-eq 0.9s ease-in-out infinite alternate; }
+:where(.cx-ui) .ui-tracklist[data-playing] .ui-tr[data-current] .ui-track-eq > i:nth-child(2) { animation-delay: -0.3s; } :where(.cx-ui) .ui-tracklist[data-playing] .ui-tr[data-current] .ui-track-eq > i:nth-child(3) { animation-delay: -0.6s; }
+@keyframes ui-track-eq { from { height: 25%; } to { height: 100%; } }
+@media (prefers-reduced-motion: reduce) { :where(.cx-ui:not([data-motion="full"])) .ui-tracklist .ui-track-eq > i { animation: none !important; } }
+:where(.cx-ui) .ui-track-title { display: flex; align-items: center; gap: 12px; min-width: 0; }
+:where(.cx-ui) .ui-track-art { position: relative; flex: none; display: grid; place-items: center; width: 2.5rem; height: 2.5rem; overflow: hidden; border-radius: var(--cx-radius-control); background: var(--cx-control); color: var(--cx-quiet); }
+:where(.cx-ui) .ui-track-art > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+:where(.cx-ui) .ui-track-art .ui-icon { width: 1rem; height: 1rem; }
+:where(.cx-ui) .ui-track-text { display: flex; flex-direction: column; min-width: 0; }
+:where(.cx-ui) .ui-track-name { overflow: hidden; color: var(--cx-text); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+:where(.cx-ui) .ui-track-sub { display: flex; align-items: center; gap: 6px; overflow: hidden; color: var(--cx-muted); font-size: var(--cx-fs-sm); text-overflow: ellipsis; white-space: nowrap; }
+:where(.cx-ui) .ui-track-explicit { display: inline-grid; place-items: center; flex: none; min-width: 1rem; height: 1rem; padding-inline: 2px; border-radius: 2px; background: var(--cx-muted); color: var(--cx-bg); font-size: 0.625rem; font-weight: 700; }
+:where(.cx-ui) .ui-tracklist .ui-tr[data-current] .ui-track-name { color: var(--cx-accent-text); font-weight: 600; }
+:where(.cx-ui) .ui-tracklist .ui-tr[data-unavailable] :is(.ui-track-art, .ui-track-name) { opacity: .6; }
+:where(.cx-ui) .ui-tracklist .ui-tr[data-unavailable] .ui-track-name { text-decoration: line-through; text-decoration-thickness: 1px; }
+:where(.cx-ui) .ui-track-like:not([aria-pressed="true"]) { opacity: 0; }
+:where(.cx-ui) .ui-tr:is(:hover, :focus-visible, :focus-within) .ui-track-like, :where(.cx-ui) .ui-track-like:focus-visible { opacity: 1; }
+@media (hover: none) { :where(.cx-ui) .ui-track-like:not([aria-pressed="true"]) { opacity: 1; } }
+:where(.cx-ui) .ui-tracklist .ui-td[data-col="duration"] { color: var(--cx-muted); font-variant-numeric: tabular-nums; }
+@media (forced-colors: active) { :where(.cx-ui) .ui-track-eq > i { background: Highlight; } :where(.cx-ui) .ui-track-explicit { forced-color-adjust: none; background: CanvasText; color: Canvas; } }
+
+/* ---------- queue ---------- */
+:where(.cx-ui) .ui-queue { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+:where(.cx-ui) .ui-queue-heading { margin: 8px 0 0; padding-inline: 8px; font: 600 var(--cx-fs)/1.3 var(--cx-font-sans); }
+:where(.cx-ui) .ui-queue-bar { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+:where(.cx-ui) .ui-queue .ui-table-scroll { overflow-x: hidden; }
+:where(.cx-ui) .ui-queue .ui-tr-head { position: absolute; width: 1px; height: 1px; min-height: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; } /* named columns for screen readers, no header row on screen */
+:where(.cx-ui) .ui-queue .ui-tracklist .ui-tr:not(.ui-tr-group, .ui-tr-head) { min-height: max(3rem, var(--cx-hit)); }
+:where(.cx-ui) .ui-queue .ui-track-art { width: 2.25rem; height: 2.25rem; }
+:where(.cx-ui) .ui-queue[data-no-upcoming] .ui-thead { display: none; }
+
+/* ---------- now playing ---------- */
+:where(.cx-ui) .ui-np { display: flex; flex-direction: column; gap: 14px; min-width: 0; padding: 16px; }
+:where(.cx-ui) .ui-np-art .ui-image { box-shadow: var(--cx-shadow); }
+:where(.cx-ui) .ui-np-head { display: flex; align-items: flex-start; gap: 8px; }
+:where(.cx-ui) .ui-np-text { flex: 1; min-width: 0; }
+:where(.cx-ui) .ui-np-title { margin: 0; font: 600 var(--cx-text-lg)/1.25 var(--cx-font-display); overflow-wrap: anywhere; }
+:where(.cx-ui) :is(.ui-np-artist, .ui-np-album) { margin: 2px 0 0; color: var(--cx-muted); overflow-wrap: anywhere; }
+:where(.cx-ui) .ui-np-album { font-size: var(--cx-fs-sm); }
+:where(.cx-ui) .ui-np-link { all: unset; display: inline-flex; align-items: center; min-width: var(--cx-hit); min-height: var(--cx-hit); cursor: pointer; }
+:where(.cx-ui) .ui-np-link:focus-visible { outline: 2px solid var(--cx-focus); outline-offset: 1px; border-radius: 2px; }
+@media (hover: hover) and (pointer: fine) { :where(.cx-ui) .ui-np-link:hover { text-decoration: underline; } }
+:where(.cx-ui) .ui-np[data-empty] .ui-np-title { color: var(--cx-muted); font-weight: 400; }
+
+/* ---------- lyrics ---------- */
+:where(.cx-ui) .ui-lyrics { position: relative; display: flex; flex-direction: column; min-height: 0; }
+:where(.cx-ui) .ui-lyrics-scroll { position: relative; flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 16px; outline: none; }
+:where(.cx-ui) .ui-lyrics-scroll:focus-visible { box-shadow: inset 0 0 0 2px var(--cx-focus); }
+:where(.cx-ui) .ui-lyrics-lines { margin: 0; padding: 0 0 40%; list-style: none; }
+:where(.cx-ui) .ui-lyrics-item { margin: 0; }
+:where(.cx-ui) .ui-lyrics-line { all: unset; box-sizing: border-box; display: block; width: 100%; min-height: var(--cx-hit); padding: 6px 8px; border-radius: var(--cx-radius-control); color: var(--cx-text); font: 500 var(--cx-text-md)/1.45 var(--cx-font-sans); overflow-wrap: anywhere; }
+:where(.cx-ui) .ui-lyrics[data-synced] .ui-lyrics-line { color: var(--cx-muted); }
+:where(.cx-ui) .ui-lyrics[data-synced] .ui-lyrics-item[data-past] .ui-lyrics-line { color: var(--cx-quiet); }
+:where(.cx-ui) .ui-lyrics[data-synced] .ui-lyrics-item[data-active] .ui-lyrics-line { color: var(--cx-text); font-weight: 700; }
+:where(.cx-ui) .ui-lyrics[data-synced] .ui-lyrics-item[data-active] .ui-lyrics-line::before { content: ""; position: absolute; inset-inline-start: 0; width: 3px; height: 1.2em; margin-block-start: 0.15em; border-radius: 2px; background: var(--cx-accent-mark); }
+:where(.cx-ui) .ui-lyrics-item { position: relative; }
+:where(.cx-ui) button.ui-lyrics-line { cursor: pointer; }
+:where(.cx-ui) button.ui-lyrics-line:focus-visible { outline: 2px solid var(--cx-focus); outline-offset: -2px; }
+@media (hover: hover) and (pointer: fine) { :where(.cx-ui) button.ui-lyrics-line:hover { background: var(--cx-hover); color: var(--cx-text); } }
+:where(.cx-ui) .ui-lyrics-note { margin: 0 0 12px; color: var(--cx-muted); font-size: var(--cx-fs-sm); }
+:where(.cx-ui) .ui-lyrics-wait { display: grid; place-items: center; padding: 32px; }
+:where(.cx-ui) .ui-lyrics-follow { position: absolute; z-index: 1; inset-block-end: 12px; inset-inline-start: 50%; translate: -50% 0; box-shadow: var(--cx-shadow); }
+:where(.cx-ui) .ui-lyrics-follow:where(:dir(rtl)) { translate: 50% 0; }
+@media (forced-colors: active) { :where(.cx-ui) .ui-lyrics[data-synced] .ui-lyrics-item[data-active] .ui-lyrics-line { outline: 2px solid Highlight; outline-offset: -2px; } }
+
+/* ---------- device picker ---------- */
+:where(.cx-ui) .ui-device-button[data-remote] { color: var(--cx-accent-text); }
+:where(.cx-ui) .ui-device-pop { display: flex; flex-direction: column; gap: 4px; min-width: 16rem; max-width: 22rem; }
+:where(.cx-ui) .ui-device-list { display: flex; flex-direction: column; gap: 2px; }
+:where(.cx-ui) .ui-device { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 12px; min-height: max(2.75rem, var(--cx-hit)); padding: 6px 10px; border-radius: var(--cx-radius-control); color: var(--cx-text); cursor: pointer; }
+:where(.cx-ui) .ui-device > .ui-icon:first-child { flex: none; color: var(--cx-muted); }
+:where(.cx-ui) .ui-device-text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+:where(.cx-ui) .ui-device-state { color: var(--cx-muted); font-size: var(--cx-fs-xs); }
+:where(.cx-ui) .ui-device-state:empty { display: none; }
+:where(.cx-ui) .ui-device[aria-checked="true"] { background: var(--cx-accent-soft); }
+:where(.cx-ui) .ui-device[aria-checked="true"] :is(.ui-device-name, .ui-icon) { color: var(--cx-accent-text); }
+:where(.cx-ui) .ui-device[aria-disabled="true"] { color: var(--cx-quiet); cursor: default; }
+:where(.cx-ui) .ui-device[data-state="error"] .ui-device-state { color: var(--cx-text); }
+:where(.cx-ui) .ui-device[data-state="error"] .ui-device-state::before { content: "! "; font-weight: 700; }
+:where(.cx-ui) .ui-device:focus-visible { outline: 2px solid var(--cx-focus); outline-offset: -2px; }
+@media (hover: hover) and (pointer: fine) { :where(.cx-ui) .ui-device:not([aria-disabled="true"]):hover { background: var(--cx-hover); } }
+:where(.cx-ui) .ui-device-empty { margin: 4px 10px; color: var(--cx-muted); font-size: var(--cx-fs-sm); }
+@media (forced-colors: active) { :where(.cx-ui) .ui-device[aria-checked="true"] { outline: 2px solid Highlight; outline-offset: -2px; } }
+
+@media print {
+  :where(.cx-ui) :is(.ui-pb, .ui-lyrics-follow, .ui-track-play, .ui-device-picker) { display: none !important; }
+  :where(.cx-ui) .ui-lyrics-scroll { overflow: visible !important; height: auto !important; }
+}

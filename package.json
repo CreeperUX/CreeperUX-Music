@@ -1,0 +1,24 @@
+{
+  "name": "creeperux-music",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "CreeperUX Music: a Spotify-style Windows player (WinUI 3) for your own Navidrome (Subsonic) server",
+  "scripts": {
+    "demo": "node tools/demo.mjs",
+    "demo:browser": "node tools/demo.mjs --browser",
+    "server": "node server/demo-server.mjs",
+    "build": "dotnet build src/CreeperUX.Music/CreeperUX.Music.csproj -c Release",
+    "test": "dotnet test tests/CreeperUX.Music.Core.Tests",
+    "check": "node tools/e2e/acceptance.mjs",
+    "check:web": "node tools/check-web.mjs",
+    "icon": "node tools/icon.mjs",
+    "covers": "node tools/render-covers.mjs",
+    "sync-kit": "node tools/sync-kit.mjs",
+    "check:kit": "node tools/sync-kit.mjs --check"
+  },
+  "devDependencies": {
+    "axe-core": "4.14.0",
+    "playwright": "1.64.1"
+  }
+}

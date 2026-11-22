@@ -1,0 +1,9 @@
+node_modules/
+qa/
+.claude/
+*.log
+dist/
+bin/
+obj/
+# test instances: builds, data, screenshots, reports
+tools/e2e/.work/

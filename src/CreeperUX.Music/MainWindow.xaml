@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Window
+    x:Class="CreeperUX.Music.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="CreeperUX Music">
+
+    <Grid x:Name="RootGrid" Background="{StaticResource AppBackgroundBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- The title bar holds the top bar: brand, Home and search in the middle, connection / settings / panel at the end -->
+        <TitleBar x:Name="AppTitleBar" Height="60" IsBackButtonVisible="False" IsPaneToggleButtonVisible="False">
+            <TitleBar.LeftHeader>
+                <StackPanel Orientation="Horizontal" Spacing="10" Margin="16,0,8,0" VerticalAlignment="Center">
+                    <Image Source="ms-appx:///Assets/Logo-64.png" Width="26" Height="26" />
+                    <TextBlock x:Name="BrandName" VerticalAlignment="Center" FontSize="17" FontWeight="Bold" FontFamily="{StaticResource AppDisplayFont}">
+                        <Run Text="CreeperUX " /><Run Text="Music" Foreground="{StaticResource AccentTextBrush}" />
+                    </TextBlock>
+                </StackPanel>
+            </TitleBar.LeftHeader>
+            <TitleBar.Content>
+                <StackPanel x:Name="TopCenter" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </TitleBar.Content>
+            <TitleBar.RightHeader>
+                <StackPanel x:Name="TopEnd" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center" Margin="0,0,8,0" />
+            </TitleBar.RightHeader>
+        </TitleBar>
+
+        <Grid x:Name="Panels" Grid.Row="1" Margin="8,0,8,0" ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="LibraryColumn" Width="300" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition x:Name="PanelColumn" Width="340" />
+            </Grid.ColumnDefinitions>
+            <Border x:Name="LibraryHost" CornerRadius="8" Background="{StaticResource PanelBrush}" />
+            <Border x:Name="MainHost" Grid.Column="1" CornerRadius="8" Background="{StaticResource PanelBrush}" />
+            <Border x:Name="PanelHost" Grid.Column="2" CornerRadius="8" Background="{StaticResource PanelBrush}" />
+        </Grid>
+
+        <Border x:Name="BarHost" Grid.Row="2" />
+
+        <!-- Signed out: the sign-in page covers the panels and the bar -->
+        <Border x:Name="LoginHost" Grid.Row="1" Grid.RowSpan="2" Background="{StaticResource AppBackgroundBrush}" Visibility="Collapsed" />
+
+        <StackPanel x:Name="ToastHost" Grid.Row="1" Grid.RowSpan="2" VerticalAlignment="Bottom" HorizontalAlignment="Center" Margin="0,0,0,104" Spacing="8" />
+    </Grid>
+</Window>

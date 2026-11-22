@@ -1,0 +1,361 @@
+using System.Globalization;
+using System.Net;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+
+namespace CreeperUX.Music.Core;
+
+/// <summary>The sign-in kept between runs: the server, the user, and the token (md5(password + salt)) with its salt.
+/// The password itself is never kept. The token works like the password for this API, so it is a secret.</summary>
+public sealed record Login(string Server, string User, string Salt, string Token)
+{
+    public string ToJson() => JsonSerializer.Serialize(new Dictionary<string, string> { ["server"] = Server, ["user"] = User, ["salt"] = Salt, ["token"] = Token });
+
+    public static Login? FromJson(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            string? Get(string k) => doc.RootElement.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+            return Get("server") is { Length: > 0 } s && Get("user") is { Length: > 0 } u && Get("salt") is { Length: > 0 } salt && Get("token") is { Length: > 0 } t ? new Login(s, u, salt, t) : null;
+        }
+        catch (JsonException) { return null; }
+    }
+}
+
+/// <summary>The server answered with a Subsonic error (wrong password, not found, not allowed …).</summary>
+public sealed class SubsonicException(int code, string message) : Exception(message)
+{
+    public int Code { get; } = code;
+    public bool IsAuthentication => Code is 40 or 41;
+}
+
+/// <summary>The server could not be reached at all.</summary>
+public sealed class ServerUnreachableException(string message, Exception? inner = null) : Exception(message, inner);
+
+/// <summary>
+/// A client for Navidrome or any server speaking the Subsonic API with the OpenSubsonic extensions
+/// (subsonic.org/pages/api.jsp, opensubsonic.netlify.app). Token authentication; JSON answers; writes are POSTed as forms.
+/// </summary>
+public sealed class SubsonicClient
+{
+    public const string ApiVersion = "1.16.1";
+    private const int Page = 500;
+    private static readonly HttpClient Shared = new(new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5), AutomaticDecompression = DecompressionMethods.All }) { Timeout = TimeSpan.FromSeconds(30) };
+
+    private static readonly Dictionary<int, string> Errors = new()
+    {
+        [10] = "请求缺少必要的参数。", [20] = "服务器的 Subsonic API 版本太旧。", [30] = "CreeperUX Music 需要更新才能连接这个服务器。",
+        [40] = "用户名或密码不正确。", [41] = "这个账号不能用 token 登录（例如 LDAP 账号）。", [50] = "这个账号没有执行这个操作的权限。", [70] = "服务器上找不到这项内容。",
+    };
+
+    private readonly HttpClient _http;
+    private bool _online = true;
+
+    public SubsonicClient(Login login, string clientName, HttpClient? http = null)
+    {
+        Login = login; ClientName = clientName; _http = http ?? Shared;
+    }
+
+    public Login Login { get; }
+    /// <summary>What the server lists this client as (Navidrome: Players, and who saved the play queue).</summary>
+    public string ClientName { get; }
+    public HashSet<string> Extensions { get; } = [];
+    public bool IsOnline => _online;
+
+    /// <summary>Reachable / not reachable, as the last request found it.</summary>
+    public event EventHandler<bool>? ConnectionChanged;
+
+    // ---------------------------------------------------------------- signing in
+
+    /// <summary>"music.example.com", "http://host:4533/", "https://host/rest" → "https://music.example.com", "http://host:4533", "https://host".</summary>
+    public static string NormalizeServer(string? input)
+    {
+        string s = (input ?? "").Trim();
+        if (s.Length == 0) return "";
+        if (!Regex.IsMatch(s, "^https?://", RegexOptions.IgnoreCase))
+            s = (Regex.IsMatch(s, @"^(localhost|127\.|10\.|192\.168\.|\[)") ? "http://" : "https://") + s;
+        s = s.TrimEnd('/');
+        return Regex.Replace(s, @"/(rest|app)(/.*)?$", "", RegexOptions.IgnoreCase);
+    }
+
+    public static string Md5Hex(string text) => Convert.ToHexStringLower(MD5.HashData(Encoding.UTF8.GetBytes(text)));
+
+    /// <summary>Checks the server and the account; returns the sign-in to keep (not the password).</summary>
+    public static async Task<Login> SignInAsync(string server, string user, string password, string clientName, HttpClient? http = null, CancellationToken cancel = default)
+    {
+        string baseUrl = NormalizeServer(server);
+        if (baseUrl.Length == 0) throw new ArgumentException("请填写服务器地址。");
+        if (string.IsNullOrWhiteSpace(user)) throw new ArgumentException("请填写用户名。");
+        string salt = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(8));
+        var login = new Login(baseUrl, user.Trim(), salt, Md5Hex(password + salt));
+        var client = new SubsonicClient(login, clientName, http);
+        try { await client.CallAsync("ping", null, cancel: cancel); }
+        catch (ServerUnreachableException) { throw new ServerUnreachableException($"连不上 {baseUrl}。检查地址和网络；服务器在外网时需要 HTTPS。"); }
+        catch (JsonException) { throw new ServerUnreachableException($"{baseUrl} 不像是 Navidrome（没有 Subsonic API 的回应）。"); }
+        return login;
+    }
+
+    // ---------------------------------------------------------------- requests
+
+    private List<KeyValuePair<string, string>> Params(IEnumerable<KeyValuePair<string, object?>>? extra)
+    {
+        var p = new List<KeyValuePair<string, string>>
+        {
+            new("u", Login.User), new("t", Login.Token), new("s", Login.Salt), new("v", ApiVersion), new("c", ClientName), new("f", "json"),
+        };
+        foreach (var (k, v) in extra ?? [])
+        {
+            switch (v)
+            {
+                case null: break;
+                case string s: p.Add(new(k, s)); break;
+                case IEnumerable<string> list: p.AddRange(list.Select(x => new KeyValuePair<string, string>(k, x))); break;
+                case IEnumerable<int> list: p.AddRange(list.Select(x => new KeyValuePair<string, string>(k, x.ToString(CultureInfo.InvariantCulture)))); break;
+                case bool b: p.Add(new(k, b ? "true" : "false")); break;
+                case IFormattable f: p.Add(new(k, f.ToString(null, CultureInfo.InvariantCulture))); break;
+                default: p.Add(new(k, v.ToString() ?? "")); break;
+            }
+        }
+        return p;
+    }
+
+    private static string Query(IEnumerable<KeyValuePair<string, string>> p) =>
+        string.Join("&", p.Select(x => $"{Uri.EscapeDataString(x.Key)}={Uri.EscapeDataString(x.Value)}"));
+
+    private static IEnumerable<KeyValuePair<string, object?>> P(params (string Key, object? Value)[] items) => items.Select(x => new KeyValuePair<string, object?>(x.Key, x.Value));
+
+    /// <summary>A URL with the sign-in in it (stream, cover art): the same every time for the same arguments.</summary>
+    public string Url(string method, params (string Key, object? Value)[] extra) => $"{Login.Server}/rest/{method}.view?{Query(Params(P(extra)))}";
+
+    private void SetOnline(bool online)
+    {
+        if (_online == online) return;
+        _online = online;
+        ConnectionChanged?.Invoke(this, online);
+    }
+
+    internal async Task<JsonElement> CallAsync(string method, IEnumerable<KeyValuePair<string, object?>>? extra, bool post = false, CancellationToken cancel = default)
+    {
+        HttpResponseMessage res;
+        var parameters = Params(extra);
+        post = post && Extensions.Contains("formPost"); // a server that does not say it reads POSTed forms gets GET
+        try
+        {
+            string url = $"{Login.Server}/rest/{method}.view";
+            res = post
+                ? await _http.PostAsync(url, new FormUrlEncodedContent(parameters), cancel)
+                : await _http.GetAsync($"{url}?{Query(parameters)}", cancel);
+        }
+        catch (OperationCanceledException) when (cancel.IsCancellationRequested) { throw; }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            SetOnline(false);
+            throw new ServerUnreachableException("无法连接到音乐服务器。检查网络，然后重新连接。", ex);
+        }
+        using (res)
+        {
+            if (!res.IsSuccessStatusCode) throw new SubsonicException(0, $"服务器返回了 {(int)res.StatusCode} {res.ReasonPhrase}。");
+            using var doc = JsonDocument.Parse(await res.Content.ReadAsStreamAsync(cancel));
+            if (!doc.RootElement.TryGetProperty("subsonic-response", out var body)) throw new JsonException("not a Subsonic answer");
+            SetOnline(true);
+            if (Str(body, "status") != "ok")
+            {
+                var e = body.TryGetProperty("error", out var err) ? err : default;
+                int code = e.ValueKind == JsonValueKind.Object ? Int(e, "code") : 0;
+                throw new SubsonicException(code, Errors.GetValueOrDefault(code) ?? Str(e, "message") ?? "服务器拒绝了请求。");
+            }
+            return body.Clone();
+        }
+    }
+
+    // ---------------------------------------------------------------- JSON helpers
+    internal static string? Str(JsonElement e, string name) =>
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) ? v.ValueKind switch { JsonValueKind.String => v.GetString(), JsonValueKind.Number => v.GetRawText(), _ => null } : null;
+    internal static int Int(JsonElement e, string name) =>
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out var d) ? (int)d : 0;
+    internal static double Num(JsonElement e, string name) =>
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out var d) ? d : 0;
+    internal static double? NumOrNull(JsonElement e, string name) =>
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out var d) ? d : null;
+    internal static bool Bool(JsonElement e, string name) =>
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;
+    internal static DateTimeOffset? Date(JsonElement e, string name) =>
+        Str(e, name) is { } s && DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var d) ? d : null;
+    internal static IEnumerable<JsonElement> Array(JsonElement e, string name) =>
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Array ? v.EnumerateArray() : [];
+    internal static JsonElement Obj(JsonElement e, string name) =>
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Object ? v : default;
+
+    // ---------------------------------------------------------------- the server and the library
+
+    public async Task<ServerInfo> ConnectAsync(CancellationToken cancel = default)
+    {
+        var r = await CallAsync("ping", null, cancel: cancel);
+        try
+        {
+            var ext = await CallAsync("getOpenSubsonicExtensions", null, cancel: cancel);
+            foreach (var x in Array(ext, "openSubsonicExtensions")) if (Str(x, "name") is { } n) Extensions.Add(n);
+        }
+        catch (SubsonicException) { /* plain Subsonic */ }
+        string type = Str(r, "type") ?? "";
+        string name = type == "navidrome" ? "Navidrome" : type.Length > 0 ? char.ToUpperInvariant(type[0]) + type[1..] : "Subsonic";
+        return new ServerInfo(name, $"{name} {Str(r, "serverVersion")}".Trim(), Str(r, "version") ?? ApiVersion, Bool(r, "openSubsonic"));
+    }
+
+    private async Task<List<JsonElement>> PagedAsync(string method, string key, string sub, Func<int, IEnumerable<KeyValuePair<string, object?>>> extra, CancellationToken cancel)
+    {
+        var all = new List<JsonElement>();
+        for (int offset = 0; ; offset += Page)
+        {
+            var r = await CallAsync(method, extra(offset), cancel: cancel);
+            var page = Array(Obj(r, key), sub).ToList();
+            all.AddRange(page);
+            if (page.Count < Page) return all;
+        }
+    }
+
+    /// <summary>Every album and song. Songs come from search3 with an empty query (paged); a server that needs words
+    /// there is read album by album instead.</summary>
+    public async Task<LibrarySnapshot> LoadLibraryAsync(CancellationToken cancel = default)
+    {
+        var albums = await PagedAsync("getAlbumList2", "albumList2", "album", o => P(("type", "alphabeticalByName"), ("size", Page), ("offset", o)), cancel);
+        var songs = await PagedAsync("search3", "searchResult3", "song", o => P(("query", ""), ("songCount", Page), ("songOffset", o), ("albumCount", 0), ("artistCount", 0)), cancel);
+        if (songs.Count == 0 && albums.Count > 0)
+            foreach (var a in albums)
+                songs.AddRange(Array(Obj(await CallAsync("getAlbum", P(("id", Str(a, "id"))), cancel: cancel), "album"), "song"));
+        return LibraryBuilder.Build(albums, songs);
+    }
+
+    /// <summary>The number of songs the server has (to notice a rescan), or null when it does not say.</summary>
+    public async Task<int?> SongCountAsync(CancellationToken cancel = default)
+    {
+        try { var s = Obj(await CallAsync("getScanStatus", null, cancel: cancel), "scanStatus"); return s.ValueKind == JsonValueKind.Object && s.TryGetProperty("count", out _) ? Int(s, "count") : null; }
+        catch (SubsonicException) { return null; }
+    }
+
+    // ---------------------------------------------------------------- playlists
+    public async Task<List<Playlist>> GetPlaylistsAsync(Func<JsonElement, string> remember, CancellationToken cancel = default)
+    {
+        var list = Array(Obj(await CallAsync("getPlaylists", null, cancel: cancel), "playlists"), "playlist").ToList();
+        var result = new Playlist[list.Count];
+        var gate = new SemaphoreSlim(4);
+        await Task.WhenAll(list.Select(async (p, i) =>
+        {
+            await gate.WaitAsync(cancel);
+            try
+            {
+                var d = Obj(await CallAsync("getPlaylist", P(("id", Str(p, "id"))), cancel: cancel), "playlist");
+                string owner = Str(p, "owner") ?? Login.User;
+                result[i] = new Playlist
+                {
+                    Id = Str(p, "id")!, Name = Str(p, "name") ?? "", Owner = owner, Comment = Str(p, "comment"),
+                    Kind = Bool(p, "readonly") || !owner.Equals(Login.User, StringComparison.OrdinalIgnoreCase) ? PlaylistKind.ReadOnly : PlaylistKind.User,
+                    Changed = Date(p, "changed") ?? DateTimeOffset.Now,
+                    Entries = Array(d, "entry").Select(remember).ToList(),
+                };
+            }
+            finally { gate.Release(); }
+        }));
+        return result.ToList();
+    }
+
+    /// <summary>A new playlist; its id (an older server answers without the playlist: null).</summary>
+    public async Task<string?> CreatePlaylistAsync(string name, IReadOnlyList<string> songIds, CancellationToken cancel = default) =>
+        Str(Obj(await CallAsync("createPlaylist", P(("name", name), ("songId", songIds)), post: true, cancel: cancel), "playlist"), "id");
+
+    /// <summary>Replaces a playlist's songs (the only way the API has to reorder one).</summary>
+    public Task OverwritePlaylistAsync(string id, IReadOnlyList<string> songIds, CancellationToken cancel = default) =>
+        CallAsync("createPlaylist", P(("playlistId", id), ("songId", songIds)), post: true, cancel: cancel);
+
+    public Task UpdatePlaylistAsync(string id, string? name = null, IReadOnlyList<string>? add = null, IReadOnlyList<int>? removeIndexes = null, CancellationToken cancel = default) =>
+        CallAsync("updatePlaylist", P(("playlistId", id), ("name", name), ("songIdToAdd", add), ("songIndexToRemove", removeIndexes)), post: true, cancel: cancel);
+
+    public Task DeletePlaylistAsync(string id, CancellationToken cancel = default) => CallAsync("deletePlaylist", P(("id", id)), post: true, cancel: cancel);
+
+    // ---------------------------------------------------------------- likes, plays, search
+    public Task SetStarredAsync(string songId, bool starred, CancellationToken cancel = default) =>
+        CallAsync(starred ? "star" : "unstar", P(("id", songId)), post: true, cancel: cancel);
+
+    /// <summary>"Now playing" (submission false), or one counted play (true) started at <paramref name="startedAt"/>.</summary>
+    public Task ScrobbleAsync(string songId, bool submission, DateTimeOffset? startedAt = null, CancellationToken cancel = default) =>
+        CallAsync("scrobble", P(("id", songId), ("submission", submission), ("time", startedAt?.ToUnixTimeMilliseconds())), post: true, cancel: cancel);
+
+    public async Task<SearchResult> SearchAsync(string query, CancellationToken cancel = default)
+    {
+        var r = Obj(await CallAsync("search3", P(("query", query), ("songCount", 200), ("albumCount", 60), ("artistCount", 30)), cancel: cancel), "searchResult3");
+        List<string> Ids(string k) => Array(r, k).Select(x => Str(x, "id")).OfType<string>().ToList();
+        return new SearchResult(Ids("song"), Ids("album"), Ids("artist"));
+    }
+
+    // ---------------------------------------------------------------- lyrics, radio, artist information
+    public async Task<IReadOnlyList<LyricLine>?> LyricsAsync(Track t, CancellationToken cancel = default)
+    {
+        if (Extensions.Contains("songLyrics"))
+        {
+            try
+            {
+                var list = Array(Obj(await CallAsync("getLyricsBySongId", P(("id", t.Id)), cancel: cancel), "lyricsList"), "structuredLyrics").ToList();
+                var pick = list.FirstOrDefault(l => Bool(l, "synced") && Array(l, "line").Any());
+                if (pick.ValueKind != JsonValueKind.Object) pick = list.FirstOrDefault(l => Array(l, "line").Any());
+                if (pick.ValueKind == JsonValueKind.Object)
+                {
+                    bool synced = Bool(pick, "synced");
+                    // OpenSubsonic: a positive offset shows the lyrics sooner
+                    double offset = Num(pick, "offset") / 1000;
+                    return Array(pick, "line").Select(l => new LyricLine(synced ? Math.Max(0, Num(l, "start") / 1000 - offset) : null, Str(l, "value") ?? "")).ToList();
+                }
+            }
+            catch (SubsonicException) { /* fall back to getLyrics */ }
+        }
+        try
+        {
+            var r = Obj(await CallAsync("getLyrics", P(("artist", t.Artist), ("title", t.Title)), cancel: cancel), "lyrics");
+            return LyricsParser.Parse(Str(r, "value"));
+        }
+        catch (SubsonicException) { return null; }
+    }
+
+    /// <summary>Songs similar to one (getSimilarSongs2: needs Last.fm on the server); unknown songs are remembered.</summary>
+    public async Task<List<string>> SimilarSongsAsync(string songId, Func<JsonElement, string> remember, CancellationToken cancel = default)
+    {
+        try { return Array(Obj(await CallAsync("getSimilarSongs2", P(("id", songId), ("count", 50)), cancel: cancel), "similarSongs2"), "song").Select(remember).ToList(); }
+        catch (SubsonicException) { return []; }
+    }
+
+    public async Task<ArtistInfo?> ArtistInfoAsync(string artistId, CancellationToken cancel = default)
+    {
+        try
+        {
+            var r = Obj(await CallAsync("getArtistInfo2", P(("id", artistId)), cancel: cancel), "artistInfo2");
+            string bio = Regex.Replace(Str(r, "biography") ?? "", @"<a\b[^>]*>[\s\S]*?</a>\.?", "", RegexOptions.IgnoreCase);
+            bio = WebUtility.HtmlDecode(Regex.Replace(bio, "<[^>]+>", "")).Trim();
+            string? url = Str(r, "lastFmUrl");
+            return bio.Length > 0 || url is not null ? new ArtistInfo(bio, url) : null;
+        }
+        catch (SubsonicException) { return null; }
+    }
+
+    // ---------------------------------------------------------------- the play queue on the server (continue on another device)
+    public Task SavePlayQueueAsync(IReadOnlyList<string> ids, string current, double positionSeconds, CancellationToken cancel = default) =>
+        CallAsync("savePlayQueue", P(("id", ids), ("current", current), ("position", (long)(positionSeconds * 1000))), post: true, cancel: cancel);
+
+    public async Task<RemoteQueue?> GetPlayQueueAsync(Func<JsonElement, string> remember, CancellationToken cancel = default)
+    {
+        var q = Obj(await CallAsync("getPlayQueue", null, cancel: cancel), "playQueue");
+        var entries = Array(q, "entry").Select(remember).ToList();
+        if (entries.Count == 0 || Str(q, "current") is not { } current) return null;
+        return new RemoteQueue(entries, current, Num(q, "position") / 1000, Date(q, "changed") ?? DateTimeOffset.MinValue, Str(q, "changedBy") ?? "");
+    }
+
+    // ---------------------------------------------------------------- media
+    /// <summary>The cover at a size: the URL is the same every time (a fixed salt), so caches keep it.</summary>
+    public string CoverUrl(string coverArt, int size = 600) => Url("getCoverArt", ("id", coverArt), ("size", size));
+
+    /// <summary>The song's audio; <paramref name="transcodeTo"/> asks the server to convert it (e.g. "mp3").</summary>
+    public string StreamUrl(string songId, string? transcodeTo = null) =>
+        transcodeTo is null ? Url("stream", ("id", songId)) : Url("stream", ("id", songId), ("format", transcodeTo), ("maxBitRate", 320));
+}

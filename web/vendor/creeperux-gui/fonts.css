@@ -1,0 +1,4 @@
+/* Optional bundled fonts for @creeperux/gui: Chakra Petch (display) and Share Tech Mono (figures). Without this file the
+   --cx-font-display and --cx-font-mono stacks fall back to system fonts. Licences: ./fonts/licenses (SIL OFL 1.1). */
+@font-face{font-family:Chakra Petch;font-weight:600;font-display:swap;src:url(./fonts/chakra-petch-600-latin.woff2) format("woff2")}
+@font-face{font-family:Share Tech Mono;font-weight:400;font-display:swap;src:url(./fonts/share-tech-mono-400-latin.woff2) format("woff2")}

@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CreeperUX.Music.Core/CreeperUX.Music.Core.csproj" />
+    <Project Path="src/CreeperUX.Music/CreeperUX.Music.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CreeperUX.Music.Core.Tests/CreeperUX.Music.Core.Tests.csproj" />
+  </Folder>
+</Solution>

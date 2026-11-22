@@ -1,0 +1,10 @@
+# LF everywhere; Windows batch files keep CRLF for cmd.exe
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.svg text eol=lf
+# binary: icons, covers, fonts
+*.ico binary
+*.png binary
+*.jpg binary
+*.woff2 binary

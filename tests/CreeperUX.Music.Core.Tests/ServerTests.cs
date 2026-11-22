@@ -12,12 +12,15 @@ public sealed class DemoServer : IDisposable
     private readonly Process _node;
     public string Url { get; }
 
-    public DemoServer()
+    public DemoServer() : this("") { }
+
+    /// <param name="options">Extra options for the demo server, as "--scale=3 --page-cap=40".</param>
+    internal DemoServer(string options)
     {
         string root = AppContext.BaseDirectory;
         while (!File.Exists(Path.Combine(root, "server", "demo-server.mjs"))) root = Path.GetDirectoryName(root) ?? throw new InvalidOperationException("server/demo-server.mjs not found");
         var probe = new TcpListener(IPAddress.Loopback, 0); probe.Start(); int port = ((IPEndPoint)probe.LocalEndpoint).Port; probe.Stop();
-        _node = Process.Start(new ProcessStartInfo("node", $"\"{Path.Combine(root, "server", "demo-server.mjs")}\" {port}") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true })!;
+        _node = Process.Start(new ProcessStartInfo("node", $"\"{Path.Combine(root, "server", "demo-server.mjs")}\" {port} {options}") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true })!;
         string? line = _node.StandardOutput.ReadLine();
         if (line is null || !line.Contains("demo server")) throw new InvalidOperationException("the demo server did not start: " + line);
         Url = $"http://127.0.0.1:{port}";
@@ -69,6 +72,18 @@ public class ServerTests(DemoServer server) : IClassFixture<DemoServer>
         var numbers = album.TrackIds.Select(id => (lib.Track(id)!.Disc, lib.Track(id)!.Number)).ToList();
         Assert.Equal(numbers.OrderBy(x => x.Disc).ThenBy(x => x.Number), numbers);
         Assert.Equal(await c.SongCountAsync(), lib.Tracks.Count);
+    }
+
+    [Fact]
+    public async Task AServerWithSmallPagesStillGivesTheWholeLibrary()
+    {
+        // a server that gives at most 40 songs or albums per page, whatever is asked for (some cap it below 500)
+        using var capped = new DemoServer("--scale=3 --page-cap=40");
+        var c = new SubsonicClient(await SubsonicClient.SignInAsync(capped.Url, "demo", "demo", Client), Client);
+        var lib = await c.LoadLibraryAsync();
+        Assert.Equal(293 * 3, lib.Tracks.Count);
+        Assert.Equal(34 * 3, lib.Albums.Count);
+        Assert.Equal(lib.Tracks.Count, lib.Tracks.Select(t => t.Id).Distinct().Count());
     }
 
     [Fact]

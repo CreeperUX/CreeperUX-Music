@@ -12,7 +12,8 @@
 // API, not that a real server behaves the same.
 //
 // Accounts: demo / demo (yours), friend / friend (owns one public playlist).
-// Test hooks (not part of the API): GET /__test/log → the stream and scrobble requests seen;
+// Test hooks (not part of the API): GET /__test/log → the stream, scrobble and cover requests seen, and how many streams
+// are open;
 // GET /__test/offline?on=1|0 drops every /rest connection while on.
 // Usage: node server/demo-server.mjs [port]   (default 4533, Navidrome's)
 import { createServer } from 'node:http';
@@ -33,6 +34,19 @@ const iso = ms => new Date(ms).toISOString();
 
 // ---------------------------------------------------------------- the catalogue as a server's
 const lib = buildLibrary();
+// --scale=N: N copies of the catalogue under other names (a library the size of a real one, for performance runs)
+const scale = Number(process.argv.find(a => a.startsWith('--scale='))?.slice(8) || 1);
+// --page-cap=N: at most N songs or albums per page, whatever is asked (some servers cap it; the client must page on)
+const pageCap = Number(process.argv.find(a => a.startsWith('--page-cap='))?.slice(11) || 500);
+{
+  const [tracks, albums, artists] = [[...lib.tracks], [...lib.albums], [...lib.artists]];
+  for (let k = 1; k < scale; k++) {
+    const sfx = `x${k}`, n = k + 1;
+    for (const a of artists) lib.artists.push({ ...a, id: a.id + sfx, name: `${a.name} ${n}`, albumIds: a.albumIds.map(id => id + sfx) });
+    for (const a of albums) lib.albums.push({ ...a, id: a.id + sfx, title: `${a.title} · ${n}`, artist: `${a.artist} ${n}`, artistId: a.artistId + sfx, trackIds: a.trackIds.map(id => id + sfx) });
+    for (const t of tracks) lib.tracks.push({ ...t, id: t.id + sfx, artist: `${t.artist} ${n}`, artistId: t.artistId + sfx, album: `${t.album} · ${n}`, albumId: t.albumId + sfx, unavailable: false });
+  }
+}
 const SUFFIX = { FLAC: 'flac', ALAC: 'm4a', MP3: 'mp3', AAC: 'm4a', DSD64: 'dsf', Opus: 'opus' };
 const TYPE = { flac: 'audio/flac', m4a: 'audio/mp4', mp3: 'audio/mpeg', dsf: 'audio/x-dsf', opus: 'audio/ogg' };
 const albums = new Map(lib.albums.map(a => [a.id, a]));
@@ -83,7 +97,7 @@ addPlaylist('周末慢跑', 'demo', pick(['Rock', 'Electronic', 'City Pop'], 18,
 addPlaylist('朋友的歌单', 'friend', pick(['Jazz', 'Folk'], 12, 17), '朋友分享的公开歌单。');
 const nowPlaying = new Map();  // user → { id, at }
 const playQueues = new Map();  // user → { entries, current, position, changed, changedBy }
-const log = { streams: [], scrobbles: [], queues: [] };
+const log = { streams: [], scrobbles: [], queues: [], covers: [], open: 0 }; // open: stream responses not finished yet
 let offline = false;
 
 // ---------------------------------------------------------------- the API
@@ -117,14 +131,14 @@ function api(method, q) {
       const albumList = lib.albums.filter(a => !text || has(a.title) || has(a.artist));
       const artistList = lib.artists.filter(a => !text || has(a.name));
       return ok({ searchResult3: {
-        song: songList.slice(n('songOffset', 0), n('songOffset', 0) + n('songCount', 20)).map(song),
+        song: songList.slice(n('songOffset', 0), n('songOffset', 0) + Math.min(pageCap, n('songCount', 20))).map(song),
         album: albumList.slice(n('albumOffset', 0), n('albumOffset', 0) + n('albumCount', 20)).map(album),
         artist: artistList.slice(n('artistOffset', 0), n('artistOffset', 0) + n('artistCount', 20)).map(a => ({ id: a.id, name: a.name, albumCount: a.albumIds.length })),
       } });
     }
     case 'getAlbumList2': {
       const type = q.get('type'); if (!type) return err(10, 'Required parameter is missing: type');
-      const size = Math.min(500, Number(q.get('size') ?? 10)), offset = Number(q.get('offset') ?? 0);
+      const size = Math.min(500, pageCap, Number(q.get('size') ?? 10)), offset = Number(q.get('offset') ?? 0);
       let list = [...lib.albums];
       if (type === 'alphabeticalByName') list.sort((a, b) => a.title.localeCompare(b.title));
       else if (type === 'newest') list.sort((a, b) => album(b).created.localeCompare(album(a).created));
@@ -220,7 +234,7 @@ async function coverArt(q, res) {
   const a = albums.get(q.get('id'));
   if (!a?._art) { res.writeHead(404, { 'Access-Control-Allow-Origin': '*' }).end(); return; }
   const headers = { 'Cache-Control': 'public, max-age=31536000', 'Access-Control-Allow-Origin': '*' };
-  try { res.writeHead(200, { ...headers, 'Content-Type': 'image/jpeg' }).end(await readFile(join(root, 'server/covers', `${a.id}.jpg`))); }
+  try { res.writeHead(200, { ...headers, 'Content-Type': 'image/jpeg' }).end(await readFile(join(root, 'server/covers', `${a.id.replace(/x\d+$/, '')}.jpg`))); } // copies share the cover
   catch { res.writeHead(200, { ...headers, 'Content-Type': 'image/svg+xml' }).end(decodeURIComponent(a._art.slice(a._art.indexOf(',') + 1))); }
 }
 function stream(q, req, res) {
@@ -261,6 +275,8 @@ const server = createServer(async (req, res) => {
     if (method === 'getCoverArt' || method === 'stream') {
       const denied = auth(q);
       if (denied) { res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }).end(JSON.stringify({ 'subsonic-response': denied })); return; }
+      if (method === 'getCoverArt') log.covers.push({ id: q.get('id'), size: q.get('size'), at: Date.now(), open: log.open });
+      else { log.open++; res.on('close', () => log.open--); }
       return method === 'stream' ? stream(q, req, res) : coverArt(q, res);
     }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }).end(JSON.stringify({ 'subsonic-response': api(method, q) }));

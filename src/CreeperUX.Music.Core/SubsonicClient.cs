@@ -39,6 +39,8 @@ public sealed class ServerUnreachableException(string message, Exception? inner 
 /// <summary>
 /// A client for Navidrome or any server speaking the Subsonic API with the OpenSubsonic extensions
 /// (subsonic.org/pages/api.jsp, opensubsonic.netlify.app). Token authentication; JSON answers; writes are POSTed as forms.
+/// Every await is ConfigureAwait(false): answers (a few thousand songs) are parsed on the thread pool, never on the
+/// caller's UI thread; callbacks given to it (remember) may run on any thread.
 /// </summary>
 public sealed class SubsonicClient
 {
@@ -93,7 +95,7 @@ public sealed class SubsonicClient
         string salt = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(8));
         var login = new Login(baseUrl, user.Trim(), salt, Md5Hex(password + salt));
         var client = new SubsonicClient(login, clientName, http);
-        try { await client.CallAsync("ping", null, cancel: cancel); }
+        try { await client.CallAsync("ping", null, cancel: cancel).ConfigureAwait(false); }
         catch (ServerUnreachableException) { throw new ServerUnreachableException($"连不上 {baseUrl}。检查地址和网络；服务器在外网时需要 HTTPS。"); }
         catch (JsonException) { throw new ServerUnreachableException($"{baseUrl} 不像是 Navidrome（没有 Subsonic API 的回应）。"); }
         return login;
@@ -138,7 +140,21 @@ public sealed class SubsonicClient
         ConnectionChanged?.Invoke(this, online);
     }
 
+    /// <summary>Told about every request that took 500 ms or more ("getPlaylist 812 ms"), for the app's log.</summary>
+    public static Action<string>? Slow { get; set; }
+
     internal async Task<JsonElement> CallAsync(string method, IEnumerable<KeyValuePair<string, object?>>? extra, bool post = false, CancellationToken cancel = default)
+    {
+        long started = System.Diagnostics.Stopwatch.GetTimestamp();
+        try { return await CallOnceAsync(method, extra, post, cancel).ConfigureAwait(false); }
+        finally
+        {
+            var took = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+            if (took.TotalMilliseconds >= 500) Slow?.Invoke($"{method} {took.TotalMilliseconds:0} ms");
+        }
+    }
+
+    private async Task<JsonElement> CallOnceAsync(string method, IEnumerable<KeyValuePair<string, object?>>? extra, bool post, CancellationToken cancel)
     {
         HttpResponseMessage res;
         var parameters = Params(extra);
@@ -147,8 +163,8 @@ public sealed class SubsonicClient
         {
             string url = $"{Login.Server}/rest/{method}.view";
             res = post
-                ? await _http.PostAsync(url, new FormUrlEncodedContent(parameters), cancel)
-                : await _http.GetAsync($"{url}?{Query(parameters)}", cancel);
+                ? await _http.PostAsync(url, new FormUrlEncodedContent(parameters), cancel).ConfigureAwait(false)
+                : await _http.GetAsync($"{url}?{Query(parameters)}", cancel).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancel.IsCancellationRequested) { throw; }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
@@ -159,7 +175,7 @@ public sealed class SubsonicClient
         using (res)
         {
             if (!res.IsSuccessStatusCode) throw new SubsonicException(0, $"服务器返回了 {(int)res.StatusCode} {res.ReasonPhrase}。");
-            using var doc = JsonDocument.Parse(await res.Content.ReadAsStreamAsync(cancel));
+            using var doc = JsonDocument.Parse(await res.Content.ReadAsStreamAsync(cancel).ConfigureAwait(false));
             if (!doc.RootElement.TryGetProperty("subsonic-response", out var body)) throw new JsonException("not a Subsonic answer");
             SetOnline(true);
             if (Str(body, "status") != "ok")
@@ -194,10 +210,10 @@ public sealed class SubsonicClient
 
     public async Task<ServerInfo> ConnectAsync(CancellationToken cancel = default)
     {
-        var r = await CallAsync("ping", null, cancel: cancel);
+        var r = await CallAsync("ping", null, cancel: cancel).ConfigureAwait(false);
         try
         {
-            var ext = await CallAsync("getOpenSubsonicExtensions", null, cancel: cancel);
+            var ext = await CallAsync("getOpenSubsonicExtensions", null, cancel: cancel).ConfigureAwait(false);
             foreach (var x in Array(ext, "openSubsonicExtensions")) if (Str(x, "name") is { } n) Extensions.Add(n);
         }
         catch (SubsonicException) { /* plain Subsonic */ }
@@ -206,15 +222,35 @@ public sealed class SubsonicClient
         return new ServerInfo(name, $"{name} {Str(r, "serverVersion")}".Trim(), Str(r, "version") ?? ApiVersion, Bool(r, "openSubsonic"));
     }
 
+    /// <summary>
+    /// Every page of a list, in order. 500 are asked for per page; a server that gives fewer (some cap it) has its own page
+    /// size, learnt from the first two answers. Then three pages are asked for at a time (a remote server's round trips add
+    /// up: a library of 2,400 songs is five pages); it ends at the first page that is not full.
+    /// </summary>
     private async Task<List<JsonElement>> PagedAsync(string method, string key, string sub, Func<int, IEnumerable<KeyValuePair<string, object?>>> extra, CancellationToken cancel)
     {
-        var all = new List<JsonElement>();
-        for (int offset = 0; ; offset += Page)
+        async Task<List<JsonElement>> At(int offset) => Array(Obj(await CallAsync(method, extra(offset), cancel: cancel).ConfigureAwait(false), key), sub).ToList();
+        var all = await At(0).ConfigureAwait(false);
+        int size = all.Count, offset = size;
+        if (size == 0) return all;
+        if (size < Page)
         {
-            var r = await CallAsync(method, extra(offset), cancel: cancel);
-            var page = Array(Obj(r, key), sub).ToList();
-            all.AddRange(page);
-            if (page.Count < Page) return all;
+            // the whole list, or a server's own page size: the next page tells
+            var next = await At(offset).ConfigureAwait(false);
+            all.AddRange(next);
+            if (next.Count < size) return all;
+            offset += next.Count;
+        }
+        const int together = 3;
+        for (; ; offset += size * together)
+        {
+            int from = offset;
+            var pages = await Task.WhenAll(Enumerable.Range(0, together).Select(i => At(from + i * size))).ConfigureAwait(false);
+            foreach (var page in pages)
+            {
+                all.AddRange(page);
+                if (page.Count < size) return all;
+            }
         }
     }
 
@@ -222,33 +258,36 @@ public sealed class SubsonicClient
     /// there is read album by album instead.</summary>
     public async Task<LibrarySnapshot> LoadLibraryAsync(CancellationToken cancel = default)
     {
-        var albums = await PagedAsync("getAlbumList2", "albumList2", "album", o => P(("type", "alphabeticalByName"), ("size", Page), ("offset", o)), cancel);
-        var songs = await PagedAsync("search3", "searchResult3", "song", o => P(("query", ""), ("songCount", Page), ("songOffset", o), ("albumCount", 0), ("artistCount", 0)), cancel);
+        // albums and songs at the same time
+        var albumPages = PagedAsync("getAlbumList2", "albumList2", "album", o => P(("type", "alphabeticalByName"), ("size", Page), ("offset", o)), cancel);
+        var songPages = PagedAsync("search3", "searchResult3", "song", o => P(("query", ""), ("songCount", Page), ("songOffset", o), ("albumCount", 0), ("artistCount", 0)), cancel);
+        var albums = await albumPages.ConfigureAwait(false);
+        var songs = await songPages.ConfigureAwait(false);
         if (songs.Count == 0 && albums.Count > 0)
             foreach (var a in albums)
-                songs.AddRange(Array(Obj(await CallAsync("getAlbum", P(("id", Str(a, "id"))), cancel: cancel), "album"), "song"));
+                songs.AddRange(Array(Obj(await CallAsync("getAlbum", P(("id", Str(a, "id"))), cancel: cancel).ConfigureAwait(false), "album"), "song"));
         return LibraryBuilder.Build(albums, songs);
     }
 
     /// <summary>The number of songs the server has (to notice a rescan), or null when it does not say.</summary>
     public async Task<int?> SongCountAsync(CancellationToken cancel = default)
     {
-        try { var s = Obj(await CallAsync("getScanStatus", null, cancel: cancel), "scanStatus"); return s.ValueKind == JsonValueKind.Object && s.TryGetProperty("count", out _) ? Int(s, "count") : null; }
+        try { var s = Obj(await CallAsync("getScanStatus", null, cancel: cancel).ConfigureAwait(false), "scanStatus"); return s.ValueKind == JsonValueKind.Object && s.TryGetProperty("count", out _) ? Int(s, "count") : null; }
         catch (SubsonicException) { return null; }
     }
 
     // ---------------------------------------------------------------- playlists
     public async Task<List<Playlist>> GetPlaylistsAsync(Func<JsonElement, string> remember, CancellationToken cancel = default)
     {
-        var list = Array(Obj(await CallAsync("getPlaylists", null, cancel: cancel), "playlists"), "playlist").ToList();
+        var list = Array(Obj(await CallAsync("getPlaylists", null, cancel: cancel).ConfigureAwait(false), "playlists"), "playlist").ToList();
         var result = new Playlist[list.Count];
         var gate = new SemaphoreSlim(4);
         await Task.WhenAll(list.Select(async (p, i) =>
         {
-            await gate.WaitAsync(cancel);
+            await gate.WaitAsync(cancel).ConfigureAwait(false);
             try
             {
-                var d = Obj(await CallAsync("getPlaylist", P(("id", Str(p, "id"))), cancel: cancel), "playlist");
+                var d = Obj(await CallAsync("getPlaylist", P(("id", Str(p, "id"))), cancel: cancel).ConfigureAwait(false), "playlist");
                 string owner = Str(p, "owner") ?? Login.User;
                 result[i] = new Playlist
                 {
@@ -259,13 +298,13 @@ public sealed class SubsonicClient
                 };
             }
             finally { gate.Release(); }
-        }));
+        })).ConfigureAwait(false);
         return result.ToList();
     }
 
     /// <summary>A new playlist; its id (an older server answers without the playlist: null).</summary>
     public async Task<string?> CreatePlaylistAsync(string name, IReadOnlyList<string> songIds, CancellationToken cancel = default) =>
-        Str(Obj(await CallAsync("createPlaylist", P(("name", name), ("songId", songIds)), post: true, cancel: cancel), "playlist"), "id");
+        Str(Obj(await CallAsync("createPlaylist", P(("name", name), ("songId", songIds)), post: true, cancel: cancel).ConfigureAwait(false), "playlist"), "id");
 
     /// <summary>Replaces a playlist's songs (the only way the API has to reorder one).</summary>
     public Task OverwritePlaylistAsync(string id, IReadOnlyList<string> songIds, CancellationToken cancel = default) =>
@@ -286,7 +325,7 @@ public sealed class SubsonicClient
 
     public async Task<SearchResult> SearchAsync(string query, CancellationToken cancel = default)
     {
-        var r = Obj(await CallAsync("search3", P(("query", query), ("songCount", 200), ("albumCount", 60), ("artistCount", 30)), cancel: cancel), "searchResult3");
+        var r = Obj(await CallAsync("search3", P(("query", query), ("songCount", 200), ("albumCount", 60), ("artistCount", 30)), cancel: cancel).ConfigureAwait(false), "searchResult3");
         List<string> Ids(string k) => Array(r, k).Select(x => Str(x, "id")).OfType<string>().ToList();
         return new SearchResult(Ids("song"), Ids("album"), Ids("artist"));
     }
@@ -298,7 +337,7 @@ public sealed class SubsonicClient
         {
             try
             {
-                var list = Array(Obj(await CallAsync("getLyricsBySongId", P(("id", t.Id)), cancel: cancel), "lyricsList"), "structuredLyrics").ToList();
+                var list = Array(Obj(await CallAsync("getLyricsBySongId", P(("id", t.Id)), cancel: cancel).ConfigureAwait(false), "lyricsList"), "structuredLyrics").ToList();
                 var pick = list.FirstOrDefault(l => Bool(l, "synced") && Array(l, "line").Any());
                 if (pick.ValueKind != JsonValueKind.Object) pick = list.FirstOrDefault(l => Array(l, "line").Any());
                 if (pick.ValueKind == JsonValueKind.Object)
@@ -313,7 +352,7 @@ public sealed class SubsonicClient
         }
         try
         {
-            var r = Obj(await CallAsync("getLyrics", P(("artist", t.Artist), ("title", t.Title)), cancel: cancel), "lyrics");
+            var r = Obj(await CallAsync("getLyrics", P(("artist", t.Artist), ("title", t.Title)), cancel: cancel).ConfigureAwait(false), "lyrics");
             return LyricsParser.Parse(Str(r, "value"));
         }
         catch (SubsonicException) { return null; }
@@ -322,7 +361,7 @@ public sealed class SubsonicClient
     /// <summary>Songs similar to one (getSimilarSongs2: needs Last.fm on the server); unknown songs are remembered.</summary>
     public async Task<List<string>> SimilarSongsAsync(string songId, Func<JsonElement, string> remember, CancellationToken cancel = default)
     {
-        try { return Array(Obj(await CallAsync("getSimilarSongs2", P(("id", songId), ("count", 50)), cancel: cancel), "similarSongs2"), "song").Select(remember).ToList(); }
+        try { return Array(Obj(await CallAsync("getSimilarSongs2", P(("id", songId), ("count", 50)), cancel: cancel).ConfigureAwait(false), "similarSongs2"), "song").Select(remember).ToList(); }
         catch (SubsonicException) { return []; }
     }
 
@@ -330,7 +369,7 @@ public sealed class SubsonicClient
     {
         try
         {
-            var r = Obj(await CallAsync("getArtistInfo2", P(("id", artistId)), cancel: cancel), "artistInfo2");
+            var r = Obj(await CallAsync("getArtistInfo2", P(("id", artistId)), cancel: cancel).ConfigureAwait(false), "artistInfo2");
             string bio = Regex.Replace(Str(r, "biography") ?? "", @"<a\b[^>]*>[\s\S]*?</a>\.?", "", RegexOptions.IgnoreCase);
             bio = WebUtility.HtmlDecode(Regex.Replace(bio, "<[^>]+>", "")).Trim();
             string? url = Str(r, "lastFmUrl");
@@ -345,7 +384,7 @@ public sealed class SubsonicClient
 
     public async Task<RemoteQueue?> GetPlayQueueAsync(Func<JsonElement, string> remember, CancellationToken cancel = default)
     {
-        var q = Obj(await CallAsync("getPlayQueue", null, cancel: cancel), "playQueue");
+        var q = Obj(await CallAsync("getPlayQueue", null, cancel: cancel).ConfigureAwait(false), "playQueue");
         var entries = Array(q, "entry").Select(remember).ToList();
         if (entries.Count == 0 || Str(q, "current") is not { } current) return null;
         return new RemoteQueue(entries, current, Num(q, "position") / 1000, Date(q, "changed") ?? DateTimeOffset.MinValue, Str(q, "changedBy") ?? "");

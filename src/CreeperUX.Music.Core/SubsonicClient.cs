@@ -30,6 +30,8 @@ public sealed record Login(string Server, string User, string Salt, string Token
 public sealed class SubsonicException(int code, string message) : Exception(message)
 {
     public int Code { get; } = code;
+    /// <summary>The HTTP status when the request failed before any Subsonic answer (404, 502 …); 0 otherwise.</summary>
+    public int HttpStatus { get; init; }
     public bool IsAuthentication => Code is 40 or 41;
 }
 
@@ -73,25 +75,74 @@ public sealed class SubsonicClient
 
     // ---------------------------------------------------------------- signing in
 
-    /// <summary>"music.example.com", "http://host:4533/", "https://host/rest" → "https://music.example.com", "http://host:4533", "https://host".</summary>
+    /// <summary>"music.example.com", "http://host:4533/", "https://host/rest" → "https://music.example.com", "http://host:4533", "https://host".
+    /// Typed without http:// or https://, a private host (<see cref="IsPrivateHost"/>), where Navidrome is usually reached
+    /// directly, gets HTTP; any other gets HTTPS.</summary>
     public static string NormalizeServer(string? input)
     {
         string s = (input ?? "").Trim();
         if (s.Length == 0) return "";
-        if (!Regex.IsMatch(s, "^https?://", RegexOptions.IgnoreCase))
-            s = (Regex.IsMatch(s, @"^(localhost|127\.|10\.|192\.168\.|\[)") ? "http://" : "https://") + s;
+        if (!HasScheme(s)) s = (IsPrivateHost(HostOf("http://" + s)) ? "http://" : "https://") + s;
         s = s.TrimEnd('/');
         return Regex.Replace(s, @"/(rest|app)(/.*)?$", "", RegexOptions.IgnoreCase);
     }
 
+    private static bool HasScheme(string s) => Regex.IsMatch(s, "^https?://", RegexOptions.IgnoreCase);
+    private static string HostOf(string url) => Uri.TryCreate(url, UriKind.Absolute, out var u) ? u.Host : "";
+    private static readonly string[] PrivateSuffixes = [".localhost", ".local", ".lan", ".home.arpa", ".internal", ".ts.net"];
+
+    /// <summary>
+    /// A host whose traffic stays off the open internet: this machine; the local network (10/8, 172.16/12, 192.168/16,
+    /// link-local, IPv6 unique-local, a name without a dot, .local, .lan, .home.arpa, .internal); or a Tailscale tailnet
+    /// (100.64/10, its IPv6 addresses, which are unique-local, and .ts.net names), where WireGuard encrypts everything.
+    /// </summary>
+    public static bool IsPrivateHost(string? host)
+    {
+        string h = (host ?? "").Trim().TrimStart('[').TrimEnd(']').TrimEnd('.').ToLowerInvariant();
+        if (h.Length == 0) return false;
+        if (IPAddress.TryParse(h, out var ip))
+        {
+            if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+            if (IPAddress.IsLoopback(ip)) return true;
+            if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6) return ip.IsIPv6LinkLocal || ip.IsIPv6UniqueLocal || ip.IsIPv6SiteLocal;
+            byte[] b = ip.GetAddressBytes();
+            return b[0] == 10 || (b[0] == 172 && b[1] is >= 16 and <= 31) || (b[0] == 192 && b[1] == 168) || (b[0] == 169 && b[1] == 254) || (b[0] == 100 && b[1] is >= 64 and <= 127);
+        }
+        return !h.Contains('.') || PrivateSuffixes.Any(h.EndsWith);
+    }
+
+    /// <summary>Plain HTTP to a host on the internet: the sign-in token, which works like the password, would cross the
+    /// internet readable in every request.</summary>
+    public static bool IsPlainOverInternet(string? server)
+    {
+        string s = NormalizeServer(server);
+        return s.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && HostOf(s) is { Length: > 0 } host && !IsPrivateHost(host);
+    }
+
     public static string Md5Hex(string text) => Convert.ToHexStringLower(MD5.HashData(Encoding.UTF8.GetBytes(text)));
 
-    /// <summary>Checks the server and the account; returns the sign-in to keep (not the password).</summary>
+    /// <summary>Checks the server and the account; returns the sign-in to keep (not the password). A private host typed
+    /// without a scheme is tried over HTTP, then over HTTPS if nothing Subsonic answers there (a NAS or a tailnet name
+    /// may serve either).</summary>
     public static async Task<Login> SignInAsync(string server, string user, string password, string clientName, HttpClient? http = null, CancellationToken cancel = default)
     {
         string baseUrl = NormalizeServer(server);
         if (baseUrl.Length == 0) throw new ArgumentException("请填写服务器地址。");
         if (string.IsNullOrWhiteSpace(user)) throw new ArgumentException("请填写用户名。");
+        string? secure = !HasScheme(server.Trim()) && baseUrl.StartsWith("http://", StringComparison.Ordinal) ? "https://" + baseUrl["http://".Length..] : null;
+        try { return await TrySignInAsync(baseUrl, user, password, clientName, http, cancel).ConfigureAwait(false); }
+        catch (Exception first) when (secure is not null && first is ServerUnreachableException or SubsonicException { HttpStatus: > 0 })
+        {
+            try { return await TrySignInAsync(secure, user, password, clientName, http, cancel).ConfigureAwait(false); }
+            catch (Exception second) when (second is ServerUnreachableException or SubsonicException { HttpStatus: > 0 })
+            {
+                throw new ServerUnreachableException($"连不上 {baseUrl}，也连不上 {secure}。检查地址和网络。", second);
+            }
+        }
+    }
+
+    private static async Task<Login> TrySignInAsync(string baseUrl, string user, string password, string clientName, HttpClient? http, CancellationToken cancel)
+    {
         string salt = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(8));
         var login = new Login(baseUrl, user.Trim(), salt, Md5Hex(password + salt));
         var client = new SubsonicClient(login, clientName, http);
@@ -174,7 +225,7 @@ public sealed class SubsonicClient
         }
         using (res)
         {
-            if (!res.IsSuccessStatusCode) throw new SubsonicException(0, $"服务器返回了 {(int)res.StatusCode} {res.ReasonPhrase}。");
+            if (!res.IsSuccessStatusCode) throw new SubsonicException(0, $"服务器返回了 {(int)res.StatusCode} {res.ReasonPhrase}。") { HttpStatus = (int)res.StatusCode };
             using var doc = JsonDocument.Parse(await res.Content.ReadAsStreamAsync(cancel).ConfigureAwait(false));
             if (!doc.RootElement.TryGetProperty("subsonic-response", out var body)) throw new JsonException("not a Subsonic answer");
             SetOnline(true);

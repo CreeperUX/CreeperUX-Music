@@ -29,6 +29,11 @@ public sealed class AppSettings
     public string LastServer { get; set; } = "";
     /// <summary>The interface zoom, as a browser's (0.8 … 1.25).</summary>
     public double Zoom { get; set; } = 1;
+    /// <summary>Check GitHub for a newer version once a day after starting (设置 › 更新).</summary>
+    public bool AutoCheckUpdates { get; set; } = true;
+    /// <summary>Offer test versions (GitHub pre-releases) too.</summary>
+    public bool UpdatePrerelease { get; set; }
+    public DateTime? LastUpdateCheck { get; set; }
 
     private static string FilePath => Path.Combine(AppPaths.DataDirectory, "settings.json");
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = true };

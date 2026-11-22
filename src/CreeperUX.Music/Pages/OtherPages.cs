@@ -323,6 +323,12 @@ public sealed class SettingsPage : View
 
         var acc = Section("账号", "歌单、喜欢、播放次数和“接着听”的队列都保存在这个服务器上，所有设备共用。");
         acc.Children.Add(Fact("服务器", music.Client.Login.Server));
+        if (SubsonicClient.IsPlainOverInternet(music.Client.Login.Server))
+        {
+            var plain = Ui.Note(Glyphs.Error, "这个服务器用的是明文 HTTP：登录令牌会随每个请求明文经过互联网，被截获就能冒用你的账号。在服务器上配好 HTTPS 后，退出登录，再用 https:// 地址重新登录。", Ui.Brush("WarnBrush"));
+            plain.Margin = new Thickness(196, 0, 0, 0); // under the value, past Fact's 180 px key and 16 px gap
+            acc.Children.Add(plain);
+        }
         acc.Children.Add(Fact("用户", music.Client.Login.User));
         acc.Children.Add(Fact("本机名称", music.Client.ClientName));
         acc.Children.Add(Fact("登录信息保存在", "Windows 凭据管理器（只有令牌，没有密码）"));
@@ -330,6 +336,8 @@ public sealed class SettingsPage : View
         AutomationProperties.SetName(signOutButton, "退出登录");
         signOutButton.Click += async (_, _) => await signOut();
         acc.Children.Add(signOutButton);
+
+        AddUpdates(Section("更新", "有新版本时右上角会出现提示。安装时下载这台电脑架构的安装程序，按 GitHub 记录的 SHA-256 校验，然后关闭程序、打开安装程序；登录和设置保留。"), shell.Updates);
 
         var keys = Section("键盘快捷键");
         foreach (var (k, what) in new[] { ("空格", "播放 / 暂停"), ("Ctrl + →  /  Ctrl + ←", "下一首 / 上一首"), ("Ctrl + ↑  /  Ctrl + ↓", "音量"), ("Ctrl + K  或  /", "搜索"), ("Alt + ←", "后退"), ("Alt + Shift + B", "喜欢正在播放的歌曲"), ("Ctrl + =  /  Ctrl + -  /  Ctrl + 0", "放大 / 缩小 / 恢复 100%"), ("媒体键", "播放、暂停、上一首、下一首") })
@@ -342,6 +350,82 @@ public sealed class SettingsPage : View
         about.Children.Add(Fact("数据目录", AppPaths.DataDirectory));
         var note = Ui.Text("媒体库文件夹、转码、用户和 Last.fm 在 Navidrome 自己的网页里设置。", "MutedTextStyle"); note.TextWrapping = TextWrapping.Wrap;
         about.Children.Add(note);
+    }
+
+    /// <summary>
+    /// 设置 › 更新, as Lumen's 设置 › 关于: where things stand, 检查更新 / 安装更新, the daily check and test versions, and
+    /// the read-only GitHub token the private repository needs.
+    /// </summary>
+    private void AddUpdates(StackPanel section, Updates.UpdateService updates)
+    {
+        var settings = updates.Settings;
+        var status = Ui.Text("", size: 13, foreground: Ui.Brush("TextPrimaryBrush"));
+        status.TextWrapping = TextWrapping.Wrap;
+        AutomationProperties.SetName(status, "更新状态");
+        AutomationProperties.SetLiveSetting(status, AutomationLiveSetting.Polite);
+        var ring = new ProgressRing { Width = 18, Height = 18, IsActive = false, VerticalAlignment = VerticalAlignment.Center };
+        var check = new Button { Content = Ui.Row(8, Ui.Icon(Glyphs.Refresh, 14), Ui.Text("检查更新")), Style = Ui.Style("PillButtonStyle") };
+        AutomationProperties.SetName(check, "检查更新");
+        var install = new Button { Content = "安装更新", Style = Ui.Style("AccentButtonStyle"), Padding = new Thickness(20, 8, 20, 8), CornerRadius = new CornerRadius(18) };
+        AutomationProperties.SetName(install, "安装更新");
+        var auto = new ToggleSwitch { Header = "启动时自动检查（每天一次）", IsOn = settings.AutoCheckUpdates };
+        var pre = new ToggleSwitch { Header = "接收测试版", IsOn = settings.UpdatePrerelease };
+
+        var box = new PasswordBox { Header = "GitHub 令牌", MinWidth = 320 };
+        var save = new Button { Content = "保存", Style = Ui.Style("PillButtonStyle"), VerticalAlignment = VerticalAlignment.Bottom };
+        AutomationProperties.SetName(save, "保存 GitHub 令牌");
+        var remove = new Button { Content = "移除", Style = Ui.Style("PillButtonStyle"), VerticalAlignment = VerticalAlignment.Bottom };
+        AutomationProperties.SetName(remove, "移除 GitHub 令牌");
+        var tokenRow = new Grid { ColumnSpacing = 8 };
+        foreach (var w in new[] { new GridLength(1, GridUnitType.Star), GridLength.Auto, GridLength.Auto }) tokenRow.ColumnDefinitions.Add(new ColumnDefinition { Width = w });
+        box.MaxWidth = 440; box.HorizontalAlignment = HorizontalAlignment.Stretch;
+        tokenRow.Children.Add(box);
+        Grid.SetColumn(save, 1); tokenRow.Children.Add(save);
+        Grid.SetColumn(remove, 2); tokenRow.Children.Add(remove);
+        var tokenNote = Ui.Note(Glyphs.Info, $"CreeperUX Music 的仓库是私有的，检查和下载更新需要一个只读的 GitHub 令牌：在 GitHub 新建 fine-grained token，Repository access 只选 {Core.Updates.GitHubUpdates.Repository}，权限只给 Contents: Read-only。令牌保存在 Windows 凭据管理器中。");
+        var link = new HyperlinkButton { Content = "在 GitHub 新建令牌", NavigateUri = new Uri("https://github.com/settings/personal-access-tokens/new"), Padding = new Thickness(0), Margin = new Thickness(22, -6, 0, 0) };
+
+        string current = Updates.UpdateService.CurrentText;
+        void Sync(string? message = null)
+        {
+            bool has = updates.HasToken;
+            box.PlaceholderText = has ? "已保存（输入新的令牌可替换）" : "粘贴 GitHub 令牌（github_pat_…）";
+            remove.Visibility = has ? Visibility.Visible : Visibility.Collapsed;
+            check.IsEnabled = has;
+            var available = updates.Available;
+            install.Visibility = available is null ? Visibility.Collapsed : Visibility.Visible;
+            string last = settings.LastUpdateCheck is { } at ? $"上次检查：{at.ToLocalTime():yyyy-MM-dd HH:mm}。" : "";
+            status.Text = message ?? (available is { } r ? $"当前版本 {current}，发现新版本 {r.DisplayVersion}{(r.IsPrerelease ? "（测试版）" : "")}。"
+                : has ? $"当前版本 {current}。{last}" : $"当前版本 {current}。填写 GitHub 令牌后可以检查更新。");
+        }
+        check.Click += async (_, _) =>
+        {
+            check.IsEnabled = false; ring.IsActive = true;
+            try { Sync((await updates.CheckAsync()) is null ? $"当前版本 {current}，已是最新版本。" : null); }
+            catch (Core.Updates.UpdateException ex) { Sync(ex.Message); }
+            finally { ring.IsActive = false; check.IsEnabled = updates.HasToken; }
+        };
+        install.Click += async (_, _) => { if (updates.Available is { } r) await Updates.UpdateDialog.ShowAsync(XamlRoot, updates, r); };
+        save.Click += (_, _) =>
+        {
+            if (string.IsNullOrWhiteSpace(box.Password)) return;
+            try { updates.SaveToken(box.Password.Trim()); box.Password = ""; Sync("令牌已保存，可以检查更新了。"); }
+            catch (InvalidOperationException ex) { Sync(ex.Message); }
+        };
+        remove.Click += (_, _) => { updates.RemoveToken(); Sync(); };
+        auto.Toggled += (_, _) => { settings.AutoCheckUpdates = auto.IsOn; settings.Save(); };
+        pre.Toggled += (_, _) => { settings.UpdatePrerelease = pre.IsOn; settings.Save(); };
+        void OnAvailable() => Sync();
+        On(() => updates.AvailableChanged += OnAvailable, () => updates.AvailableChanged -= OnAvailable);
+        Sync();
+
+        section.Children.Add(status);
+        section.Children.Add(Ui.Row(12, check, install, ring));
+        section.Children.Add(auto);
+        section.Children.Add(pre);
+        section.Children.Add(tokenRow);
+        section.Children.Add(tokenNote);
+        section.Children.Add(link);
     }
 
     /// <summary>The zoom steps offered (the keyboard steps through the same ones).</summary>

@@ -2,6 +2,7 @@ using CreeperUX.Music.Controls;
 using CreeperUX.Music.Core;
 using CreeperUX.Music.Pages;
 using CreeperUX.Music.Services;
+using CreeperUX.Music.Updates;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -77,10 +78,26 @@ public sealed partial class MainWindow : Window, IShell
         AppWindow.Changed += (_, e) => { if (e.DidSizeChange || e.DidPresenterChange) FitTopBar(); };
         RootGrid.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(OnPointerPressed), true);
         RootGrid.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(OnKeyDown), true);
+        Updates = new UpdateService(_settings);
+        Updates.AvailableChanged += SyncUpdatePill;
         _ = Start();
+        Updates.CheckOnStartup();
     }
 
     private bool _closing;
+
+    /// <summary>Newer versions on GitHub (设置 › 更新, the pill in the top bar).</summary>
+    public UpdateService Updates { get; }
+
+    /// <summary>Closes the app as the window's close button does (the queue saved for another device first): the
+    /// update's installer replaces its files.</summary>
+    public async Task CloseAppAsync()
+    {
+        if (_closing) return;
+        _closing = true;
+        if (_music is { } m) { await m.SaveQueueNowAsync(); m.Dispose(); }
+        Close();
+    }
 
     /// <summary>The window is the active one; moving keyboard focus while it is not could take the foreground from the user.</summary>
     public bool IsActive { get; private set; }
@@ -113,7 +130,7 @@ public sealed partial class MainWindow : Window, IShell
     private void ShowLogin(string? error = null)
     {
         Panels.Visibility = Visibility.Collapsed; BarHost.Visibility = Visibility.Collapsed;
-        TopCenter.Children.Clear(); TopEnd.Children.Clear();
+        TopCenter.Children.Clear(); TopEnd.Children.Clear(); _updatePill = null;
         var login = new LoginView(_settings.LastServer, Program.DemoServer, error, IsActive);
         login.SignedIn += async l => { Interop.Credentials.Write(l.ToJson(), l.User); _settings.LastServer = l.Server; _settings.Save(); await Connect(l); };
         login.SignIn = (server, user, password) => SubsonicClient.SignInAsync(server, user, password, ClientName);
@@ -204,7 +221,7 @@ public sealed partial class MainWindow : Window, IShell
         SetPanel(_settings.PanelOpen);
 
         // the top bar
-        TopCenter.Children.Clear(); TopEnd.Children.Clear();
+        TopCenter.Children.Clear(); TopEnd.Children.Clear(); _updatePill = null;
         // foobar2k's top bar: a raised round Home button (48) that grows under the pointer, and the search pill (48): a search
         // icon, the field (no box, no underline), a hairline, the Browse button
         var home = Ui.IconButton(Glyphs.Home, "首页", (_, _) => Navigate("home"), 48, 20);
@@ -286,6 +303,7 @@ public sealed partial class MainWindow : Window, IShell
         _panelToggle.IsChecked = _settings.PanelOpen;
         _panelToggle.Click += (_, _) => { SetPanel(_panelToggle.IsChecked == true); if (_panelToggle.IsChecked == true) _panel?.Show("now"); };
         TopEnd.Children.Add(_connection); TopEnd.Children.Add(settings); TopEnd.Children.Add(_panelToggle);
+        SyncUpdatePill();
 
         music.Toast += ShowToast;
         music.PlayerChanged += () => { if (_route == "lyrics") _bar?.SetPanelMode(_panel?.Mode == "queue" && PanelColumn.Width.Value > 0, true); };
@@ -300,6 +318,50 @@ public sealed partial class MainWindow : Window, IShell
         string route = "search:" + _search.Text.Trim();
         if (_route.StartsWith("search:", StringComparison.Ordinal)) Navigate(route, replace: true);
         else Navigate(route);
+    }
+
+    private Button? _updatePill;
+    private string? _updateToasted;
+
+    /// <summary>A newer version: a quiet pill before the connection, in the accent colour, opening the update dialog
+    /// (and, the first time, a toast unless 设置 is showing it).</summary>
+    private void SyncUpdatePill()
+    {
+        if (_music is null) return; // signed out: the top bar has no end part
+        if (Updates.Available is not { } release)
+        {
+            if (_updatePill is not null) { TopEnd.Children.Remove(_updatePill); _updatePill = null; }
+            return;
+        }
+        if (_updatePill is null)
+        {
+            var icon = Ui.Icon(Glyphs.Download, 14, Ui.Brush("AccentTextBrush"));
+            var text = Ui.Text("", size: 12, foreground: Ui.Brush("AccentTextBrush"));
+            _updatePill = new Button
+            {
+                Content = Ui.Row(8, icon, text), Tag = text, Style = Ui.Style("PillButtonStyle"), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+                Height = 36, CornerRadius = new CornerRadius(18), Padding = new Thickness(12, 0, 14, 0), VerticalAlignment = VerticalAlignment.Center,
+            };
+            _updatePill.Resources["ButtonBackgroundPointerOver"] = Ui.Brush("HoverBrush");
+            _updatePill.Resources["ButtonBackgroundPressed"] = Ui.Brush("HoverBrush");
+            _updatePill.Click += (_, _) => ShowUpdate();
+            TopEnd.Children.Insert(0, _updatePill);
+            Motion.Enter(_updatePill, rise: 0, slide: 8);
+        }
+        ((TextBlock)_updatePill.Tag).Text = $"新版本 {release.DisplayVersion}";
+        string name = $"更新到 CreeperUX Music {release.DisplayVersion}";
+        AutomationProperties.SetName(_updatePill, name);
+        ToolTipService.SetToolTip(_updatePill, name);
+        if (_updateToasted != release.Tag && _route != "settings")
+        {
+            _updateToasted = release.Tag;
+            ShowToast(new($"CreeperUX Music {release.DisplayVersion} 可以更新了", false, "查看", ShowUpdate));
+        }
+    }
+
+    private void ShowUpdate()
+    {
+        if (Updates.Available is { } release) _ = UpdateDialog.ShowAsync(Content.XamlRoot, Updates, release);
     }
 
     private void SyncConnection()

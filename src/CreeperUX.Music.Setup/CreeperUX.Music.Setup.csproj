@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    CreeperUX Music's installer window, as Lumen's (tools\package.ps1 builds dist\CreeperUX-Music-<version>-<arch>-setup.exe):
+    the MSI from installer\Package.wxs runs inside it with Windows Installer's own dialogs turned off. Per-user like the
+    MSI, so no administrator prompt. Self-contained like the app: nothing to install first.
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>CreeperUX-Music-Setup</AssemblyName>
+    <Product>CreeperUX Music</Product>
+    <AssemblyTitle>CreeperUX Music 安装程序</AssemblyTitle>
+    <Company>CreeperUX</Company>
+    <RootNamespace>CreeperUX.Music.Setup</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\CreeperUX.Music\Assets\AppIcon.ico</ApplicationIcon>
+    <!-- WPF text rendering and IME want real culture data -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- One file to hand out, with its own runtime and the MSI inside (package.ps1 passes MsiPath) -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <!-- package.ps1 passes the app's <Version>: the window shows it -->
+    <Version>0.0.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="..\CreeperUX.Music\Assets\Logo.png" Link="Logo.png" />
+    <Resource Include="..\CreeperUX.Music\Assets\Fonts\ChakraPetch-SemiBold.ttf" Link="Fonts\ChakraPetch-SemiBold.ttf" />
+    <!-- the app's icons (the CreeperUX kit's outlines), so the window draws the same ones -->
+    <Compile Include="..\CreeperUX.Music\Controls\KitIcons.g.cs" Link="KitIcons.g.cs" />
+    <EmbeddedResource Include="$(MsiPath)" LogicalName="CreeperUX-Music.msi" Condition="'$(MsiPath)' != ''" />
+  </ItemGroup>
+
+</Project>

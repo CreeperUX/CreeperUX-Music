@@ -24,6 +24,8 @@ public interface IShell
     /// <summary>The interface zoom (1 = 100 %).</summary>
     double Zoom { get; }
     void SetZoom(double zoom);
+    /// <summary>Newer versions on GitHub.</summary>
+    Updates.UpdateService Updates { get; }
 }
 
 /// <summary>A page in the main panel. Subscriptions made with <see cref="On"/> end when the page is left.</summary>

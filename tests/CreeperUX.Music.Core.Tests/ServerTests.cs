@@ -56,6 +56,22 @@ public class ServerTests(DemoServer server) : IClassFixture<DemoServer>
     }
 
     [Fact]
+    public async Task APrivateAddressWithoutASchemeIsTriedOverHttpThenHttps()
+    {
+        string bare = server.Url["http://".Length..];
+        Assert.Equal(server.Url, (await SubsonicClient.SignInAsync(bare, "demo", "demo", Client)).Server);
+        // the server answered over HTTP, so a wrong password is said as such (HTTPS is not tried)
+        Assert.True((await Assert.ThrowsAsync<SubsonicException>(() => SubsonicClient.SignInAsync(bare, "demo", "nope", Client))).IsAuthentication);
+        var probe = new TcpListener(IPAddress.Loopback, 0); probe.Start(); int port = ((IPEndPoint)probe.LocalEndpoint).Port; probe.Stop();
+        var e = await Assert.ThrowsAsync<ServerUnreachableException>(() => SubsonicClient.SignInAsync($"127.0.0.1:{port}", "demo", "demo", Client));
+        Assert.Contains($"http://127.0.0.1:{port}", e.Message);
+        Assert.Contains($"https://127.0.0.1:{port}", e.Message);
+        // typed with its scheme, an address is taken as it is
+        var typed = await Assert.ThrowsAsync<ServerUnreachableException>(() => SubsonicClient.SignInAsync($"http://127.0.0.1:{port}", "demo", "demo", Client));
+        Assert.DoesNotContain("https://", typed.Message);
+    }
+
+    [Fact]
     public async Task ConnectsAndReadsTheWholeLibrary()
     {
         var c = await SignedIn();

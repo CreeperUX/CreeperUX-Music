@@ -38,8 +38,9 @@ export async function startDemoServer({ scale = 1 } = {}) {
 
 /** A test instance: start(), send(command), shot(name), quiet(), stop(). */
 export class TestApp {
-  constructor(name, { exe = exeFor(), demo = null, fresh = true } = {}) {
-    this.name = name; this.exe = exe; this.demo = demo;
+  /** @param env more environment for the instance (CXMUSIC_GITHUB_API: a fake GitHub) */
+  constructor(name, { exe = exeFor(), demo = null, fresh = true, env = {} } = {}) {
+    this.name = name; this.exe = exe; this.demo = demo; this.env = env;
     this.data = join(work, `data-${name}`);
     this.pipe = `cxmusic-e2e-${name}-${process.pid}`;
     if (fresh) rmSync(this.data, { recursive: true, force: true });
@@ -49,7 +50,7 @@ export class TestApp {
 
   async start() {
     if (!existsSync(this.exe)) throw new Error(`${this.exe} not built (node tools/e2e/acceptance.mjs builds it)`);
-    this.proc = spawn(this.exe, [], { env: { ...process.env, CXMUSIC_E2E: this.pipe, CXMUSIC_DATA_DIR: this.data, ...(this.demo ? { CXMUSIC_DEMO: this.demo } : {}) }, stdio: 'ignore' });
+    this.proc = spawn(this.exe, [], { env: { ...process.env, CXMUSIC_E2E: this.pipe, CXMUSIC_DATA_DIR: this.data, ...(this.demo ? { CXMUSIC_DEMO: this.demo } : {}), ...this.env }, stdio: 'ignore' });
     this.pid = this.proc.pid;
     for (let i = 0; i < 150; i++) {
       try {
@@ -121,9 +122,11 @@ export class TestApp {
   }
 }
 
+// the test instances' Credential Manager entries: the sign-in ("server") and the GitHub token for updates ("github")
 export const TEST_CREDENTIAL = 'CreeperUXMusic-test:server';
-export const credentialKept = () => { try { return execFileSync('cmdkey', ['/list'], { encoding: 'utf8' }).includes(`target=${TEST_CREDENTIAL}`); } catch { return false; } };
-export const forgetCredential = () => { try { execFileSync('cmdkey', [`/delete:${TEST_CREDENTIAL}`], { stdio: 'ignore' }); } catch { /* none */ } };
+const testCredential = name => `CreeperUXMusic-test:${name}`;
+export const credentialKept = (name = 'server') => { try { return execFileSync('cmdkey', ['/list'], { encoding: 'utf8' }).includes(`target=${testCredential(name)}`); } catch { return false; } };
+export const forgetCredential = (name = 'server') => { try { execFileSync('cmdkey', [`/delete:${testCredential(name)}`], { stdio: 'ignore' }); } catch { /* none */ } };
 
 /** Windows' media control sessions (read-only): "AppUserModelId|title" per line. */
 export function mediaSessions() {

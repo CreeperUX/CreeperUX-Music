@@ -10,7 +10,7 @@
     <WindowsAppSdkPackageVersion>2.5.1</WindowsAppSdkPackageVersion>
     <RootNamespace>CreeperUX.Music</RootNamespace>
     <AssemblyName>CreeperUX Music</AssemblyName>
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
     <Product>CreeperUX Music</Product>
     <Company>CreeperUX</Company>
     <Description>CreeperUX Music</Description>
@@ -24,6 +24,8 @@
     <RuntimeIdentifier Condition="'$(Platform)' == 'x64'">win-x64</RuntimeIdentifier>
     <UseWinUI>true</UseWinUI>
     <WinUISDKReferences>false</WinUISDKReferences>
+    <!-- as Lumen's: makes dotnet publish carry the app's resource index ("CreeperUX Music.pri", the compiled XAML) -->
+    <EnableMsixTooling>true</EnableMsixTooling>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>

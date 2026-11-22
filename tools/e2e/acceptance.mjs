@@ -8,11 +8,14 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { build, startDemoServer, TestApp, sleep, work, exeFor, credentialKept, forgetCredential, mediaSessions } from './e2e.mjs';
+import { startFakeGitHub } from './fake-github.mjs';
 
 const args = process.argv.slice(2);
 const only = args.find(a => a.startsWith('--only='))?.slice(7).split(',');
 const want = round => !only || only.includes(round);
 const arch = args.find(a => a.startsWith('--arch='))?.slice(7) ?? (process.arch === 'arm64' ? 'ARM64' : 'x64');
+// --exe=<path>: test that program instead of a fresh build (the one unpacked from an MSI by tools/package.ps1 -Extract)
+const exe = args.find(a => a.startsWith('--exe='))?.slice(6) ?? exeFor(arch);
 const results = [];
 let current = '';
 const log = (...a) => console.log(...a);
@@ -31,13 +34,15 @@ function quiet(app) {
 }
 
 // ---------------------------------------------------------------- build, the demo server, the first instance
-if (!args.includes('--no-build')) {
+if (!args.includes('--no-build') && !args.some(a => a.startsWith('--exe='))) {
   const b = build(arch);
   log(b.line, b.problems.length ? `\n${b.problems.join('\n')}` : '');
   if (!b.ok) process.exit(1);
 }
-forgetCredential();
+forgetCredential(); forgetCredential('github');
 const server = await startDemoServer();
+const github = await startFakeGitHub();
+const appEnv = { CXMUSIC_GITHUB_API: github.url };
 const md5 = s => createHash('md5').update(s).digest('hex');
 async function api(method, params = {}) {
   const salt = Math.random().toString(16).slice(2, 10);
@@ -47,8 +52,8 @@ async function api(method, params = {}) {
   if (r.status !== 'ok') throw new Error(`${method}: ${r.error?.message}`);
   return r;
 }
-log(`架构：${arch}`);
-let app = await new TestApp('main', { demo: server.url, exe: exeFor(arch) }).start();
+log(`架构：${arch}${exe === exeFor(arch) ? '' : `（${exe}）`}`);
+let app = await new TestApp('main', { demo: server.url, exe, env: appEnv }).start();
 const state = () => app.state();
 const until = (fn, what, ms) => app.until(fn, what, ms);
 const names = async () => app.names();
@@ -72,6 +77,16 @@ try {
       await until(async () => (await app.texts()).includes('用户名或密码不正确。'), 'error text');
       assert(!credentialKept(), '凭据被保存了');
       await shot('login-error');
+    });
+    await check('服务器地址是外网的明文 HTTP 时提醒（内网、Tailscale、HTTPS 不提醒）', async () => {
+      const warned = async () => (await app.texts()).some(t => t.startsWith('这是明文 HTTP 连接'));
+      await app.send('set 服务器地址=http://music.example.com');
+      await until(warned, 'plain HTTP warning');
+      await shot('login-plain');
+      for (const fine of ['https://music.example.com', 'music.example.com', '100.101.102.103:4533', 'http://192.168.1.10:4533', server.url]) {
+        await app.send(`set 服务器地址=${fine}`);
+        await until(async () => !(await warned()), `no warning for ${fine}`);
+      }
     });
     await check('用演示服务器登录：载入 293 首、34 张专辑、5 个服务器歌单', async () => {
       await app.invoke('使用本机的演示服务器');
@@ -114,7 +129,10 @@ try {
         await until(async () => (await state()).view === view, view);
         await sleep(900);
         assert((await app.texts()).some(t => t.includes(text)), `没有“${text}”`);
-        const problems = (await audit()).filter(p => !p.startsWith('small'));
+        // a list fills the rows below the window in idle time (the x64 build under emulation takes over a second):
+        // their buttons have no song, so no name, until then
+        let problems = [];
+        await until(async () => (problems = (await audit()).filter(p => !p.startsWith('small'))).length === 0, 'every control named', 5000).catch(() => {});
         assert(problems.length === 0, problems.slice(0, 3).join(' | '));
         await shot(`page-${route.replace(/[:]/g, '-').replace(/-$/, '')}`);
       });
@@ -395,7 +413,7 @@ try {
       await app.send('do pause');
       const a = await state();
       await until(async () => (await api('getPlayQueue')).playQueue.current === a.track, 'saved on the server');
-      const b = await new TestApp('second', { demo: server.url, exe: exeFor(arch) }).start();
+      const b = await new TestApp('second', { demo: server.url, exe }).start();
       try {
         await b.until(async () => (await b.send('ready')) === 'yes', 'B signed in (shared test credential)', 30000);
         await b.until(async () => { const s = await b.state(); return s.track === a.track && s.state === 'Paused'; }, 'B shows A\'s song paused', 10000);
@@ -478,7 +496,7 @@ try {
     await check('关掉再打开：不用再登录，音量等设置还在', async () => {
       await app.send('do volume 0.42');
       await app.stop();
-      app = await new TestApp('main', { demo: server.url, fresh: false, exe: exeFor(arch) }).start();
+      app = await new TestApp('main', { demo: server.url, fresh: false, exe, env: appEnv }).start();
       await until(async () => (await app.send('ready')) === 'yes', 'signed in from Credential Manager', 30000);
       assert(Math.abs((await state()).volume - 0.42) < 0.02 || (await state()).volume <= 0.42, `音量 ${(await state()).volume}`);
     });
@@ -500,10 +518,60 @@ try {
     });
     quiet(app);
   }
+
+  // ---------------------------------------------------------------- 11. updates (a fake GitHub: tools/e2e/fake-github.mjs)
+  if (want('updates')) {
+    round('updates', '第 11 轮：检查更新（本地的假 GitHub）');
+    const statusLine = async re => (await app.texts()).find(t => re.test(t));
+    await check('设置 › 更新：没有 GitHub 令牌时说明要先填写', async () => {
+      await app.send('nav settings');
+      await until(async () => statusLine(/填写 GitHub 令牌后可以检查更新/), 'no-token status');
+    });
+    await check('令牌不对：说明原因', async () => {
+      await app.send('set GitHub 令牌=wrong-token'); await app.invoke('保存 GitHub 令牌');
+      assert(credentialKept('github'), '令牌没有存进凭据管理器');
+      await app.invoke('检查更新');
+      await until(async () => statusLine(/GitHub 令牌无效/), 'bad-token message');
+    });
+    await check('令牌正确：找到正式版 9.9.0（不提示测试版和草稿），右上角出现“新版本”', async () => {
+      await app.send('set GitHub 令牌=gh-token'); await app.invoke('保存 GitHub 令牌');
+      await app.invoke('检查更新');
+      await until(async () => statusLine(/发现新版本 9\.9\.0。$/), '9.9.0 found');
+      await until(async () => hasName('更新到 CreeperUX Music 9.9.0'), 'the top bar pill');
+      assert(github.log.requests.some(r => r.path.endsWith('/releases') && r.auth === 'Bearer gh-token'), '列表请求没有带令牌');
+      await app.send('scroll 62'); await sleep(300);
+      await shot('settings-update');
+    });
+    await check('打开“接收测试版”：找到 9.10.0-beta.1', async () => {
+      await app.invoke('接收测试版');
+      await app.invoke('检查更新');
+      await until(async () => statusLine(/发现新版本 9\.10\.0-beta\.1（测试版）/), 'beta found');
+      await until(async () => hasName('更新到 CreeperUX Music 9.10.0-beta.1'), 'the pill follows');
+    });
+    await check('安装更新：显示版本说明，下载这台电脑架构的安装程序并按 SHA-256 校验（测试实例不运行它）', async () => {
+      const name = `CreeperUX-Music-9.10.0-${arch}-setup.exe`;
+      await app.invoke('安装更新');
+      await until(async () => (await app.texts()).includes('更新到 CreeperUX Music 9.10.0-beta.1'), 'dialog');
+      assert((await app.texts()).some(t => t.includes('测试用的版本说明。') && !t.includes('**')), '版本说明没有显示成纯文本');
+      await shot('update-dialog');
+      await app.invoke('下载并安装');
+      const logFile = join(app.data, 'app.log');
+      await until(async () => readFileSync(logFile, 'utf8').includes(`installer not started (${name})`), 'downloaded and checked', 20000);
+      const file = join(app.data, 'update', name);
+      assert(createHash('sha256').update(readFileSync(file)).digest('hex') === github.sha256(name), '下载的文件和 GitHub 上的不一样');
+      assert(!github.log.tokenLeaked, '令牌被发给了下载地址（应只发给 GitHub 的 API）');
+      await until(async () => statusLine(/^下载完成，已校验。/), 'done status');
+      await shot('update-downloaded');
+      await app.invoke('以后再说');
+      await until(async () => !(await app.texts()).includes('更新到 CreeperUX Music 9.10.0-beta.1'), 'dialog closed');
+    });
+    quiet(app);
+  }
 } finally {
   await app.stop().catch(() => {});
   server.stop();
-  forgetCredential();
+  github.stop();
+  forgetCredential(); forgetCredential('github');
 }
 
 const passed = results.filter(r => r.ok).length;

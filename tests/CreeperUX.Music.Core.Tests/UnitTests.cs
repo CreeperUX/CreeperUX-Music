@@ -11,8 +11,32 @@ public class SignInTests
     [InlineData("https://host/app/", "https://host")]
     [InlineData("192.168.1.10:4533", "http://192.168.1.10:4533")]
     [InlineData("localhost:4533", "http://localhost:4533")]
+    [InlineData("172.20.0.5:4533", "http://172.20.0.5:4533")]                 // a private range (Docker's, among others)
+    [InlineData("100.101.102.103:4533", "http://100.101.102.103:4533")]       // Tailscale
+    [InlineData("[fd7a:115c:a1e0::1]:4533", "http://[fd7a:115c:a1e0::1]:4533")] // Tailscale over IPv6 (unique-local)
+    [InlineData("nas:4533", "http://nas:4533")]
+    [InlineData("nas.local:4533", "http://nas.local:4533")]
+    [InlineData("nas.tail1234.ts.net:4533", "http://nas.tail1234.ts.net:4533")]
+    [InlineData("10.example.com", "https://10.example.com")]                  // a name, not the 10/8 range
+    [InlineData("172.32.0.1", "https://172.32.0.1")]
+    [InlineData("100.128.0.1", "https://100.128.0.1")]
+    [InlineData("[2001:db8::1]:4533", "https://[2001:db8::1]:4533")]
     [InlineData("  ", "")]
     public void NormalizesServerAddresses(string input, string expected) => Assert.Equal(expected, SubsonicClient.NormalizeServer(input));
+
+    [Theory]
+    [InlineData("http://music.example.com", true)]
+    [InlineData("http://203.0.113.5:4533", true)]
+    [InlineData("http://[2001:db8::1]:4533", true)]
+    [InlineData("https://music.example.com", false)]
+    [InlineData("music.example.com", false)]          // becomes https://
+    [InlineData("http://192.168.1.10:4533", false)]
+    [InlineData("http://100.101.102.103:4533", false)]
+    [InlineData("http://nas.local", false)]
+    [InlineData("http://localhost:4533", false)]
+    [InlineData("http://[::1]:4533", false)]
+    [InlineData("", false)]
+    public void PlainHttpIsFlaggedOnlyOverTheInternet(string server, bool plain) => Assert.Equal(plain, SubsonicClient.IsPlainOverInternet(server));
 
     [Theory]
     [InlineData("", "d41d8cd98f00b204e9800998ecf8427e")]

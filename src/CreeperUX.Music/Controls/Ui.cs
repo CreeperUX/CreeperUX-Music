@@ -18,7 +18,7 @@ public static class Glyphs
     public const string Delete = "", Edit = "", Info = "", Album = "", Artist = "", Music = "", Radio = "";
     public const string Close = "", Panel = "", Browse = "", Filter = "", Clock = "", Equalizer = "", SignOut = "";
     public const string Error = "";
-    public const string Refresh = "";
+    public const string Refresh = "", Download = "";
     public const string Playlist = "", Folder = "", Sort = "", Expand = "";
 }
 
@@ -42,6 +42,22 @@ public static class Ui
         if (icon.Glyph == glyph) return;
         icon.Glyph = glyph;
         if (pop) Motion.Pop(icon, 1.22f);
+    }
+
+    /// <summary>A note with an icon before it (sign-in notes, warnings), its text wrapping beside the icon. Muted, or in
+    /// <paramref name="foreground"/> (WarnBrush for a warning).</summary>
+    public static Grid Note(string glyph, string text, Brush? foreground = null)
+    {
+        var g = new Grid { ColumnSpacing = 8 };
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        g.ColumnDefinitions.Add(new ColumnDefinition());
+        var icon = Icon(glyph, 14, foreground);
+        icon.VerticalAlignment = VerticalAlignment.Top; icon.Margin = new Thickness(0, 2, 0, 0);
+        var t = Text(text, "MutedTextStyle", foreground: foreground);
+        t.TextWrapping = TextWrapping.Wrap;
+        Grid.SetColumn(t, 1);
+        g.Children.Add(icon); g.Children.Add(t);
+        return g;
     }
 
     public static TextBlock Text(string text, string? style = null, double? size = null, Brush? foreground = null, bool bold = false)

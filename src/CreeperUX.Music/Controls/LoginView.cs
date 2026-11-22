@@ -11,8 +11,10 @@ namespace CreeperUX.Music.Controls;
 public sealed class LoginView : UserControl
 {
     public static readonly (string User, string Password) DemoAccount = ("demo", "demo");
+    public const string PlainWarning = "这是明文 HTTP 连接：登录令牌会随每个请求明文经过互联网，被截获就能冒用你的账号。外网的服务器请用 HTTPS，或通过 Tailscale 这类虚拟内网连接。";
 
     private readonly TextBox _server, _user;
+    private readonly Grid _plain;
     private readonly PasswordBox _password;
     private readonly TextBlock _error;
     private readonly Button _submit;
@@ -25,6 +27,11 @@ public sealed class LoginView : UserControl
     public LoginView(string lastServer, string? demoServer, string? error, bool windowActive)
     {
         _server = new TextBox { Header = "服务器地址", PlaceholderText = "例如 https://music.example.com 或 http://192.168.1.10:4533", Text = lastServer, InputScope = new Microsoft.UI.Xaml.Input.InputScope { Names = { new Microsoft.UI.Xaml.Input.InputScopeName(Microsoft.UI.Xaml.Input.InputScopeNameValue.Url) } } };
+        // plain HTTP to a server on the internet: said as the address is typed, not refused (the choice is the user's)
+        _plain = Ui.Note(Glyphs.Error, PlainWarning, Ui.Brush("WarnBrush"));
+        void Check() => _plain.Visibility = SubsonicClient.IsPlainOverInternet(_server.Text) ? Visibility.Visible : Visibility.Collapsed;
+        _server.TextChanged += (_, _) => Check();
+        Check();
         _user = new TextBox { Header = "用户名" };
         _password = new PasswordBox { Header = "密码" };
         _error = Ui.Text(error ?? "", size: 13, foreground: Ui.Brush("BadBrush"));
@@ -49,16 +56,9 @@ public sealed class LoginView : UserControl
         AutomationProperties.SetHeadingLevel(title, AutomationHeadingLevel.Level1);
         var intro = Ui.Text("登录你自己的 Navidrome（或其他兼容 Subsonic 的服务器）。歌单、喜欢和播放次数都保存在服务器上，所有设备共用。", "MutedTextStyle");
         intro.TextWrapping = TextWrapping.Wrap;
-        var noteText = Ui.Text("密码不会保存：只在 Windows 凭据管理器里保存由它算出的登录令牌。", "MutedTextStyle");
-        noteText.TextWrapping = TextWrapping.Wrap;
-        var note = new Grid { ColumnSpacing = 8 };
-        note.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        note.ColumnDefinitions.Add(new ColumnDefinition());
-        var info = Ui.Icon(Glyphs.Info, 14); info.VerticalAlignment = VerticalAlignment.Top; info.Margin = new Thickness(0, 2, 0, 0);
-        note.Children.Add(info);
-        Grid.SetColumn(noteText, 1); note.Children.Add(noteText);
+        var note = Ui.Note(Glyphs.Info, "密码不会保存：只在 Windows 凭据管理器里保存由它算出的登录令牌。");
         var card = new StackPanel { Spacing = 16, Width = 460, Padding = new Thickness(36), CornerRadius = new CornerRadius(12), Background = Ui.Brush("PanelBrush"), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-        foreach (var e in new UIElement[] { brand, title, intro, _server, _user, _password, _error, actions, note }) card.Children.Add(e);
+        foreach (var e in new UIElement[] { brand, title, intro, _server, _plain, _user, _password, _error, actions, note }) card.Children.Add(e);
         Content = new ScrollViewer { Content = card, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         Loaded += (_, _) => { if (windowActive) ((Control)(_server.Text.Length > 0 ? _user : _server)).Focus(FocusState.Programmatic); };
     }

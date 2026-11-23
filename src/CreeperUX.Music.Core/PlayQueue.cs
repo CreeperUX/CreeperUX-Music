@@ -189,14 +189,18 @@ public sealed class PlayQueue(Func<string, Track?> lookup, Random? random = null
 
     /// <summary>The queue as saved on the server: what played, the current song, what comes (hand-queued first), at most 500
     /// songs around the current one.</summary>
-    public IReadOnlyList<string> ForServer()
+    public IReadOnlyList<string> ForServer() => Snapshot().Ids;
+
+    /// <summary><see cref="ForServer"/>'s list and the current song's place in it (a song may be there twice): what
+    /// another device takes over (CreeperUX Connect).</summary>
+    public (IReadOnlyList<string> Ids, int Index) Snapshot()
     {
-        if (Current is null) return [];
+        if (Current is null) return ([], -1);
         var before = _context.Take(_pointer + 1).ToList();
         if (before.Count == 0 || before[^1] != Current) before.Add(Current);
         var all = before.Concat(_manual.Select(m => m.TrackId)).Concat(_context.Skip(_pointer + 1)).ToList();
         int from = Math.Max(0, before.Count - 100);
-        return all.Skip(from).Take(500).ToList();
+        return (all.Skip(from).Take(500).ToList(), before.Count - 1 - from);
     }
 
     private List<string> Arrange(IReadOnlyList<string> ids, PlaybackOrder order, string? start)

@@ -42,7 +42,7 @@ if (!args.includes('--no-build') && !args.some(a => a.startsWith('--exe='))) {
 forgetCredential(); forgetCredential('github');
 const server = await startDemoServer();
 const github = await startFakeGitHub();
-const appEnv = { CXMUSIC_GITHUB_API: github.url };
+const appEnv = { CXMUSIC_GITHUB_API: github.url, CXMUSIC_DEVICE_NAME: '第一台' };
 const md5 = s => createHash('md5').update(s).digest('hex');
 async function api(method, params = {}) {
   const salt = Math.random().toString(16).slice(2, 10);
@@ -429,6 +429,61 @@ try {
         const q = b.quiet(); assert(q.startsWith('QUIET'), `第二台：${q}`);
       } finally { await b.stop(); }
     });
+    quiet(app);
+  }
+
+  // ---------------------------------------------------------------- 6b. CreeperUX Connect: control and move playback between devices
+  if (want('connect')) {
+    round('connect', '第 6b 轮：跨设备控制（CreeperUX Connect）');
+    const b = await new TestApp('remote', { demo: server.url, exe, env: { ...appEnv, CXMUSIC_DEVICE_NAME: '第二台' } }).start();
+    try {
+      await check('两台设备都连上，各自的设备列表里有对方', async () => {
+        await b.until(async () => (await b.send('ready')) === 'yes', 'B signed in', 30000);
+        await until(async () => (await state()).connect?.others?.some(d => d.Name === '第二台'), 'A sees B', 10000);
+        await b.until(async () => (await b.state()).connect?.others?.some(d => d.Name === '第一台'), 'B sees A', 10000);
+      });
+      let a;
+      await check('第一台放歌时，第二台看到它正在播放；选中它，播放条显示那首歌，第一台不被打断', async () => {
+        await app.send('do play album al3 0');
+        await until(async () => (await state()).engine === 'Playing', 'A playing');
+        a = await state();
+        await b.until(async () => (await b.state()).connect.others.some(d => d.Name === '第一台' && d.playing && d.track === a.track), 'B sees A playing', 10000);
+        await b.send('nav settings'); // a page without "播放" buttons of its own
+        await b.invoke('在其他设备上播放');
+        await b.until(async () => (await b.names()).some(n => n.startsWith('第一台 [')), 'the device list', 5000);
+        await sleep(700); // the flyout fades in
+        b.printWindow('acc-connect-devices'); // a Flyout is not in the app's own (RenderTargetBitmap) shots
+        await b.invoke('第一台');
+        await b.until(async () => (await b.state()).connect.target === '第一台', 'B controls A');
+        await b.until(async () => (await b.texts()).includes('正在「第一台」上播放'), 'the line in the bar');
+        assert((await b.texts()).includes(a.trackTitle), '播放条没有显示第一台的歌');
+        assert((await state()).engine === 'Playing', '只是选中，第一台不该被打断');
+        await b.shot('acc-connect-remote');
+      });
+      await check('在第二台按暂停，第一台暂停；再按播放，第一台继续', async () => {
+        await b.invoke('暂停');
+        await until(async () => (await state()).state === 'Paused', 'A paused', 5000);
+        await b.until(async () => (await b.names()).some(n => n.startsWith('播放 [')), 'B shows A paused', 5000);
+        await b.invoke('播放');
+        await until(async () => (await state()).engine === 'Playing', 'A plays again', 8000);
+      });
+      await check('选“这台电脑”：播放从第一台转过来，同一首歌、同一位置接着放，第一台停下', async () => {
+        await sleep(1500);
+        await b.invoke('正在「第一台」上播放，选择设备'); // the devices button, named for what it controls
+        await b.until(async () => (await b.names()).some(n => n.startsWith('这台电脑 [')), 'the device list', 5000);
+        const before = await state();
+        await b.invoke('这台电脑');
+        await until(async () => (await state()).state === 'Paused', 'A stopped', 8000);
+        await b.until(async () => { const s = await b.state(); return s.engine === 'Playing' && s.track === before.track; }, 'B plays A\'s song', 10000);
+        const s = await b.state();
+        assert(Math.abs(s.enginePosition - before.position) < 5, `位置 ${s.enginePosition} 与第一台的 ${before.position} 相差太多`);
+        assert(s.connect.target === null, '第二台应回到“这台电脑”');
+        assert(s.toasts.some(t => t.includes('已从「第一台」转到这台电脑播放')), JSON.stringify(s.toasts));
+        await b.shot('acc-connect-moved');
+        await b.send('do pause');
+        const q = b.quiet(); assert(q.startsWith('QUIET'), `第二台：${q}`);
+      });
+    } finally { await b.stop(); }
     quiet(app);
   }
 

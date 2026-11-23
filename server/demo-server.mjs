@@ -7,14 +7,16 @@
 // getSong, getPlaylists / getPlaylist / createPlaylist (new, or overwrite with playlistId) / updatePlaylist /
 // deletePlaylist, star / unstar, getStarred2, scrobble, getNowPlaying, savePlayQueue / getPlayQueue,
 // getSimilarSongs2, getTopSongs, getArtistInfo2, getCoverArt, stream (WAV, with byte ranges), getLyricsBySongId and
-// getLyrics. GET query parameters and POSTed forms are both read; every /rest answer carries
+// getLyrics; and CreeperUX Connect (rest/connect, a WebSocket: connect.mjs), as the CreeperUX/navidrome fork serves it.
+// GET query parameters and POSTed forms are both read; every /rest answer carries
 // Access-Control-Allow-Origin: * as Navidrome's do. It is not Navidrome: passing against it shows the client follows the
 // API, not that a real server behaves the same.
 //
 // Accounts: demo / demo (yours), friend / friend (owns one public playlist).
 // Test hooks (not part of the API): GET /__test/log → the stream, scrobble and cover requests seen, and how many streams
 // are open;
-// GET /__test/offline?on=1|0 drops every /rest connection while on.
+// GET /__test/offline?on=1|0 drops every /rest connection (Connect's WebSockets too) while on;
+// GET /__test/devices?u=demo → the user's connected devices and what they play.
 // Usage: node server/demo-server.mjs [port]   (default 4533, Navidrome's)
 import { createServer } from 'node:http';
 import { Readable } from 'node:stream';
@@ -25,6 +27,7 @@ import { extname, join, resolve, dirname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildLibrary, rng, hash, LYRIC } from './catalogue.mjs';
 import { wav } from './synth.mjs';
+import { attachConnect, EXTENSION as CONNECT } from './connect.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const port = Number(process.argv.slice(2).find(a => /^\d+$/.test(a)) || 4533);
@@ -116,7 +119,7 @@ function auth(q) {
 }
 
 function api(method, q) {
-  if (method === 'getOpenSubsonicExtensions') return ok({ openSubsonicExtensions: [{ name: 'songLyrics', versions: [1] }, { name: 'formPost', versions: [1] }] });
+  if (method === 'getOpenSubsonicExtensions') return ok({ openSubsonicExtensions: [{ name: 'songLyrics', versions: [1] }, { name: 'formPost', versions: [1] }, CONNECT] });
   const denied = auth(q); if (denied) return denied;
   const me = q.get('u');
   switch (method) {
@@ -259,8 +262,9 @@ const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   if (url.pathname.startsWith('/__test/')) {
-    if (url.pathname === '/__test/offline') offline = url.searchParams.get('on') === '1';
-    res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(url.pathname === '/__test/log' ? log : { offline }));
+    if (url.pathname === '/__test/offline') { offline = url.searchParams.get('on') === '1'; if (offline) connect.dropAll(); }
+    const body = url.pathname === '/__test/log' ? log : url.pathname === '/__test/devices' ? connect.devices(url.searchParams.get('u') ?? 'demo') : { offline };
+    res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(body));
     return;
   }
   if (url.pathname.startsWith('/rest/')) {
@@ -292,5 +296,6 @@ const server = createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': TYPES[extname(real)] || 'application/octet-stream', 'Cache-Control': 'no-store' }).end(await readFile(real));
   } catch { res.writeHead(404).end('not found'); }
 });
+const connect = attachConnect(server, { authenticate: q => (auth(q) ? null : q.get('u')), isOffline: () => offline });
 server.listen(port, '127.0.0.1', () => console.log(`demo server: http://127.0.0.1:${port}/ (${songs.size} songs, ${albums.size} albums, ${playlists.length} playlists; sign in as demo / demo)`));
 export { server };

@@ -474,6 +474,16 @@ public sealed class MusicService : IDisposable
         if (Queue.Adopt(new PlayContext("queue", "continue", label), q.TrackIds, q.Current) is { } id) Load(id, autoplay: false, at: q.Position);
     }
 
+    /// <summary>Takes over another device's playback (a CreeperUX Connect transfer): its queue, at its song and position,
+    /// playing or paused as asked. False when the song is not in this library.</summary>
+    public bool TakeOver(PlayContext context, IReadOnlyList<string> ids, int index, double position, bool play)
+    {
+        string? current = index >= 0 && index < ids.Count ? ids[index] : null;
+        if (current is null || Queue.Adopt(context, ids, current) is not { } id) return false;
+        Load(id, autoplay: play, at: Math.Max(0, position));
+        return true;
+    }
+
     // ---------------------------------------------------------------- likes and playlists
     // likes wanted but not yet sent, and the songs whose like is on its way to the server
     private readonly Dictionary<string, bool> _likeWanted = [];

@@ -69,6 +69,7 @@ public sealed partial class MainWindow : Window, IShell
             if (_music is null || _closing) return;
             e.Cancel = true; _closing = true;
             await _music.SaveQueueNowAsync(); // the position, for another device
+            _connect?.Dispose();
             _music.Dispose();
             Close();
         };
@@ -95,9 +96,14 @@ public sealed partial class MainWindow : Window, IShell
     {
         if (_closing) return;
         _closing = true;
-        if (_music is { } m) { await m.SaveQueueNowAsync(); m.Dispose(); }
+        if (_music is { } m) { await m.SaveQueueNowAsync(); _connect?.Dispose(); m.Dispose(); }
         Close();
     }
+
+    private ConnectService? _connect;
+
+    /// <summary>CreeperUX Connect (the user's other devices), while signed in.</summary>
+    public ConnectService? Devices => _connect;
 
     /// <summary>The window is the active one; moving keyboard focus while it is not could take the foreground from the user.</summary>
     public bool IsActive { get; private set; }
@@ -119,7 +125,10 @@ public sealed partial class MainWindow : Window, IShell
     }
 
     // ---------------------------------------------------------------- signing in and starting
-    private static string ClientName => $"CreeperUX Music ({(AppPaths.IsTestInstance ? "测试 " : "")}{Environment.MachineName})";
+    /// <summary>This computer as the server and the user's other devices know it. A test instance may be given a name of its
+    /// own (CXMUSIC_DEVICE_NAME), so two on one computer are two devices.</summary>
+    private static string DeviceName => AppPaths.IsTestInstance && Environment.GetEnvironmentVariable("CXMUSIC_DEVICE_NAME") is { Length: > 0 } name ? name : Environment.MachineName;
+    private static string ClientName => $"CreeperUX Music ({(AppPaths.IsTestInstance ? "测试 " : "")}{DeviceName})";
 
     private async Task Start()
     {
@@ -190,6 +199,7 @@ public sealed partial class MainWindow : Window, IShell
 
     private async Task SignOut()
     {
+        _connect?.Dispose(); _connect = null;
         _music?.Dispose();
         _music = null; Ready = false;
         _view?.Leave(); _view = null;
@@ -214,7 +224,9 @@ public sealed partial class MainWindow : Window, IShell
         _panel = new NowPlayingPane(music, this);
         _panel.CloseRequested += () => SetPanel(false);
         PanelHost.Child = _panel;
-        _bar = new PlaybackBar(music, this);
+        _connect?.Dispose();
+        _connect = new ConnectService(music, DispatcherQueue, DeviceName);
+        _bar = new PlaybackBar(music, _connect, this);
         _bar.QueueToggled += open => { SetPanel(true); _panel.Show(open ? "queue" : "now"); };
         BarHost.Child = _bar;
         BarHost.Visibility = Visibility.Visible;
@@ -563,13 +575,22 @@ public sealed partial class MainWindow : Window, IShell
         var mods = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
         var alt = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Menu).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
         var shift = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        // while the bar controls another device (CreeperUX Connect), the transport keys do too
+        var remote = _connect?.Target;
+        bool Remote(string action, double? level = null)
+        {
+            if (remote is null) return false;
+            _ = _connect!.SendAsync(new Core.Connect.ConnectCommand(action) { Level = level });
+            return true;
+        }
+        double remoteVolume = remote?.State?.Volume ?? 0.5;
         switch (e.Key)
         {
-            case VirtualKey.Space when !typing && !mods && !alt: m.TogglePlay(); e.Handled = true; break;
-            case VirtualKey.Right when mods: m.Next(); e.Handled = true; break;
-            case VirtualKey.Left when mods: m.Previous(); e.Handled = true; break;
-            case VirtualKey.Up when mods: m.SetVolume(m.Volume + 0.05); e.Handled = true; break;
-            case VirtualKey.Down when mods: m.SetVolume(m.Volume - 0.05); e.Handled = true; break;
+            case VirtualKey.Space when !typing && !mods && !alt: if (!Remote(Core.Connect.ConnectCommand.Toggle)) m.TogglePlay(); e.Handled = true; break;
+            case VirtualKey.Right when mods: if (!Remote(Core.Connect.ConnectCommand.Next)) m.Next(); e.Handled = true; break;
+            case VirtualKey.Left when mods: if (!Remote(Core.Connect.ConnectCommand.Previous)) m.Previous(); e.Handled = true; break;
+            case VirtualKey.Up when mods: if (!Remote(Core.Connect.ConnectCommand.Volume, Math.Min(1, remoteVolume + 0.05))) m.SetVolume(m.Volume + 0.05); e.Handled = true; break;
+            case VirtualKey.Down when mods: if (!Remote(Core.Connect.ConnectCommand.Volume, Math.Max(0, remoteVolume - 0.05))) m.SetVolume(m.Volume - 0.05); e.Handled = true; break;
             case VirtualKey.K when mods: case (VirtualKey)191 when !typing:
                 if (IsActive) _search?.Focus(FocusState.Keyboard);
                 e.Handled = true; break;

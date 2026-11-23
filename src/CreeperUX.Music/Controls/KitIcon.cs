@@ -29,7 +29,8 @@ public sealed class KitIcon : Grid
         [Glyphs.Add] = "plus", [Glyphs.Delete] = "trash", [Glyphs.Edit] = "edit", [Glyphs.Info] = "info", [Glyphs.Album] = "album",
         [Glyphs.Artist] = "artist", [Glyphs.Music] = "music", [Glyphs.Close] = "close", [Glyphs.Panel] = "panel-right",
         [Glyphs.Browse] = "browse", [Glyphs.Filter] = "filter", [Glyphs.Clock] = "clock", [Glyphs.Equalizer] = "waveform",
-        [Glyphs.Error] = "alert", [Glyphs.Refresh] = "refresh", [Glyphs.Download] = "download",[Glyphs.Playlist] = "playlist", [Glyphs.Folder] = "folder", [Glyphs.Sort] = "sort", [Glyphs.Expand] = "expand",
+        [Glyphs.Error] = "alert", [Glyphs.Refresh] = "refresh", [Glyphs.Download] = "download",
+        [Glyphs.Devices] = "computer", [Glyphs.Headphones] = "headphones", [Glyphs.Playlist] = "playlist", [Glyphs.Folder] = "folder", [Glyphs.Sort] = "sort", [Glyphs.Expand] = "expand",
     };
 
     private readonly double _size;

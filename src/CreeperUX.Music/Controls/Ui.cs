@@ -19,6 +19,7 @@ public static class Glyphs
     public const string Close = "", Panel = "", Browse = "", Filter = "", Clock = "", Equalizer = "", SignOut = "";
     public const string Error = "";
     public const string Refresh = "", Download = "";
+    public const string Devices = "", Headphones = "";
     public const string Playlist = "", Folder = "", Sort = "", Expand = "";
 }
 

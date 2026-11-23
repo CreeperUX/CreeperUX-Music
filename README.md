@@ -38,6 +38,14 @@ npm run demo             # 演示服务器 + Windows 程序（第一次会先编
 - 歌曲电台和艺人简介需要在 Navidrome 里配置 Last.fm；没有时，电台改为同艺人、同流派的歌。
 - Windows 解不了的格式（DSD、APE、WavPack、TTA 等）会请服务器转码成 MP3（Navidrome 默认就有 MP3 转码）。
 
+## 跨设备控制（CreeperUX Connect）
+
+像 Spotify Connect 一样：播放条右侧的“设备”按钮列出同一账号下在线的设备，以及它们各自在放什么。
+
+- 选中另一台设备后，播放条显示那台设备在放的歌（下面一行琥珀色的“正在「…」上播放”），播放、暂停、上一首、下一首、拖动进度、音量，以及空格和 Ctrl + 方向键，控制的都是那台设备。
+- 选中时，如果当前这台正在播放，播放会转过去（对方从同一首歌、同一位置接着放，这边停下）；如果这台暂停着、对方又空闲，也会转过去（到对方那里同样是暂停）；其他情况只遥控，不打断对方正在放的东西。选回“这台电脑”时同理。
+- 需要服务器支持：原版 Navidrome 没有这个功能，要用 CreeperUX 改版的 Navidrome（[CreeperUX/navidrome](https://github.com/CreeperUX/navidrome)，协议见那边的 `server/connect/README.md`）。演示服务器也实现了同一协议（`server/connect.mjs`）。服务器没有时，设备按钮不出现，其余功能不受影响。
+
 ## 服务器提供什么，程序做什么
 
 | 功能 | 由谁负责 | Subsonic / OpenSubsonic 调用 |
@@ -50,6 +58,7 @@ npm run demo             # 演示服务器 + Windows 程序（第一次会先编
 | 歌单 | 服务器 | `getPlaylists`、`createPlaylist`（新建，或整体覆盖用于排序）、`updatePlaylist`、`deletePlaylist`；别人的歌单只能播放 |
 | 封面、歌词、搜索 | 服务器 | `getCoverArt`、`getLyricsBySongId`（同步歌词）/ `getLyrics`、`search3` |
 | 换设备接着听 | 服务器存档 | 换歌、暂停、拖动、每 30 秒和关窗时 `savePlayQueue`；启动和窗口回到前台时 `getPlayQueue` |
+| 跨设备控制 | 服务器转发（CreeperUX 改版 Navidrome） | `rest/connect`（WebSocket，OpenSubsonic 扩展 `creeperuxConnect`）：设备列表、播放状态、遥控命令、转移播放 |
 | 歌曲电台、艺人简介 | 服务器 | `getSimilarSongs2`、`getArtistInfo2` |
 | 队列、播放顺序、播完停止、回放增益、输出设备 | 程序 | — |
 | 和其他设备同步 | — | 窗口回到前台（间隔一分钟以上）和每次刷新时重读歌单；歌曲数变了就重读曲库 |
@@ -98,7 +107,7 @@ powershell -File tools/package.ps1 -Arch x64 -Extract  # 一个架构，并把 M
 
 ```bash
 npm install
-dotnet test tests/CreeperUX.Music.Core.Tests     # 82 项：队列逻辑、歌词、格式、令牌、服务器地址、检查更新，以及对演示服务器的集成测试
+dotnet test tests/CreeperUX.Music.Core.Tests     # 87 项：队列逻辑、歌词、格式、令牌、服务器地址、检查更新、跨设备控制，以及对演示服务器的集成测试
 npm run check                                   # Windows 程序的多轮验收（本机架构；--arch=x64|ARM64）
 npm run check:web                               # 网页版客户端
 ```
@@ -116,7 +125,7 @@ npm run check:web                               # 网页版客户端
 
 验收里还有一项“播放时打开别的专辑，封面照样马上去取”：XAML 自带的图片下载走 WinINet，和从同一台服务器传来的音频流共用很少的几个连接，播放期间封面会一直加载不出来。现在封面由程序自己下载（`Controls/Covers.cs`，.NET HttpClient，同一地址只请求一次，最近用过的放在 48 MB 的内存缓存里），并按它在屏幕上实际占的像素（尺寸 × 显示缩放 × 界面缩放）向服务器要 64 / 128 / 256 / 512 / 1024 中够用的一档，不会把小图放大显示。
 
-验收分十一轮：首次启动与登录、每个页面（含可访问性审查和切换 60 次页面后的内存检查）、播放（暂停、拖动、计播放次数、无缝切歌、队列、电台、DSD 转码、错误、回放增益、歌词）、歌单增删改、搜索、第二台设备接着听、窄窗口、服务器断开与恢复、系统媒体控制、重启与退出登录、检查更新（令牌错误、正式版和测试版、下载并校验安装程序）。功能检查都会回读服务器状态来确认。
+验收分十二轮：首次启动与登录、每个页面（含可访问性审查和切换 60 次页面后的内存检查）、播放（暂停、拖动、计播放次数、无缝切歌、队列、电台、DSD 转码、错误、回放增益、歌词）、歌单增删改、搜索、第二台设备接着听、跨设备控制（两台设备互相看见、遥控暂停和播放、把播放转过来）、窄窗口、服务器断开与恢复、系统媒体控制、重启与退出登录、检查更新（令牌错误、正式版和测试版、下载并校验安装程序）。功能检查都会回读服务器状态来确认。
 演示服务器是按 Subsonic / OpenSubsonic 文档写的，**不是 Navidrome 本身**。
 
 ## 已知限制

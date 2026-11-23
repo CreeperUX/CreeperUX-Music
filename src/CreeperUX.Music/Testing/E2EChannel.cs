@@ -89,6 +89,7 @@ internal static class E2EChannel
         {
             if (popup.Child is not FrameworkElement child) continue;
             // a menu that has just opened may not be laid out yet: RenderTargetBitmap refuses an element without a size
+            // (a Flyout's popup draws nothing here: printWindow in tools/e2e takes those)
             for (int i = 0; i < 20 && (child.ActualWidth <= 0 || child.ActualHeight <= 0); i++) await Task.Delay(25);
             if (child.ActualWidth > 0 && child.ActualHeight > 0)
                 layers.Add((child, child.TransformToVisual(root).TransformPoint(new Windows.Foundation.Point(0, 0))));
@@ -194,6 +195,11 @@ internal static class E2EChannel
             online = m?.IsOnline, lyric = W?.Panel?.CurrentLyric, services = Services.MusicService.Alive, songs = m?.Library.Tracks.Count, albums = m?.Library.Albums.Count, artists = m?.Library.Artists.Count,
             playlists = m?.Playlists.Select(p => new { p.Id, p.Name, kind = p.Kind.ToString(), count = p.TrackIds.Count, p.Owner }),
             liked = m?.Playlists.FirstOrDefault(p => p.Kind == PlaylistKind.Liked)?.Entries.Take(5),
+            connect = W?.Devices is { } c ? new
+            {
+                available = c.IsAvailable, connected = c.IsConnected, id = c.ThisId, target = c.Target?.Name,
+                others = c.Others.Select(d => new { d.Id, d.Name, playing = d.State?.Playing, track = d.State?.TrackId }),
+            } : null,
             toasts = W?.Content is FrameworkElement root ? Descend(root).OfType<Border>().Where(b => AutomationProperties.GetLiveSetting(b) == AutomationLiveSetting.Polite).Select(AutomationProperties.GetName) : null,
         });
     }

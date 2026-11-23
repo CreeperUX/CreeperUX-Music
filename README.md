@@ -48,7 +48,7 @@ npm run demo             # 演示服务器 + Windows 程序（第一次会先编
 - 选中另一台设备后，播放条显示那台设备在放的歌（下面一行琥珀色的“正在「…」上播放”），播放、暂停、上一首、下一首、拖动进度、音量，以及空格和 Ctrl + 方向键，控制的都是那台设备。
 - 选中时，如果当前这台正在播放，播放会转过去（对方从同一首歌、同一位置接着放，这边停下）；如果这台暂停着、对方又空闲，也会转过去（到对方那里同样是暂停）；其他情况只遥控，不打断对方正在放的东西。选回“这台电脑”时同理。
 - 需要服务器支持：原版 Navidrome 没有这个功能，要用 CreeperUX 改版的 Navidrome（[CreeperUX/navidrome](https://github.com/CreeperUX/navidrome) 的 `creeperux` 分支，协议见那边的 `server/connect/README.md`）。演示服务器也实现了同一协议（`server/connect.mjs`）。服务器没有时，设备按钮不出现，其余功能不受影响。
-- 改版的 Docker 镜像由 fork 的 GitHub Actions 自动构建：`ghcr.io/creeperux/navidrome`（linux/amd64、linux/arm64；标签 `latest`、`0.64.2-creeperux`、`sha-<提交>`），公开可拉取。docker-compose 里只要把 `image: deluan/navidrome:latest` 换成 `image: ghcr.io/creeperux/navidrome:latest`，数据目录不变；改版不改数据库，换回原版镜像即可回退。
+- 改版的 Docker 镜像由 fork 的 GitHub Actions 在每次推送 `creeperux` 分支时自动构建：`ghcr.io/creeperux/navidrome`（linux/amd64、linux/arm64；标签 `latest`、`<上游版本>-sonus` 如 `0.64.2-sonus`、`sha-<提交>`；更早的构建是 `0.64.2-creeperux`），公开可拉取。它的网页界面也换成了 Sonus 的名字、图标和默认的 Sonus 主题，接口仍报 `navidrome`，其他客户端照常能用。docker-compose 里只要把 `image: deluan/navidrome:latest` 换成 `image: ghcr.io/creeperux/navidrome:latest`，数据目录不变；改版不改数据库，换回原版镜像即可回退。Unraid 上开着自动更新（如 CA Auto Update Applications）时，推送后第二天就会装上新镜像。
 
 ## 服务器提供什么，程序做什么
 

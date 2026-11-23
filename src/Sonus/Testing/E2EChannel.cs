@@ -175,6 +175,8 @@ internal static class E2EChannel
             "window" => W is { } ww ? FormattableString.Invariant($"{ww.AppWindow.Size.Width} {ww.AppWindow.Size.Height} {ww.Title}") : "error: no window",
             // the title bar's insets for the window buttons (physical px) and the scale: what the top bar must leave free
             "insets" => W is { } wi && wi.Content is FrameworkElement ri ? FormattableString.Invariant($"left {wi.AppWindow.TitleBar.LeftInset} right {wi.AppWindow.TitleBar.RightInset} scale {ri.XamlRoot.RasterizationScale} width {ri.ActualWidth}") : "error: no window",
+            // where the window buttons begin, the top bar's clickable parts and where its end's buttons are (window pixels)
+            "titlebar" => W?.TitleBarState() ?? "error: no window",
             "close" => W is { } wc && PostMessage(WinRT.Interop.WindowNative.GetWindowHandle(wc), 0x0010, IntPtr.Zero, IntPtr.Zero) ? "closing" : "error: no window",
             _ => "error: unknown command " + command,
         };

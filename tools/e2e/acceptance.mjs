@@ -172,6 +172,24 @@ try {
       await app.invoke('100%'); await sleep(600);
       assert(Math.abs((await width()) - before) < 2, '没有复原');
     });
+    await check('窗口按钮能点：顶栏里可点的部分跟着按钮走，不盖住最小化、最大化、关闭（各种缩放下）', async () => {
+      // "buttons 2394; passthrough 797,28,1088,72 1995,28,374,72; end 1995,28,374,72" (window pixels)
+      const bar = async () => {
+        const s = await app.send('titlebar');
+        const m = /^buttons (-?\d+); passthrough ([\d, -]*); end (\d+),(\d+),(\d+),(\d+)$/.exec(s);
+        assert(m, s);
+        return { s, buttons: Number(m[1]), parts: m[2].trim().split(' ').filter(Boolean).map(p => p.split(',').map(Number)), end: m.slice(3).map(Number) };
+      };
+      const fits = async zoom => {
+        await until(async () => {
+          const b = await bar();
+          const last = b.parts.at(-1);
+          return b.parts.every(([x, , w]) => x + w <= b.buttons) && last && Math.abs(last[0] - b.end[0]) <= 2 && Math.abs(last[2] - Math.min(b.end[2], b.buttons - b.end[0])) <= 2;
+        }, `top bar at ${zoom}: ${(await bar()).s}`, 3000);
+      };
+      await app.send('nav settings'); await sleep(600);
+      for (const zoom of ['90%', '125%', '110%', '100%']) { await app.invoke(zoom); await sleep(400); await fits(zoom); }
+    });
     await check('后退回到上一个页面', async () => {
       await app.send('nav album:al1'); await sleep(300);
       await app.send('nav artist:ar1'); await sleep(300);

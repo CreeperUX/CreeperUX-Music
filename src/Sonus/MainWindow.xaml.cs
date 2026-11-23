@@ -75,8 +75,16 @@ public sealed partial class MainWindow : Window, IShell
         };
         RootGrid.SizeChanged += (_, _) => Fit();
         foreach (var part in new FrameworkElement[] { TopBar, TopCenter, TopEnd, Brand }) part.SizeChanged += (_, _) => FitTopBar();
+        // after every layout pass: the parts may have moved without changing size (a new margin, a maximized window)
+        TopBar.LayoutUpdated += (_, _) => UpdatePassthrough();
         RootGrid.Loaded += (_, _) => { RootGrid.XamlRoot.Changed += (_, _) => ApplyZoom(); ApplyZoom(); };
-        AppWindow.Changed += (_, e) => { if (e.DidSizeChange || e.DidPresenterChange) FitTopBar(); };
+        AppWindow.Changed += (_, e) =>
+        {
+            if (!e.DidSizeChange && !e.DidPresenterChange) return;
+            FitTopBar();
+            // the window buttons' room (RightInset) can settle after the change itself (maximizing): fit again then
+            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, FitTopBar);
+        };
         RootGrid.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(OnPointerPressed), true);
         RootGrid.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(OnKeyDown), true);
         Updates = new UpdateService(_settings);
@@ -411,9 +419,9 @@ public sealed partial class MainWindow : Window, IShell
     }
 
     /// <summary>
-    /// The top bar's geometry: room for the window buttons at the end; the search pill as wide as it can be while Home and
-    /// the pill stay on the window's middle line clear of both ends (foobar2k's middle column: at most 544 px); and the
-    /// parts the pointer must reach (Home, the pill, the end's buttons) taken out of the window's drag area.
+    /// The top bar's geometry: room for the window buttons at the end; and the search pill as wide as it can be while Home
+    /// and the pill stay on the window's middle line clear of both ends (foobar2k's middle column: at most 544 px). The
+    /// parts the pointer must reach follow once they are laid out (UpdatePassthrough).
     /// </summary>
     private void FitTopBar()
     {
@@ -429,15 +437,46 @@ public sealed partial class MainWindow : Window, IShell
             double pill = Math.Clamp(width - 2 * Math.Max(left, right) - 56, 120, 488);
             if (double.IsNaN(_searchPill.Width) || Math.Abs(_searchPill.Width - pill) > 0.5) _searchPill.Width = pill;
         }
-        // what the pointer must reach in the bar: everything else drags the window
-        var parts = new List<Windows.Graphics.RectInt32>();
+        UpdatePassthrough();
+    }
+
+    private Windows.Graphics.RectInt32[] _passthrough = [];
+
+    /// <summary>
+    /// The parts of the top bar the pointer must reach (Home, the pill, the end's buttons), taken out of the window's drag
+    /// area where they are now laid out, in the window's pixels. Measured after layout, on every pass, and set only when
+    /// they changed: measured before the layout followed a new margin, they stayed where the end's buttons had been and
+    /// covered the window buttons, which then took no clicks. Never over the window buttons whatever happens.
+    /// </summary>
+    private void UpdatePassthrough()
+    {
+        if (TopBar.XamlRoot is not { } root || _closing) return;
+        double scale = root.RasterizationScale;
+        int buttons = (int)Math.Floor(root.Size.Width * scale) - AppWindow.TitleBar.RightInset; // where the window buttons begin
+        var parts = new List<Windows.Graphics.RectInt32>(2);
         foreach (var part in new FrameworkElement[] { TopCenter, TopEnd })
         {
             if (part.ActualWidth <= 0 || part.Visibility != Visibility.Visible) continue;
             var r = part.TransformToVisual(null).TransformBounds(new Windows.Foundation.Rect(0, 0, part.ActualWidth, part.ActualHeight));
-            parts.Add(new Windows.Graphics.RectInt32((int)Math.Floor(r.X * scale), (int)Math.Floor(r.Y * scale), (int)Math.Ceiling(r.Width * scale), (int)Math.Ceiling(r.Height * scale)));
+            int x = (int)Math.Floor(r.X * scale), y = (int)Math.Floor(r.Y * scale);
+            int right = Math.Min((int)Math.Ceiling(r.Right * scale), buttons);
+            if (right > x) parts.Add(new Windows.Graphics.RectInt32(x, y, right - x, (int)Math.Ceiling(r.Height * scale)));
         }
-        Microsoft.UI.Input.InputNonClientPointerSource.GetForWindowId(AppWindow.Id).SetRegionRects(Microsoft.UI.Input.NonClientRegionKind.Passthrough, [.. parts]);
+        if (parts.SequenceEqual(_passthrough)) return;
+        _passthrough = [.. parts];
+        Microsoft.UI.Input.InputNonClientPointerSource.GetForWindowId(AppWindow.Id).SetRegionRects(Microsoft.UI.Input.NonClientRegionKind.Passthrough, _passthrough);
+    }
+
+    /// <summary>For tests: the window's pixels where the window buttons begin, the clickable parts set in the top bar, and
+    /// where the end's buttons are laid out now ("buttons 2394; passthrough 797,28,1088,72 1995,28,374,72; end 1995,28,374,72").</summary>
+    public string TitleBarState()
+    {
+        if (TopBar.XamlRoot is not { } root) return "not laid out";
+        double scale = root.RasterizationScale;
+        var r = TopEnd.TransformToVisual(null).TransformBounds(new Windows.Foundation.Rect(0, 0, TopEnd.ActualWidth, TopEnd.ActualHeight));
+        string Rect(int x, int y, int w, int h) => FormattableString.Invariant($"{x},{y},{w},{h}");
+        return $"buttons {(int)Math.Floor(root.Size.Width * scale) - AppWindow.TitleBar.RightInset}; passthrough {string.Join(' ', _passthrough.Select(p => Rect(p.X, p.Y, p.Width, p.Height)))}; " +
+               $"end {Rect((int)Math.Floor(r.X * scale), (int)Math.Floor(r.Y * scale), (int)Math.Ceiling(r.Right * scale) - (int)Math.Floor(r.X * scale), (int)Math.Ceiling(r.Height * scale))}";
     }
 
     public double Zoom => Math.Clamp(_settings.Zoom, 0.5, 2);

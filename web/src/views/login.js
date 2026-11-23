@@ -10,7 +10,7 @@ export function mountLogin(root, { UI, S, t, server = '', demo = null, error = '
   const L = t.login;
   root.classList.add('cm', 'cm-login-root');
   const card = h('main', { class: 'cm-login', 'aria-labelledby': 'cm-login-title' },
-    h('div', { class: 'cm-login-brand' }, h('img', { src: './assets/icon.svg', alt: '', width: 40, height: 40 }), h('span', { class: 'cm-brand-name', 'aria-hidden': 'true' }, 'CreeperUX ', h('b', {}, 'Music'))),
+    h('div', { class: 'cm-login-brand' }, h('img', { src: './assets/icon.svg', alt: '', width: 40, height: 40 }), h('span', { class: 'cm-brand-name', 'aria-hidden': 'true' }, 'Sonus')),
     h('h1', { id: 'cm-login-title', class: 'cm-login-title' }, L.title),
     h('p', { class: 'cm-login-intro' }, L.intro));
   const form = h('form', { class: 'cm-login-form', novalidate: '' });

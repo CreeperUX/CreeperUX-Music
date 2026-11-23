@@ -1,8 +1,8 @@
 // Driving an isolated, silent test instance of the Windows app (the approach of Lumen's tools/e2e):
 // - built into tools/e2e/.work/build/<arch>, so a copy the user has open never locks the build;
-// - its own data folder (.work/data-<name>) and Credential Manager entry ("CreeperUXMusic-test:server");
+// - its own data folder (.work/data-<name>) and Credential Manager entry ("Sonus-test:server");
 // - a cloaked window (rendered, never on screen, out of the taskbar, never activated), driven over a named pipe through
-//   the app's E2E channel (src/CreeperUX.Music/Testing/E2EChannel.cs): controls are found by accessible name;
+//   the app's E2E channel (src/Sonus/Testing/E2EChannel.cs): controls are found by accessible name;
 // - screenshots with PrintWindow of the test window only (shot.ps1), and a quiet check after every round.
 // Nothing here moves the mouse, presses keys or brings a window to the front.
 import { spawn, execFileSync, spawnSync } from 'node:child_process';
@@ -15,14 +15,14 @@ export const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export const work = join(root, 'tools/e2e/.work');
 export const shots = join(work, 'shots');
 export const sleep = ms => new Promise(r => setTimeout(r, ms));
-// CXMUSIC_E2E_BUILD: another folder under .work for the test builds (when a copy in build/ is open and locked)
-const BUILD = process.env.CXMUSIC_E2E_BUILD || 'build';
-export const exeFor = (arch = 'x64') => join(work, BUILD, arch, 'CreeperUX Music.exe');
+// SONUS_E2E_BUILD: another folder under .work for the test builds (when a copy in build/ is open and locked)
+const BUILD = process.env.SONUS_E2E_BUILD || 'build';
+export const exeFor = (arch = 'x64') => join(work, BUILD, arch, 'Sonus.exe');
 
 /** Builds the app for tests; returns the result line. */
 export function build(arch = 'x64') {
   const out = join(work, BUILD, arch);
-  const r = spawnSync('dotnet', ['build', join(root, 'src/CreeperUX.Music/CreeperUX.Music.csproj'), `-p:Platform=${arch}`, `-p:OutDir=${out}\\`, '-nologo', '-v:q'], { encoding: 'utf8' });
+  const r = spawnSync('dotnet', ['build', join(root, 'src/Sonus/Sonus.csproj'), `-p:Platform=${arch}`, `-p:OutDir=${out}\\`, '-nologo', '-v:q'], { encoding: 'utf8' });
   const problems = [...new Set((r.stdout + r.stderr).split(/\r?\n/).filter(l => /\b(error|warning) [A-Z]+\d+/.test(l)).map(l => l.replace(/\s*\[[^\]]+\]\s*$/, '').trim()))];
   return { ok: r.status === 0, line: `BUILD ${arch} exit=${r.status}`, problems };
 }
@@ -38,11 +38,11 @@ export async function startDemoServer({ scale = 1 } = {}) {
 
 /** A test instance: start(), send(command), shot(name), quiet(), stop(). */
 export class TestApp {
-  /** @param env more environment for the instance (CXMUSIC_GITHUB_API: a fake GitHub) */
+  /** @param env more environment for the instance (SONUS_GITHUB_API: a fake GitHub) */
   constructor(name, { exe = exeFor(), demo = null, fresh = true, env = {} } = {}) {
     this.name = name; this.exe = exe; this.demo = demo; this.env = env;
     this.data = join(work, `data-${name}`);
-    this.pipe = `cxmusic-e2e-${name}-${process.pid}`;
+    this.pipe = `sonus-e2e-${name}-${process.pid}`;
     if (fresh) rmSync(this.data, { recursive: true, force: true });
     mkdirSync(this.data, { recursive: true });
     mkdirSync(shots, { recursive: true });
@@ -50,7 +50,7 @@ export class TestApp {
 
   async start() {
     if (!existsSync(this.exe)) throw new Error(`${this.exe} not built (node tools/e2e/acceptance.mjs builds it)`);
-    this.proc = spawn(this.exe, [], { env: { ...process.env, CXMUSIC_E2E: this.pipe, CXMUSIC_DATA_DIR: this.data, ...(this.demo ? { CXMUSIC_DEMO: this.demo } : {}), ...this.env }, stdio: 'ignore' });
+    this.proc = spawn(this.exe, [], { env: { ...process.env, SONUS_E2E: this.pipe, SONUS_DATA_DIR: this.data, ...(this.demo ? { SONUS_DEMO: this.demo } : {}), ...this.env }, stdio: 'ignore' });
     this.pid = this.proc.pid;
     for (let i = 0; i < 150; i++) {
       try {
@@ -123,10 +123,37 @@ export class TestApp {
 }
 
 // the test instances' Credential Manager entries: the sign-in ("server") and the GitHub token for updates ("github")
-export const TEST_CREDENTIAL = 'CreeperUXMusic-test:server';
-const testCredential = name => `CreeperUXMusic-test:${name}`;
+export const TEST_CREDENTIAL = 'Sonus-test:server';
+const testCredential = name => `Sonus-test:${name}`;
 export const credentialKept = (name = 'server') => { try { return execFileSync('cmdkey', ['/list'], { encoding: 'utf8' }).includes(`target=${testCredential(name)}`); } catch { return false; } };
 export const forgetCredential = (name = 'server') => { try { execFileSync('cmdkey', [`/delete:${testCredential(name)}`], { stdio: 'ignore' }); } catch { /* none */ } };
+
+// the same entries as CreeperUX Music (the app's name up to 0.3) named them: Sonus takes those over when it starts
+const formerCredential = name => `CreeperUXMusic-test:${name}`;
+export const formerCredentialKept = name => { try { return execFileSync('cmdkey', ['/list'], { encoding: 'utf8' }).includes(`target=${formerCredential(name)}`); } catch { return false; } };
+export const forgetFormerCredential = name => { try { execFileSync('cmdkey', [`/delete:${formerCredential(name)}`], { stdio: 'ignore' }); } catch { /* none */ } };
+/** Saves a test entry as CreeperUX Music did (a generic credential, the value as UTF-16), with CredWrite as the app does. */
+export function writeFormerCredential(name, user, value) {
+  const script = `$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+public static class FormerCred {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct C { public uint Flags, Type; public string TargetName, Comment; public uint WrittenLow, WrittenHigh, BlobSize; public IntPtr Blob; public uint Persist, AttributeCount; public IntPtr Attributes; public string TargetAlias, UserName; }
+  [DllImport("advapi32.dll", EntryPoint = "CredWriteW", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool CredWrite(ref C c, uint flags);
+}
+'@
+$bytes = [Text.Encoding]::Unicode.GetBytes($env:FORMER_VALUE)
+$blob = [Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)
+try {
+  [Runtime.InteropServices.Marshal]::Copy($bytes, 0, $blob, $bytes.Length)
+  $c = New-Object FormerCred+C
+  $c.Type = 1; $c.Persist = 2; $c.TargetName = $env:FORMER_TARGET; $c.UserName = $env:FORMER_USER; $c.Comment = 'CreeperUX Music: test entry'
+  $c.BlobSize = $bytes.Length; $c.Blob = $blob
+  if (-not [FormerCred]::CredWrite([ref]$c, 0)) { throw "CredWrite: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
+} finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($blob) }`;
+  execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, FORMER_TARGET: formerCredential(name), FORMER_USER: user, FORMER_VALUE: value }, stdio: ['ignore', 'ignore', 'pipe'] });
+}
 
 /** Windows' media control sessions (read-only): "AppUserModelId|title" per line. */
 export function mediaSessions() {

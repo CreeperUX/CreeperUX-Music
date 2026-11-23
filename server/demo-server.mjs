@@ -1,5 +1,5 @@
 // The demo server: a small Subsonic / OpenSubsonic server (the API Navidrome speaks) over a fictitious catalogue with
-// generated music, so CreeperUX Music can be tried, and tested, without a real server. It also serves the web client
+// generated music, so Sonus can be tried, and tested, without a real server. It also serves the web client
 // (web/) at /, as Navidrome serves its own web page.
 //
 // What it answers (from subsonic.org/pages/api.jsp and opensubsonic.netlify.app): token authentication, ping,
@@ -7,7 +7,7 @@
 // getSong, getPlaylists / getPlaylist / createPlaylist (new, or overwrite with playlistId) / updatePlaylist /
 // deletePlaylist, star / unstar, getStarred2, scrobble, getNowPlaying, savePlayQueue / getPlayQueue,
 // getSimilarSongs2, getTopSongs, getArtistInfo2, getCoverArt, stream (WAV, with byte ranges), getLyricsBySongId and
-// getLyrics; and CreeperUX Connect (rest/connect, a WebSocket: connect.mjs), as the CreeperUX/navidrome fork serves it.
+// getLyrics; and Sonus Connect (rest/connect, a WebSocket: connect.mjs), as the CreeperUX/navidrome fork serves it.
 // GET query parameters and POSTed forms are both read; every /rest answer carries
 // Access-Control-Allow-Origin: * as Navidrome's do. It is not Navidrome: passing against it shows the client follows the
 // API, not that a real server behaves the same.
@@ -104,7 +104,7 @@ const log = { streams: [], scrobbles: [], queues: [], covers: [], open: 0 }; // 
 let offline = false;
 
 // ---------------------------------------------------------------- the API
-const OK = { status: 'ok', version: '1.16.1', type: 'navidrome', serverVersion: '0.58.0 (CreeperUX demo)', openSubsonic: true };
+const OK = { status: 'ok', version: '1.16.1', type: 'navidrome', serverVersion: '0.58.0 (Sonus demo)', openSubsonic: true };
 const ok = (extra = {}) => ({ ...OK, ...extra });
 const err = (code, message) => ({ ...OK, status: 'failed', error: { code, message } });
 const many = (q, k) => q.getAll(k).flatMap(v => (v === '' ? [] : [v]));

@@ -1,0 +1,25 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <!--
+    Sonus's installer (MSI, WiX v5), as Lumen's. Built by tools\package.ps1, which first publishes the app and
+    passes PublishDir, AppVersion, ArtDir and Platform (x64 / ARM64). Per-user: no administrator rights, installs into
+    %LOCALAPPDATA%\Programs\Sonus (see Package.wxs).
+  -->
+  <PropertyGroup>
+    <OutputName>Sonus-$(AppVersion)-$(Platform)</OutputName>
+    <Cultures>zh-CN</Cultures>
+    <DefineConstants>PublishDir=$(PublishDir);Version=$(AppVersion);ArtDir=$(ArtDir)</DefineConstants>
+    <!--
+      Per-user packages install into the user profile, where Windows Installer validation wants every component keyed
+      by an HKCU value (ICE38, ICE64, ICE91). With hundreds of harvested runtime files that is not practical; the files
+      are removed with the package anyway. ICE03: a few runtime DLLs carry a language id in their version resource that
+      Windows Installer doesn't know; it is only informational. ICE61: same-version upgrades are allowed on purpose
+      (MajorUpgrade AllowSameVersionUpgrades, the setup's 重新安装). ICE60: the title font (Assets\Fonts\*.ttf) carries
+      a version, as fonts do, but is the app's own file, not one installed into Windows' Fonts.
+    -->
+    <SuppressIces>ICE03;ICE38;ICE60;ICE61;ICE64;ICE91</SuppressIces>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="5.0.2" />
+    <PackageReference Include="WixToolset.Util.wixext" Version="5.0.2" />
+  </ItemGroup>
+</Project>

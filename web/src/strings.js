@@ -1,6 +1,6 @@
 // Interface strings. The kit brings its own (buttons, tables, the player layer); these are the app's.
 const zh = {
-  app: 'CreeperUX Music', library: '音乐库', home: '首页', back: '后退', forward: '前进', search: '搜索', searchPlaceholder: '想听什么？', browse: '浏览全部',
+  app: 'Sonus', library: '音乐库', home: '首页', back: '后退', forward: '前进', search: '搜索', searchPlaceholder: '想听什么？', browse: '浏览全部',
   searchHint: '在媒体库中搜索标题、艺人和专辑。',
   playlists: '歌单', albums: '专辑', artists: '艺人', songs: '歌曲', all: '全部', clearFilter: '清除筛选',
   createPlaylist: '创建歌单', newPlaylist: '新建歌单', newPlaylistName: n => `我的歌单 #${n}`, newAutoplaylist: '新建智能歌单…', autoNote: '智能歌单在 Navidrome 的网页里创建。',
@@ -47,7 +47,7 @@ const zh = {
 };
 
 const en = {
-  app: 'CreeperUX Music', library: 'Your Library', home: 'Home', back: 'Go back', forward: 'Go forward', search: 'Search', searchPlaceholder: 'What do you want to play?', browse: 'Browse all',
+  app: 'Sonus', library: 'Your Library', home: 'Home', back: 'Go back', forward: 'Go forward', search: 'Search', searchPlaceholder: 'What do you want to play?', browse: 'Browse all',
   searchHint: 'Search titles, artists and albums in your library.',
   playlists: 'Playlists', albums: 'Albums', artists: 'Artists', songs: 'Songs', all: 'All', clearFilter: 'Clear filter',
   createPlaylist: 'Create playlist', newPlaylist: 'New playlist', newPlaylistName: n => `My playlist #${n}`, newAutoplaylist: 'New smart playlist…', autoNote: 'Smart playlists are made in the Navidrome web page.',

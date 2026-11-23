@@ -1,4 +1,4 @@
-// The demo in one command: starts the demo server (a fictitious library with generated music) and opens CreeperUX Music
+// The demo in one command: starts the demo server (a fictitious library with generated music) and opens Sonus
 // (the Windows app) signed out, with a button that signs in to the demo account. Closing the app stops the server.
 //   npm run demo            the Windows app (built first when needed: needs the .NET 10 SDK)
 //   npm run demo:browser    the web client in your default browser instead
@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const arch = process.arch === 'arm64' ? 'ARM64' : 'x64';
-const exe = join(root, `src/CreeperUX.Music/bin/${arch}/Release/net10.0-windows10.0.26100.0/win-${arch.toLowerCase()}/CreeperUX Music.exe`);
+const exe = join(root, `src/Sonus/bin/${arch}/Release/net10.0-windows10.0.26100.0/win-${arch.toLowerCase()}/Sonus.exe`);
 const browserMode = process.argv.includes('--browser');
 const free = port => new Promise(ok => { const s = createServer().once('error', () => ok(false)).once('listening', () => s.close(() => ok(true))).listen(port, '127.0.0.1'); });
 let port = 4533; // Navidrome's port; the next free one when it is taken (a real Navidrome may be running)
@@ -30,10 +30,10 @@ if (browserMode) {
 } else {
   if (!existsSync(exe)) {
     console.log(`正在编译 Windows 程序（dotnet build，${arch}，第一次约需一分钟）…`);
-    const b = spawnSync('dotnet', ['build', join(root, 'src/CreeperUX.Music/CreeperUX.Music.csproj'), `-p:Platform=${arch}`, '-c', 'Release', '-nologo', '-v:q'], { stdio: 'inherit' });
+    const b = spawnSync('dotnet', ['build', join(root, 'src/Sonus/Sonus.csproj'), `-p:Platform=${arch}`, '-c', 'Release', '-nologo', '-v:q'], { stdio: 'inherit' });
     if (b.status !== 0) { console.error('编译失败。也可以在浏览器里看演示：npm run demo:browser'); stop(); }
   }
   const app = spawn(exe, ['--demo', site], { stdio: 'ignore' });
-  console.log('CreeperUX Music 已打开：点“使用本机的演示服务器”登录。关掉窗口，演示服务器也会停止。');
+  console.log('Sonus 已打开：点“使用本机的演示服务器”登录。关掉窗口，演示服务器也会停止。');
   app.on('exit', stop);
 }

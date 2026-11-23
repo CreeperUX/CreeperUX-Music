@@ -17,13 +17,13 @@
 //
 // Sign-in: Subsonic token authentication, md5(password + salt). The password is not kept: the salt and token are. In
 // the desktop app they go to Windows Credential Manager (through the window, see host below), in a browser to local
-// storage (cxmusic.login). The token works like the password for this API, so it is a secret.
+// storage (sonus.login). The token works like the password for this API, so it is a secret.
 import { orderToBar, barToOrder } from './contract.js';
 import { lower, parseLyrics } from './lyrics.js';
 import { md5 } from './md5.js';
 
-const API_VERSION = '1.16.1', APP = 'CreeperUX Music', PAGE = 500;
-const LOGIN_KEY = 'cxmusic.login', LAST_SERVER_KEY = 'cxmusic.server';
+const API_VERSION = '1.16.1', APP = 'Sonus', PAGE = 500;
+const LOGIN_KEY = 'sonus.login', LAST_SERVER_KEY = 'sonus.server';
 const LOSSY = new Set(['mp3', 'aac', 'm4a', 'ogg', 'oga', 'opus', 'mpc', 'wma', 'mp2']);
 const CODECS = { flac: 'FLAC', mp3: 'MP3', aac: 'AAC', ogg: 'Vorbis', oga: 'Vorbis', opus: 'Opus', ape: "Monkey's Audio", wv: 'WavPack', wav: 'PCM', aif: 'PCM', aiff: 'PCM', wma: 'WMA', mpc: 'Musepack', tta: 'TTA', tak: 'TAK', mp2: 'MP2' };
 const ORDERS_SHUFFLE = o => o.startsWith('shuffle');
@@ -35,7 +35,7 @@ const storage = { get(k) { try { return JSON.parse(localStorage.getItem(k)); } c
 // readLogin / writeLogin / deleteLogin (Windows Credential Manager) and deviceName. In a browser there is no host.
 const host = (() => {
   const wv = globalThis.chrome?.webview;
-  if (!wv || !globalThis.cxmusicHost) return null;
+  if (!wv || !globalThis.sonusHost) return null;
   let n = 0;
   const waiting = new Map();
   wv.addEventListener('message', e => { const m = e.data; if (m && waiting.has(m.id)) { waiting.get(m.id)(m); waiting.delete(m.id); } });
@@ -71,8 +71,8 @@ export async function signOut() {
 }
 /** The client name the server sees (Navidrome lists it under Players and as who saved the play queue). */
 const clientName = () => {
-  let id = storage.get('cxmusic.device');
-  if (!id) { id = Math.random().toString(36).slice(2, 8); storage.set('cxmusic.device', id); }
+  let id = storage.get('sonus.device');
+  if (!id) { id = Math.random().toString(36).slice(2, 8); storage.set('sonus.device', id); }
   return `${APP} (${deviceName || `浏览器 ${id}`})`;
 };
 
@@ -249,7 +249,7 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
   const audio = [new Audio(), new Audio()];
   let cur = 0, preloadId = null, ticket = 0, started = 0, counted = false;
   const el = () => audio[cur];
-  const player = { trackId: null, state: 'stopped', error: null, position: 0, duration: null, volume: storage.get('cxmusic.volume') ?? 0.8, muted: false, order: 'default', stopAfterCurrent: false, replayGain: storage.get('cxmusic.replaygain') ?? 'album', context: null, output: 'default' };
+  const player = { trackId: null, state: 'stopped', error: null, position: 0, duration: null, volume: storage.get('sonus.volume') ?? 0.8, muted: false, order: 'default', stopAfterCurrent: false, replayGain: storage.get('sonus.replaygain') ?? 'album', context: null, output: 'default' };
   let contextIds = [], pointer = -1, queue = [], qid = 0;
   const snapshot = () => ({ ...player, context: player.context && { ...player.context } });
   const pushPlayer = () => { emit({ type: 'player', player: snapshot() }); mediaSession(); };
@@ -471,7 +471,7 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
       player.position = to; emit({ type: 'position', position: to }); saveQueue();
       if (to < (player.duration ?? 0) - 20 && preloadId) { unload(audio[1 - cur]); preloadId = null; } // seeking back: load the next one again later
     },
-    async setVolume(v) { player.volume = Math.max(0, Math.min(1, v)); if (v > 0) player.muted = false; storage.set('cxmusic.volume', player.volume); applyVolume(); pushPlayer(); },
+    async setVolume(v) { player.volume = Math.max(0, Math.min(1, v)); if (v > 0) player.muted = false; storage.set('sonus.volume', player.volume); applyVolume(); pushPlayer(); },
     async setMuted(m) { player.muted = m; applyVolume(); pushPlayer(); },
     async setOrder(order) {
       const was = player.order; player.order = order;
@@ -483,7 +483,7 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
       pushQueue(); pushPlayer();
     },
     async setStopAfterCurrent(on) { player.stopAfterCurrent = on; if (on && preloadId) { unload(audio[1 - cur]); preloadId = null; } pushPlayer(); },
-    async setReplayGain(mode) { player.replayGain = mode; storage.set('cxmusic.replaygain', mode); applyVolume(); pushPlayer(); },
+    async setReplayGain(mode) { player.replayGain = mode; storage.set('sonus.replaygain', mode); applyVolume(); pushPlayer(); },
     async setOutput(id) {
       if (!el().setSinkId) throw new Error('这个浏览器不能切换输出设备。');
       const o = outputs.find(x => x.id === id); if (!o) return;

@@ -1,4 +1,4 @@
-// The CreeperUX Music icon (in use: "ring", the same as foobar2k's): candidate designs (a detailed master for 48 px and up, a version drawn on the pixel grid for
+// The Sonus icon (in use: "ring", the same as foobar2k's): candidate designs (a detailed master for 48 px and up, a version drawn on the pixel grid for
 // 16–32 px), the preview sheet, and the build. Same family as foobar2k's icon (fb2k's tools/icons.mjs): an ink or amber
 // tile with one amber (or ink) mark, the brand amber #f8b700.
 // node tools/icon.mjs preview           → tools/e2e/.work/icon-candidates.png (every design, every size, dark and light
@@ -155,11 +155,11 @@ try {
     for (const n of SIZES) { const file = join(out, `icon-${n}.png`); await writeFile(file, await render(page, svgFor(d, n), n)); files.push(file); }
     await writeFile(join(out, 'icon.svg'), `${d.master(256)}\n`);
     execFileSync('python', [join(root, 'tools/pack-ico.py'), join(out, 'app.ico'), ...files], { stdio: 'inherit' });
-    const app = join(root, 'src/CreeperUX.Music/Assets');
+    const app = join(root, 'src/Sonus/Assets');
     await copyFile(join(out, 'app.ico'), join(app, 'AppIcon.ico'));
     await copyFile(join(out, 'icon-256.png'), join(app, 'Logo.png'));
     await copyFile(join(out, 'icon-64.png'), join(app, 'Logo-64.png'));
-    console.log(`${which}: assets/icon.svg, ${SIZES.length} PNGs, assets/app.ico; src/CreeperUX.Music/Assets updated`);
+    console.log(`${which}: assets/icon.svg, ${SIZES.length} PNGs, assets/app.ico; src/Sonus/Assets updated`);
   } else {
     // preview: each design at 256 and at the taskbar sizes on a dark and a light taskbar; foobar2k's icon last, for comparison
     const rows = [];

@@ -1,11 +1,11 @@
-// CreeperUX Connect for the demo server: the protocol of the Navidrome fork (CreeperUX/navidrome, server/connect/README.md),
+// Sonus Connect for the demo server: the protocol of the Navidrome fork (CreeperUX/navidrome, server/connect/README.md),
 // so the app's devices can be tested without it. A user's players see each other (devices), report what they play
 // (state), and send each other commands and transfers. Over a small WebSocket written here (RFC 6455: the handshake,
 // text frames, ping / pong, close), as Node has no WebSocket server of its own.
 import { createHash } from 'node:crypto';
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'; // RFC 6455 §1.3
-export const EXTENSION = { name: 'creeperuxConnect', versions: [1] };
+export const EXTENSION = { name: 'sonusConnect', versions: [1] };
 
 /** Serves rest/connect on the HTTP server. authenticate(query) → the user name, or null. */
 export function attachConnect(server, { authenticate, isOffline = () => false }) {

@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Sonus.Core/Sonus.Core.csproj" />
+    <Project Path="src/Sonus/Sonus.csproj" />
+    <Project Path="src/Sonus.Setup/Sonus.Setup.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Sonus.Core.Tests/Sonus.Core.Tests.csproj" />
+  </Folder>
+</Solution>

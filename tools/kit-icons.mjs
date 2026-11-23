@@ -1,6 +1,6 @@
 // The CreeperUX icons for the Windows app: reads the kit's icon sets as foobar2k carries them (vendor/creeperux-gui/icons.js,
 // media/icons.js and foobar2k's own src/icons.js: a 24 px grid, 1.6 px round strokes, the transport glyphs filled), and
-// has tools/kit-outline (Direct2D) turn each into one filled outline: src/CreeperUX.Music/Controls/KitIcons.g.cs, which
+// has tools/kit-outline (Direct2D) turn each into one filled outline: src/Sonus/Controls/KitIcons.g.cs, which
 // Controls/KitIcon draws with XAML's PathIcon. Needs the .NET SDK.
 // Usage: node tools/kit-icons.mjs [path to the fb2k checkout, default ../fb2k]
 import { readFile, writeFile, mkdtemp } from 'node:fs/promises';
@@ -64,7 +64,7 @@ const icons = Object.assign({}, ...sets);
 // the shapes, for tools/kit-outline to outline and write as C#
 const input = join(await mkdtemp(join(tmpdir(), 'kit-icons-')), 'icons.json');
 await writeFile(input, JSON.stringify(Object.fromEntries(Object.entries(icons).map(([name, svg]) => [name, shapes(svg)]))));
-const output = join(root, 'src/CreeperUX.Music/Controls/KitIcons.g.cs');
+const output = join(root, 'src/Sonus/Controls/KitIcons.g.cs');
 const r = spawnSync('dotnet', ['run', '--project', join(root, 'tools/kit-outline'), '-c', 'Release', '--', input, output], { stdio: 'inherit' });
 if (r.status !== 0) process.exit(r.status ?? 1);
-console.log(`${Object.keys(icons).length} icons → src/CreeperUX.Music/Controls/KitIcons.g.cs`);
+console.log(`${Object.keys(icons).length} icons → src/Sonus/Controls/KitIcons.g.cs`);

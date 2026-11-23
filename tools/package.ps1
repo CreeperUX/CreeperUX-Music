@@ -1,20 +1,20 @@
 ﻿param([ValidateSet('x64', 'ARM64')][string[]]$Arch = @('x64', 'ARM64'), [switch]$Extract)
-# Builds CreeperUX Music's installers, as Lumen's tools\package.ps1: dist\CreeperUX-Music-<version>-<arch>.msi
-# (installer\Package.wxs, WiX v5 restored from nuget.org), and dist\CreeperUX-Music-<version>-<arch>-setup.exe, the
-# installer people run (and the app's updates download): the setup window around that MSI (src\CreeperUX.Music.Setup,
+# Builds Sonus's installers, as Lumen's tools\package.ps1: dist\Sonus-<version>-<arch>.msi
+# (installer\Package.wxs, WiX v5 restored from nuget.org), and dist\Sonus-<version>-<arch>-setup.exe, the
+# installer people run (and the app's updates download): the setup window around that MSI (src\Sonus.Setup,
 # self-contained single file).
 #   .\tools\package.ps1                 both architectures
 #   .\tools\package.ps1 -Arch x64       one
 #   -Extract                            also unpack each MSI (administrative install: files only, nothing registered or
 #                                       installed) into installer\bin\<arch>\extract, to test what the package contains
 #                                       (node tools/e2e/acceptance.mjs --arch=<arch> --exe=<the unpacked exe>)
-# The version is <Version> in src\CreeperUX.Music\CreeperUX.Music.csproj. Nothing here installs anything or touches the
+# The version is <Version> in src\Sonus\Sonus.csproj. Nothing here installs anything or touches the
 # user's own copy of the app.
 $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path "$PSScriptRoot\..").Path
 $Installer = "$RepoRoot\installer"
 $Dist = "$RepoRoot\dist"
-$AppProject = "$RepoRoot\src\CreeperUX.Music\CreeperUX.Music.csproj"
+$AppProject = "$RepoRoot\src\Sonus\Sonus.csproj"
 $version = ([xml](Get-Content $AppProject -Raw -Encoding utf8)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
 if (-not $version) { throw "在 $AppProject 里找不到 <Version>" }
 
@@ -67,12 +67,12 @@ foreach ($a in $Arch) {
         -p:PublishTrimmed=false "-p:PublishDir=$publish/" -nologo -v:q 2>&1
     if ($LASTEXITCODE -ne 0) { throw "发布 $a 失败：`n$(($log | Select-Object -Last 20) -join "`n")" }
     # the app's resource index (its compiled XAML) above all: without it the window cannot start
-    foreach ($needed in 'CreeperUX Music.exe', 'CreeperUX Music.pri', 'Microsoft.UI.Xaml.dll','Assets\AppIcon.ico', 'Assets\Fonts\ChakraPetch-SemiBold.ttf', 'Assets\Fonts\OFL-Chakra-Petch.txt') {
+    foreach ($needed in 'Sonus.exe', 'Sonus.pri', 'Microsoft.UI.Xaml.dll','Assets\AppIcon.ico', 'Assets\Fonts\ChakraPetch-SemiBold.ttf', 'Assets\Fonts\OFL-Chakra-Petch.txt') {
         if (-not (Test-Path "$publish\$needed")) { throw "$publish 里没有 $needed" }
     }
     "PUBLISH $a ok：$((Get-ChildItem $publish -Recurse -File).Count) 个文件，$([math]::Round(((Get-ChildItem $publish -Recurse -File | Measure-Object Length -Sum).Sum) / 1MB)) MB"
 
-    $log = & dotnet build "$Installer\CreeperUX.Music.Installer.wixproj" -c Release "-p:Platform=$a" "-p:PublishDir=$publish" `
+    $log = & dotnet build "$Installer\Sonus.Installer.wixproj" -c Release "-p:Platform=$a" "-p:PublishDir=$publish" `
         "-p:AppVersion=$version" "-p:ArtDir=$art" "-p:OutputPath=$work\msi/" -nologo -v:q 2>&1
     $code = $LASTEXITCODE
     $log | Select-String -Pattern '\b(error|warning) [A-Z]+\d+' | Select-Object -Unique -First 20 | ForEach-Object { $_.Line.Trim() }
@@ -84,18 +84,23 @@ foreach ($a in $Arch) {
     # The setup window with that MSI inside: one file, its own runtime (nothing to install first, as the app)
     $setupOut = "$work\setup"
     Remove-Item -Recurse -Force $setupOut -ErrorAction SilentlyContinue
-    $log = & dotnet publish "$RepoRoot\src\CreeperUX.Music.Setup\CreeperUX.Music.Setup.csproj" -c Release -r $rid "-p:Version=$version" `
+    $log = & dotnet publish "$RepoRoot\src\Sonus.Setup\Sonus.Setup.csproj" -c Release -r $rid "-p:Version=$version" `
         "-p:MsiPath=$($msi.FullName)" "-p:PublishDir=$setupOut/" -p:DebugType=none -nologo -v:q 2>&1
     if ($LASTEXITCODE -ne 0) { throw "生成 $a 安装程序失败：`n$(($log | Select-Object -Last 20) -join "`n")" }
-    $setup = "$Dist\CreeperUX-Music-$version-$a-setup.exe"
-    Copy-Item "$setupOut\CreeperUX-Music-Setup.exe" $setup -Force
+    $setup = "$Dist\Sonus-$version-$a-setup.exe"
+    Copy-Item "$setupOut\Sonus-Setup.exe" $setup -Force
     "SETUP $a ok：dist\$(Split-Path $setup -Leaf)，$([math]::Round((Get-Item $setup).Length / 1MB)) MB"
+    # The same installer under the name CreeperUX Music (0.3 and earlier) looks for in a release: attached to the release
+    # as well, so a 0.3 still finds the update. Not needed once no 0.3 is left.
+    $former = "$Dist\CreeperUX-Music-$version-$a-setup.exe"
+    Copy-Item $setup $former -Force
+    "SETUP $a ok：dist\$(Split-Path $former -Leaf)（同一个安装程序，给 0.3 及更早的 CreeperUX Music 找更新用）"
 
     if ($Extract) {
         $target = "$work\extract"
         Remove-Item -Recurse -Force $target -ErrorAction SilentlyContinue
         $p = Start-Process msiexec.exe -ArgumentList '/a', "`"$Dist\$($msi.Name)`"", '/qn', "TARGETDIR=`"$target`"" -Wait -PassThru
-        $exe = Get-ChildItem $target -Recurse -Filter 'CreeperUX Music.exe' | Select-Object -First 1
+        $exe = Get-ChildItem $target -Recurse -Filter 'Sonus.exe' | Select-Object -First 1
         if ($p.ExitCode -ne 0 -or -not $exe) { throw "解包 $a 失败（msiexec 退出码 $($p.ExitCode)）" }
         "EXTRACT $a ok：$($exe.FullName)"
     }

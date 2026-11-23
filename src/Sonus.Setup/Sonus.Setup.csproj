@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Sonus's installer window, as Lumen's (tools\package.ps1 builds dist\Sonus-<version>-<arch>-setup.exe):
+    the MSI from installer\Package.wxs runs inside it with Windows Installer's own dialogs turned off. Per-user like the
+    MSI, so no administrator prompt. Self-contained like the app: nothing to install first.
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>Sonus-Setup</AssemblyName>
+    <Product>Sonus</Product>
+    <AssemblyTitle>Sonus 安装程序</AssemblyTitle>
+    <Company>CreeperUX</Company>
+    <RootNamespace>Sonus.Setup</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\Sonus\Assets\AppIcon.ico</ApplicationIcon>
+    <!-- WPF text rendering and IME want real culture data -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- One file to hand out, with its own runtime and the MSI inside (package.ps1 passes MsiPath) -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <!-- package.ps1 passes the app's <Version>: the window shows it -->
+    <Version>0.0.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="..\Sonus\Assets\Logo.png" Link="Logo.png" />
+    <Resource Include="..\Sonus\Assets\Fonts\ChakraPetch-SemiBold.ttf" Link="Fonts\ChakraPetch-SemiBold.ttf" />
+    <!-- the app's icons (the CreeperUX kit's outlines), so the window draws the same ones -->
+    <Compile Include="..\Sonus\Controls\KitIcons.g.cs" Link="KitIcons.g.cs" />
+    <EmbeddedResource Include="$(MsiPath)" LogicalName="Sonus.msi" Condition="'$(MsiPath)' != ''" />
+  </ItemGroup>
+
+</Project>

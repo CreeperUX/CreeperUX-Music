@@ -1,4 +1,4 @@
-/* CreeperUX Music: Spotify's layout in the CreeperUX language. Everything is built on the kit's tokens (--cx-*), so both
+/* Sonus: Spotify's layout in the CreeperUX language. Everything is built on the kit's tokens (--cx-*), so both
    themes, both densities, forced colours and reduced motion keep working; the app adds a few of its own (--cm-*). */
 
 html, body { margin: 0; height: 100%; }

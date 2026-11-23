@@ -1,22 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  CreeperUX Music's MSI, set up as Lumen's. Per-user (no UAC prompt): the app goes to
-  %LOCALAPPDATA%\Programs\CreeperUX Music, with a Start menu shortcut. The sign-in (Windows Credential Manager) and the
-  settings and log (%LOCALAPPDATA%\CreeperUX Music) stay where every build keeps them and survive an uninstall.
-  Built by tools\package.ps1, normally run inside the setup window (src\CreeperUX.Music.Setup); double-clicked, it shows
+  Sonus's MSI, set up as Lumen's. Per-user (no UAC prompt): the app goes to
+  %LOCALAPPDATA%\Programs\Sonus, with a Start menu shortcut. The sign-in (Windows Credential Manager) and the
+  settings and log (%LOCALAPPDATA%\Sonus) stay where every build keeps them and survive an uninstall.
+  Built by tools\package.ps1, normally run inside the setup window (src\Sonus.Setup); double-clicked, it shows
   Windows Installer's own minimal dialogs.
+  Up to 0.3 the app was named CreeperUX Music (%LOCALAPPDATA%\Programs\CreeperUX Music): the same UpgradeCode, so this
+  package replaces it, and the app takes over that build's data folder and sign-in on its first start.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package
-    Name="CreeperUX Music"
+    Name="Sonus"
     Manufacturer="CreeperUX"
     Version="$(Version)"
     Language="2052"
     Scope="perUser"
     UpgradeCode="1CE8ADE0-F27F-42B5-BA8E-15AC5372DB2C">
-    <SummaryInformation Description="CreeperUX Music：Navidrome 音乐播放器" />
+    <SummaryInformation Description="Sonus：Navidrome 音乐播放器" />
     <!-- Same-version rebuilds replace each other (the setup's 重新安装) instead of installing side by side -->
-    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="已经安装了更新版本的 CreeperUX Music。" />
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="已经安装了更新版本的 Sonus。" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <Icon Id="AppIcon" SourceFile="$(PublishDir)\Assets\AppIcon.ico" />
@@ -24,7 +26,7 @@
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="UserProgramsFolder" Name="Programs">
-        <Directory Id="INSTALLFOLDER" Name="CreeperUX Music" />
+        <Directory Id="INSTALLFOLDER" Name="Sonus" />
       </Directory>
     </StandardDirectory>
 
@@ -37,14 +39,15 @@
     <!-- The published app (self-contained: .NET and the Windows App SDK included) -->
     <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
       <!-- The program with its Start menu shortcut (one component, keyed by an HKCU value as a per-user shortcut needs: ICE43) -->
-      <Component Id="AppExe" Guid="8C187C3E-5BC3-47F9-B2D0-802A3C98A921">
-        <File Id="AppExe" Source="$(PublishDir)\CreeperUX Music.exe">
-          <Shortcut Id="AppShortcut" Directory="ProgramMenuFolder" Name="CreeperUX Music" WorkingDirectory="INSTALLFOLDER" Advertise="no" />
+      <!-- a GUID of its own since 0.4: the folder and the program were renamed (CreeperUX Music's was 8C187C3E-…) -->
+      <Component Id="AppExe" Guid="BCB9F0F5-227B-4D83-B3C0-C6B88FBCFF12">
+        <File Id="AppExe" Source="$(PublishDir)\Sonus.exe">
+          <Shortcut Id="AppShortcut" Directory="ProgramMenuFolder" Name="Sonus" WorkingDirectory="INSTALLFOLDER" Advertise="no" />
         </File>
-        <RegistryValue Root="HKCU" Key="Software\CreeperUX Music" Name="InstallDir" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+        <RegistryValue Root="HKCU" Key="Software\Sonus" Name="InstallDir" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
       </Component>
       <Files Include="$(PublishDir)\**">
-        <Exclude Files="$(PublishDir)\CreeperUX Music.exe" />
+        <Exclude Files="$(PublishDir)\Sonus.exe" />
         <Exclude Files="$(PublishDir)\**\*.pdb" />
       </Files>
     </ComponentGroup>
@@ -53,7 +56,7 @@
     <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
     <WixVariable Id="WixUIDialogBmp" Value="$(ArtDir)\dialog.bmp" />
     <WixVariable Id="WixUIBannerBmp" Value="$(ArtDir)\banner.bmp" />
-    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="启动 CreeperUX Music" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="启动 Sonus" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
     <Property Id="WixShellExecTarget" Value="[#AppExe]" />
     <CustomAction Id="LaunchApp" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixShellExec" Impersonate="yes" />

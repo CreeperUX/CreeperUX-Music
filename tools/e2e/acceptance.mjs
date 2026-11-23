@@ -1,13 +1,14 @@
 // Acceptance of the Windows app, silent and isolated (tools/e2e/e2e.mjs): builds it, starts the demo server and test
 // instances, and goes through the app in rounds: sign-in, every page, playback, playlists, search, continuing on a second
-// device, narrow windows, losing the server, the system media controls, a restart and signing out. After each round the
+// device, controlling another device, narrow windows, losing the server, the system media controls, a restart and signing
+// out, updates, and taking over what the former name (CreeperUX Music) left. After each round the
 // test window must still be hidden and never have been the foreground window. Results: .work/acceptance/report.md;
 // screenshots: .work/shots/acc-*.png (look at them).
-// Usage: node tools/e2e/acceptance.mjs [--arch=x64|ARM64] [--no-build] [--only=signin,pages,playback,playlists,search,devices,layout,offline,smtc,restart]
+// Usage: node tools/e2e/acceptance.mjs [--arch=x64|ARM64] [--no-build] [--only=signin,pages,playback,playlists,search,devices,connect,layout,offline,smtc,restart,updates,former] [--exe=<path>]
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { build, startDemoServer, TestApp, sleep, work, exeFor, credentialKept, forgetCredential, mediaSessions } from './e2e.mjs';
+import { build, startDemoServer, TestApp, sleep, work, exeFor, credentialKept, forgetCredential, mediaSessions, formerCredentialKept, forgetFormerCredential, writeFormerCredential } from './e2e.mjs';
 import { startFakeGitHub } from './fake-github.mjs';
 
 const args = process.argv.slice(2);
@@ -39,10 +40,11 @@ if (!args.includes('--no-build') && !args.some(a => a.startsWith('--exe='))) {
   log(b.line, b.problems.length ? `\n${b.problems.join('\n')}` : '');
   if (!b.ok) process.exit(1);
 }
-forgetCredential(); forgetCredential('github');
+const forgetAll = () => { for (const name of ['server', 'github']) { forgetCredential(name); forgetFormerCredential(name); } };
+forgetAll();
 const server = await startDemoServer();
 const github = await startFakeGitHub();
-const appEnv = { CXMUSIC_GITHUB_API: github.url, CXMUSIC_DEVICE_NAME: '第一台' };
+const appEnv = { SONUS_GITHUB_API: github.url, SONUS_DEVICE_NAME: '第一台' };
 const md5 = s => createHash('md5').update(s).digest('hex');
 async function api(method, params = {}) {
   const salt = Math.random().toString(16).slice(2, 10);
@@ -93,10 +95,10 @@ try {
       await until(async () => (await app.send('ready')) === 'yes', 'ready', 30000);
       const s = await state();
       assert(s.songs === 293 && s.albums === 34 && s.playlists.length === 7, JSON.stringify({ songs: s.songs, albums: s.albums, pl: s.playlists.length }));
-      assert(s.route === 'home' && s.title === '首页 · CreeperUX Music', s.title);
+      assert(s.route === 'home' && s.title === '首页 · Sonus', s.title);
     });
     await check('登录信息在 Windows 凭据管理器里（测试专用条目），设置文件里没有令牌', async () => {
-      assert(credentialKept(), '凭据管理器里没有 CreeperUXMusic-test:server');
+      assert(credentialKept(), '凭据管理器里没有 Sonus-test:server');
       for (const f of readdirSync(app.data)) if (f.endsWith('.json')) assert(!/token|salt/i.test(readFileSync(join(app.data, f), 'utf8')), `${f} 里有令牌`);
     });
     await check('首页：问候、快捷入口、各个卡片架', async () => {
@@ -432,10 +434,10 @@ try {
     quiet(app);
   }
 
-  // ---------------------------------------------------------------- 6b. CreeperUX Connect: control and move playback between devices
+  // ---------------------------------------------------------------- 6b. Sonus Connect: control and move playback between devices
   if (want('connect')) {
-    round('connect', '第 6b 轮：跨设备控制（CreeperUX Connect）');
-    const b = await new TestApp('remote', { demo: server.url, exe, env: { ...appEnv, CXMUSIC_DEVICE_NAME: '第二台' } }).start();
+    round('connect', '第 6b 轮：跨设备控制（Sonus Connect）');
+    const b = await new TestApp('remote', { demo: server.url, exe, env: { ...appEnv, SONUS_DEVICE_NAME: '第二台' } }).start();
     try {
       await check('两台设备都连上，各自的设备列表里有对方', async () => {
         await b.until(async () => (await b.send('ready')) === 'yes', 'B signed in', 30000);
@@ -463,7 +465,8 @@ try {
       await check('在第二台按暂停，第一台暂停；再按播放，第一台继续', async () => {
         await b.invoke('暂停');
         await until(async () => (await state()).state === 'Paused', 'A paused', 5000);
-        await b.until(async () => (await b.names()).some(n => n.startsWith('播放 [')), 'B shows A paused', 5000);
+        // the bar's button, not the settings page's "播放" heading (a TextBlock), which is there all along
+        await b.until(async () => (await b.names()).includes('播放 [Button]'), 'B shows A paused', 5000);
         await b.invoke('播放');
         await until(async () => (await state()).engine === 'Playing', 'A plays again', 8000);
       });
@@ -592,7 +595,7 @@ try {
       await app.send('set GitHub 令牌=gh-token'); await app.invoke('保存 GitHub 令牌');
       await app.invoke('检查更新');
       await until(async () => statusLine(/发现新版本 9\.9\.0。$/), '9.9.0 found');
-      await until(async () => hasName('更新到 CreeperUX Music 9.9.0'), 'the top bar pill');
+      await until(async () => hasName('更新到 Sonus 9.9.0'), 'the top bar pill');
       assert(github.log.requests.some(r => r.path.endsWith('/releases') && r.auth === 'Bearer gh-token'), '列表请求没有带令牌');
       await app.send('scroll 62'); await sleep(300);
       await shot('settings-update');
@@ -601,12 +604,12 @@ try {
       await app.invoke('接收测试版');
       await app.invoke('检查更新');
       await until(async () => statusLine(/发现新版本 9\.10\.0-beta\.1（测试版）/), 'beta found');
-      await until(async () => hasName('更新到 CreeperUX Music 9.10.0-beta.1'), 'the pill follows');
+      await until(async () => hasName('更新到 Sonus 9.10.0-beta.1'), 'the pill follows');
     });
     await check('安装更新：显示版本说明，下载这台电脑架构的安装程序并按 SHA-256 校验（测试实例不运行它）', async () => {
-      const name = `CreeperUX-Music-9.10.0-${arch}-setup.exe`;
+      const name = `Sonus-9.10.0-${arch}-setup.exe`;
       await app.invoke('安装更新');
-      await until(async () => (await app.texts()).includes('更新到 CreeperUX Music 9.10.0-beta.1'), 'dialog');
+      await until(async () => (await app.texts()).includes('更新到 Sonus 9.10.0-beta.1'), 'dialog');
       assert((await app.texts()).some(t => t.includes('测试用的版本说明。') && !t.includes('**')), '版本说明没有显示成纯文本');
       await shot('update-dialog');
       await app.invoke('下载并安装');
@@ -618,7 +621,33 @@ try {
       await until(async () => statusLine(/^下载完成，已校验。/), 'done status');
       await shot('update-downloaded');
       await app.invoke('以后再说');
-      await until(async () => !(await app.texts()).includes('更新到 CreeperUX Music 9.10.0-beta.1'), 'dialog closed');
+      await until(async () => !(await app.texts()).includes('更新到 Sonus 9.10.0-beta.1'), 'dialog closed');
+    });
+    quiet(app);
+  }
+
+  // ---------------------------------------------------------------- 12. the former name (CreeperUX Music, up to 0.3)
+  if (want('former')) {
+    round('former', '第 12 轮：从 CreeperUX Music（0.3）升级：登录和令牌搬到新名字下');
+    await check('旧名字下的登录和 GitHub 令牌：启动时改存为 Sonus 的，不用重新登录', async () => {
+      await app.stop();
+      forgetAll();
+      const salt = 'former01';
+      writeFormerCredential('server', 'demo', JSON.stringify({ server: server.url, user: 'demo', salt, token: md5('demo' + salt) }));
+      writeFormerCredential('github', 'github', 'gh-token');
+      assert(formerCredentialKept('server') && formerCredentialKept('github'), '没写进旧名字的测试条目');
+      app = await new TestApp('former', { demo: server.url, exe, env: appEnv }).start();
+      await until(async () => (await app.send('ready')) === 'yes', 'signed in with the former sign-in', 30000);
+      assert(credentialKept() && credentialKept('github'), '新名字（Sonus-test）下没有登录或令牌');
+      assert(!formerCredentialKept('server') && !formerCredentialKept('github'), '旧名字（CreeperUXMusic-test）的条目还在');
+      const logText = readFileSync(join(app.data, 'app.log'), 'utf8');
+      assert(logText.includes('[former name] CreeperUXMusic-test:server → Sonus-test:server') && !logText.includes('gh-token') && !logText.includes(md5('demo' + salt)), '日志里没有迁移记录，或写进了密钥');
+      assert((await state()).title === '首页 · Sonus', (await state()).title);
+    });
+    await check('搬过来的令牌直接能检查更新', async () => {
+      await app.send('nav settings');
+      await app.invoke('检查更新');
+      await until(async () => (await app.texts()).some(t => /发现新版本 9\.9\.0。$/.test(t)), '9.9.0 found with the adopted token');
     });
     quiet(app);
   }
@@ -626,7 +655,7 @@ try {
   await app.stop().catch(() => {});
   server.stop();
   github.stop();
-  forgetCredential(); forgetCredential('github');
+  forgetAll();
 }
 
 const passed = results.filter(r => r.ok).length;

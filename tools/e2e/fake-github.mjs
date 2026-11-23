@@ -21,10 +21,10 @@ export async function startFakeGitHub() {
   const log = { requests: [], tokenLeaked: false };
   let assets = [];
   const release = (tag, version, { prerelease = false, draft = false } = {}) => ({
-    tag_name: tag, name: `CreeperUX Music ${tag.slice(1)}`, draft, prerelease, published_at: '2026-11-20T08:00:00Z',
-    body: `## CreeperUX Music ${tag.slice(1)}\n\n**测试用的版本说明。**\n\n| 文件 | 说明 |\n|---|---|\n| \`CreeperUX-Music-${version}-x64-setup.exe\` | 安装程序 |\n\n- 第一条\n- 第二条，见 [说明](https://example.com)`,
+    tag_name: tag, name: `Sonus ${tag.slice(1)}`, draft, prerelease, published_at: '2026-11-20T08:00:00Z',
+    body: `## Sonus ${tag.slice(1)}\n\n**测试用的版本说明。**\n\n| 文件 | 说明 |\n|---|---|\n| \`Sonus-${version}-x64-setup.exe\` | 安装程序 |\n\n- 第一条\n- 第二条，见 [说明](https://example.com)`,
     assets: ['x64', 'ARM64'].map(arch => {
-      const name = `CreeperUX-Music-${version}-${arch}-setup.exe`;
+      const name = `Sonus-${version}-${arch}-setup.exe`;
       const id = assets.push(name);
       return { name, size: fakeSetup(name).length, url: `${base}${REPO}/releases/assets/${id}`, digest: `sha256:${sha256(fakeSetup(name))}` };
     }),

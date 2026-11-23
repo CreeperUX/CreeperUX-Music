@@ -1,0 +1,174 @@
+<Window x:Class="Sonus.Setup.SetupWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:Sonus.Setup"
+        Title="Sonus 安装程序"
+        Width="480" SizeToContent="Height"
+        WindowStyle="None" ResizeMode="NoResize" WindowStartupLocation="CenterScreen"
+        Background="{StaticResource AppBackgroundBrush}" FontFamily="{StaticResource AppTextFont}"
+        TextOptions.TextFormattingMode="Display"
+        SourceInitialized="Window_SourceInitialized">
+    <!--
+        One window, a page at a time, as Lumen's installer: what Sonus is and where it goes → (about and
+        licenses) → the MSI's progress → done, or why it didn't finish. Borderless with Windows' rounded corners; the
+        title row drags the window.
+    -->
+    <WindowChrome.WindowChrome>
+        <WindowChrome CaptionHeight="52" ResizeBorderThickness="0" GlassFrameThickness="0" CornerRadius="0" UseAeroCaptionButtons="False" />
+    </WindowChrome.WindowChrome>
+
+    <Border x:Name="Root" Background="{StaticResource AppBackgroundBrush}">
+        <Grid Margin="28,18,28,24">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- Title row: the app's mark, "Sonus" (as the app's top bar) and the version; close on the right -->
+            <Grid Height="34">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <Image Source="Logo.png" Width="22" Height="22" RenderOptions.BitmapScalingMode="HighQuality" />
+                    <TextBlock Style="{StaticResource BrandText}" Margin="10,0,0,0" VerticalAlignment="Center" Text="Sonus" />
+                    <TextBlock x:Name="VersionText" Style="{StaticResource CaptionText}" Margin="8,2,0,0" VerticalAlignment="Center" />
+                </StackPanel>
+                <Button x:Name="CloseButton" Style="{StaticResource IconButton}" HorizontalAlignment="Right"
+                        AutomationProperties.Name="关闭" ToolTip="关闭" WindowChrome.IsHitTestVisibleInChrome="True" Click="Close_Click">
+                    <local:KitGlyph Icon="close" Width="16" Height="16" />
+                </Button>
+            </Grid>
+
+            <Grid Grid.Row="1" Margin="0,22,0,0" MinHeight="250">
+
+                <!-- 1. What it is, where it goes -->
+                <StackPanel x:Name="WelcomePage">
+                    <Image Source="Logo.png" Width="56" Height="56" HorizontalAlignment="Left" RenderOptions.BitmapScalingMode="HighQuality" />
+                    <TextBlock x:Name="WelcomeTitle" Style="{StaticResource TitleText}" Margin="0,16,0,0" />
+                    <TextBlock x:Name="WelcomeNote" Style="{StaticResource SecondaryText}" Margin="0,4,0,0" />
+                    <Border Style="{StaticResource Section}" Margin="0,18,0,0">
+                        <StackPanel>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="30" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <local:KitGlyph Icon="music" VerticalAlignment="Top" HorizontalAlignment="Left" Margin="0,1,0,0" />
+                                <TextBlock Grid.Column="1" Style="{StaticResource BodyText}"
+                                           Text="连接你自己的 Navidrome（或其他兼容 Subsonic 的服务器）：歌单、喜欢和播放记录都在服务器上，所有设备共用。" />
+                            </Grid>
+                            <Grid Margin="0,12,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="30" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <local:KitGlyph Icon="download" VerticalAlignment="Top" HorizontalAlignment="Left" Margin="0,1,0,0" />
+                                <TextBlock Grid.Column="1" Style="{StaticResource BodyText}"
+                                           Text="有新版本时在程序里提示，下载并校验后打开安装程序升级（在「设置 › 更新」里填一个只读的 GitHub 令牌）。" />
+                            </Grid>
+                            <Grid Margin="0,12,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="30" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <local:KitGlyph Icon="folder" VerticalAlignment="Top" HorizontalAlignment="Left" Margin="0,1,0,0" />
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Style="{StaticResource BodyText}" Text="只为当前用户安装，不需要管理员权限。" />
+                                    <TextBlock Style="{StaticResource SecondaryText}" FontSize="13" Margin="0,2,0,0"
+                                               Text="装在 %LOCALAPPDATA%\Programs\Sonus" />
+                                </StackPanel>
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+                    <!-- The app running: its files can't be replaced; the install button waits until it is closed -->
+                    <Border x:Name="RunningNotice" Margin="0,12,0,0" Padding="12,10" CornerRadius="10" BorderThickness="1"
+                            BorderBrush="{StaticResource AccentLineBrush}" Background="{StaticResource AccentWashBrush}" Visibility="Collapsed">
+                        <TextBlock Style="{StaticResource BodyText}" FontSize="13" Text="Sonus（或改名前的 CreeperUX Music）正在运行。请先关闭它，关闭后就可以继续。" />
+                    </Border>
+                    <WrapPanel Margin="0,14,0,0">
+                        <TextBlock Style="{StaticResource CaptionText}" Text="使用的开源组件与字体许可" VerticalAlignment="Center" />
+                        <Button Style="{StaticResource InlineLinkButton}" Content="查看" Margin="6,0,0,0" Click="License_Click" />
+                    </WrapPanel>
+                </StackPanel>
+
+                <!-- About and licenses (from the welcome page; 返回 goes back) -->
+                <StackPanel x:Name="LicensePage" Visibility="Collapsed">
+                    <TextBlock Text="关于与许可" Style="{StaticResource TitleText}" />
+                    <Border Style="{StaticResource Section}" Margin="0,16,0,0">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource BodyText}"
+                                       Text="Sonus 是连接你自己的 Navidrome（或其他兼容 Subsonic 的服务器）的 Windows 音乐播放器。" />
+                            <TextBlock Style="{StaticResource SecondaryText}" Margin="0,10,0,0"
+                                       Text="界面基于 Windows App SDK（WinUI 3）和 .NET，二者都按 MIT 许可发布。" />
+                            <TextBlock Style="{StaticResource SecondaryText}" Margin="0,8,0,0"
+                                       Text="标题字体 Chakra Petch 按 SIL Open Font License 1.1 随程序分发，许可全文在安装目录的 Assets\Fonts 里。" />
+                            <TextBlock Style="{StaticResource SecondaryText}" Margin="0,8,0,0"
+                                       Text="登录信息保存在 Windows 凭据管理器，设置和日志保存在 %&#x2060;LOCALAPPDATA%\Sonus，卸载时会保留。" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <!-- 2. The MSI's progress -->
+                <StackPanel x:Name="ProgressPage" Visibility="Collapsed">
+                    <Image Source="Logo.png" Width="56" Height="56" HorizontalAlignment="Left" RenderOptions.BitmapScalingMode="HighQuality" />
+                    <TextBlock x:Name="ProgressTitle" Text="正在安装" Style="{StaticResource TitleText}" Margin="0,16,0,0" />
+                    <TextBlock x:Name="StepText" Text="正在准备…" Style="{StaticResource SecondaryText}" Margin="0,4,0,0" />
+                    <!-- A thin track with an amber fill, like the playback bar's -->
+                    <Grid x:Name="Track" Margin="0,44,0,0" Height="4">
+                        <Border Background="{StaticResource TrackBrush}" CornerRadius="2" />
+                        <Border x:Name="Fill" Background="{StaticResource AccentBrush}" CornerRadius="2" HorizontalAlignment="Left" Width="0" />
+                    </Grid>
+                    <TextBlock x:Name="PercentText" Text="0%" Style="{StaticResource CaptionText}" Margin="0,10,0,0" HorizontalAlignment="Right"
+                               Typography.NumeralAlignment="Tabular" />
+                </StackPanel>
+
+                <!-- 3. Done -->
+                <StackPanel x:Name="DonePage" Visibility="Collapsed">
+                    <Border x:Name="DoneBadge" Width="56" Height="56" HorizontalAlignment="Left" CornerRadius="16" BorderThickness="1"
+                            BorderBrush="{StaticResource AccentLineBrush}" Background="{StaticResource AccentWashBrush}" RenderTransformOrigin="0.5,0.5">
+                        <local:KitGlyph Icon="check" Width="26" Height="26" Fill="{StaticResource AccentBrush}" />
+                    </Border>
+                    <TextBlock x:Name="DoneTitle" Style="{StaticResource TitleText}" Margin="0,16,0,0" />
+                    <TextBlock x:Name="DoneNote" Style="{StaticResource SecondaryText}" Margin="0,4,0,0"
+                               Text="登录信息和设置保留在这台电脑上，升级时不会丢。" />
+                    <Border Style="{StaticResource Section}" Margin="0,18,0,0" Padding="16,4">
+                        <StackPanel>
+                            <Grid Margin="0,12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="30" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <local:KitGlyph Icon="music" VerticalAlignment="Top" HorizontalAlignment="Left" Margin="0,1,0,0" />
+                                <TextBlock Grid.Column="1" Style="{StaticResource SecondaryText}"
+                                           Text="第一次打开时填写服务器地址、用户名和密码。外网的服务器请用 HTTPS 地址。" />
+                            </Grid>
+                            <Border Height="1" Background="{StaticResource DividerBrush}" />
+                            <Grid Margin="0,12">
+                                <TextBlock Style="{StaticResource BodyText}" FontWeight="Bold" Text="完成后打开 Sonus" VerticalAlignment="Center" />
+                                <CheckBox x:Name="LaunchBox" Style="{StaticResource Switch}" HorizontalAlignment="Right" VerticalAlignment="Center"
+                                          IsChecked="True" AutomationProperties.Name="完成后打开 Sonus" />
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <!-- 4. Didn't finish -->
+                <StackPanel x:Name="FailedPage" Visibility="Collapsed">
+                    <Border Width="56" Height="56" HorizontalAlignment="Left" CornerRadius="16" BorderThickness="1" BorderBrush="{StaticResource CriticalLineBrush}">
+                        <local:KitGlyph Icon="alert" Width="26" Height="26" Fill="{StaticResource CriticalBrush}" />
+                    </Border>
+                    <TextBlock Text="安装没有完成" Style="{StaticResource TitleText}" Margin="0,16,0,0" />
+                    <TextBlock x:Name="FailedNote" Style="{StaticResource SecondaryText}" Margin="0,4,0,0" />
+                    <Button Style="{StaticResource LinkButton}" Foreground="{StaticResource AccentBrush}" Content="查看安装日志"
+                            HorizontalAlignment="Left" Margin="-4,12,0,0" Click="OpenLog_Click" />
+                </StackPanel>
+            </Grid>
+
+            <!-- Footer: the other action as text, the main one as an amber pill, both on the right -->
+            <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,24,0,0">
+                <Button x:Name="SecondaryButton" Style="{StaticResource LinkButton}" Content="取消" VerticalAlignment="Center"
+                        Margin="0,0,18,0" Click="Secondary_Click" />
+                <Button x:Name="PrimaryButton" Style="{StaticResource AccentPillButton}" Click="Primary_Click" IsDefault="True" />
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>

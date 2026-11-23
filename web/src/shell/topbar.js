@@ -9,7 +9,7 @@ export function mountTopbar(slot, ctx) {
   slot.append(bar);
 
   const start = h('div', { class: 'cm-top-start' });
-  start.append(h('a', { class: 'cm-brand', href: '#/', 'aria-label': t.app }, h('img', { class: 'cm-brand-mark', src: './assets/icon.svg', alt: '', width: 26, height: 26 }), h('span', { class: 'cm-brand-name', 'aria-hidden': 'true' }, 'CreeperUX ', h('b', {}, 'Music'))));
+  start.append(h('a', { class: 'cm-brand', href: '#/', 'aria-label': t.app }, h('img', { class: 'cm-brand-mark', src: './assets/icon.svg', alt: '', width: 26, height: 26 }), h('span', { class: 'cm-brand-name', 'aria-hidden': 'true' }, 'Sonus')));
   // Your Library, when it is closed or floats (narrow windows)
   const libBtn = UI.createIconButton(start, { label: t.toggleLibrary, icon: 'library', variant: 'ghost', onClick: () => ctx.ws.toggle('start', { focus: true }) }, ctx.S);
   libBtn.element.classList.add('cm-round', 'cm-lib-toggle');

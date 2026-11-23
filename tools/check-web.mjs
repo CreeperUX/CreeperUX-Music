@@ -1,4 +1,4 @@
-// Acceptance run for CreeperUX Music. It starts the demo server (server/demo-server.mjs), signs in through the sign-in
+// Acceptance run for Sonus. It starts the demo server (server/demo-server.mjs), signs in through the sign-in
 // page, then: the interface acts and the server's own state is read back through the Subsonic API; playback is checked on
 // the page's real <audio> element; every view is opened in five layouts (themes, densities, widths, 200 % zoom) and
 // checked for console errors, page overflow and axe WCAG 2.1 A/AA; and 50 route changes must not grow the page.
@@ -93,7 +93,7 @@ for (const [engine, launch] of engines) {
   await check('without a saved sign-in the sign-in page shows (0 axe violations)', async () => {
     await page.locator('.cm-login').waitFor({ timeout: 15000 });
     const v = await axe(); assert(!v.length, v.join(' | '));
-    assert((await page.title()) === 'CreeperUX Music', await page.title());
+    assert((await page.title()) === 'Sonus', await page.title());
   });
   await check('a wrong password is refused and says so; the right one signs in and loads the library', async () => {
     await signIn(page, `${account.password}-wrong`);
@@ -107,7 +107,7 @@ for (const [engine, launch] of engines) {
     console.log(`    ${s.server}: ${s.tracks} songs, ${s.albums} albums, ${s.artists} artists, ${s.pl.length - 2} playlists`);
   });
   await check('the password is not kept (only the salt and token), and nothing says foobar2000', async () => {
-    const login = await app(() => JSON.parse(localStorage.getItem('cxmusic.login') || 'null'));
+    const login = await app(() => JSON.parse(localStorage.getItem('sonus.login') || 'null'));
     assert(login?.token?.length === 32 && login.salt && Object.keys(login).sort().join() === 'salt,server,token,user', JSON.stringify(Object.keys(login ?? {})));
     assert(!JSON.stringify({ ...await app(() => ({ ...localStorage })) }).includes(account.password === 'demo' ? '"demo"}' : account.password), 'password kept');
     for (const hash of ['#/', '#/settings']) { await app(h => { location.hash = h; }, hash); await sleep(600); assert(!/foobar|beefweb/i.test(await page.locator('body').innerText()), `${hash} mentions foobar2000`); }
@@ -186,7 +186,7 @@ for (const [engine, launch] of engines) {
     await check('the queue is saved on the server for another device (savePlayQueue)', async () => {
       const id = await app(() => __app.player.trackId);
       await app(() => __app.adapter.pause());
-      await until(async () => { const q = (await api('getPlayQueue')).playQueue; return q.current === id && /CreeperUX Music/.test(q.changedBy); }, 'server queue current');
+      await until(async () => { const q = (await api('getPlayQueue')).playQueue; return q.current === id && /Sonus/.test(q.changedBy); }, 'server queue current');
     });
     await check('another device signs in and is offered to continue where this one stopped', async () => {
       const ctx2 = await browser.newContext({ viewport: { width: 1280, height: 800 } }), p2 = await ctx2.newPage();
@@ -335,7 +335,7 @@ for (const [engine, launch] of engines) {
     await app(() => { location.hash = '#/settings'; }); await sleep(700);
     await page.getByRole('button', { name: '退出登录' }).click();
     await page.locator('.cm-login').waitFor({ timeout: 10000 });
-    assert(!(await app(() => localStorage.getItem('cxmusic.login'))), 'sign-in still kept');
+    assert(!(await app(() => localStorage.getItem('sonus.login'))), 'sign-in still kept');
   });
   for (const e of errors) { failed++; console.log(`  ✗ console: ${e}`); }
   await browser.close();

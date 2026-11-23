@@ -1,4 +1,4 @@
-// CreeperUX Music: a Spotify-style player for your own music server (Navidrome, or any Subsonic-compatible server),
+// Sonus: a Spotify-style player for your own music server (Navidrome, or any Subsonic-compatible server),
 // built on CreeperUX UI Kit 2.5.0. The app holds no playback state of its own: it shows what the client (api/subsonic.js,
 // behind the contract in api/contract.js) reports and sends it what the person asks for. The shell is the kit's workspace: library on the start side, the view in the middle,
 // Now playing / Queue on the end side and the playback bar along the bottom. Views are plain modules mounted per
@@ -21,7 +21,7 @@ import { showProperties, mosaic } from './views/common.js';
 import { createAppMotion } from './motion.js';
 
 // ---------------------------------------------------------------- preferences (layout widths are the person's, D78)
-const PREFS_KEY = 'cxmusic.prefs';
+const PREFS_KEY = 'sonus.prefs';
 const DEFAULTS = { theme: 'dark', density: '', locale: 'zh-CN', startWidth: 300, startOpen: true, endWidth: 340, endOpen: true, panel: 'now', libFilter: null, libSort: 'recent' };
 const prefs = (() => { try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; } catch { return { ...DEFAULTS }; } })();
 const query = new URLSearchParams(location.search);
@@ -223,7 +223,7 @@ ctx.refreshView = () => mountView(ctx.route, ctx.ws.main.scrollTop);
 
 // If the page reloads (the desktop app can), come back to the same place: the route is in the URL already,
 // the scroll position is kept per tab. Reloads are counted for the settings page (a diagnostic without DevTools).
-const SCROLL_KEY = 'cxmusic.scroll', RELOADS_KEY = 'cxmusic.reloads';
+const SCROLL_KEY = 'sonus.scroll', RELOADS_KEY = 'sonus.reloads';
 const store = { get(k) { try { return JSON.parse(sessionStorage.getItem(k)); } catch { return null; } }, set(k, v) { try { sessionStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } } };
 const reloaded = performance.getEntriesByType?.('navigation')?.[0]?.type === 'reload';
 if (reloaded) { const n = store.get(RELOADS_KEY) || []; n.push(Date.now()); store.set(RELOADS_KEY, n.slice(-20)); }
@@ -249,7 +249,7 @@ async function offerContinue({ atStart = false } = {}) {
   if (!q || (!atStart && (q.mine || q.changed <= adapter.queueSavedAt() || ctx.isActive()))) return;
   if (atStart && ctx.player.trackId) return;
   const title = ctx.track(q.current)?.title; if (!title) return;
-  const from = q.mine ? '' : q.changedBy.replace(/^CreeperUX Music \((.*)\)$/, '$1');
+  const from = q.mine ? '' : q.changedBy.replace(/^(?:Sonus|CreeperUX Music) \((.*)\)$/, '$1'); // CreeperUX Music: the name before 0.4
   adapter.continueQueue(q, ctx.t.resumeFrom(title, from));
   UI.toast({ message: ctx.t.resumeFrom(title, from), duration: 12000, action: { label: ctx.t.resume, onClick: () => ctx.run(adapter.resume()) } }, ctx.S);
 }

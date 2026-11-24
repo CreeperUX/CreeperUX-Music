@@ -26,13 +26,14 @@ public sealed record AppRelease(string Tag, Version Version, bool IsPrerelease, 
 }
 
 /// <summary>
-/// Sonus's releases on GitHub (CreeperUX/CreeperUX-Music, a public repository: read without signing in), as Lumen
-/// reads its own. Lists them, picks the newest one this app should move to, and downloads its installer, checked
-/// against the SHA-256 GitHub keeps for it. Unsigned calls get 60 an hour per address, plenty for a daily check.
+/// Sonus's releases on GitHub (CreeperUX/Sonus, a public repository: read without signing in; CreeperUX-Music until
+/// 0.5, which GitHub still redirects), as Lumen reads its own. Lists them, picks the newest one this app should move to,
+/// and downloads its installer, checked against the SHA-256 GitHub keeps for it. Unsigned calls get 60 an hour per
+/// address, plenty for a daily check.
 /// </summary>
 public sealed class GitHubUpdates(HttpClient http, Uri? apiBase = null)
 {
-    public const string Repository = "CreeperUX/CreeperUX-Music";
+    public const string Repository = "CreeperUX/Sonus";
     public static readonly Uri DefaultApi = new("https://api.github.com/");
 
     /// <summary>"Sonus-0.4.0-x64-setup.exe": the installer tools/package.ps1 builds.</summary>

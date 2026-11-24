@@ -88,12 +88,12 @@ public sealed class UpdateTests : IDisposable
         var request = Assert.Single(fake.Requests);
         Assert.Null(request.Headers.Authorization); // the repository is public
         Assert.Contains(request.Headers.Accept, a => a.MediaType == "application/vnd.github+json");
-        Assert.Equal("https://api.github.com/repos/CreeperUX/CreeperUX-Music/releases?per_page=30", request.RequestUri?.ToString());
+        Assert.Equal("https://api.github.com/repos/CreeperUX/Sonus/releases?per_page=30", request.RequestUri?.ToString());
         Assert.NotEmpty(request.Headers.UserAgent);
     }
 
     [Theory]
-    [InlineData(HttpStatusCode.NotFound, null, "找不到 CreeperUX/CreeperUX-Music")]
+    [InlineData(HttpStatusCode.NotFound, null, "找不到 CreeperUX/Sonus")]
     [InlineData(HttpStatusCode.Forbidden, "0", "请求次数")]
     [InlineData(HttpStatusCode.TooManyRequests, "0", "请求次数")]
     [InlineData(HttpStatusCode.Forbidden, "42", "403")]

@@ -7,7 +7,7 @@ namespace Sonus.Updates;
 /// <summary>
 /// A newer Sonus on GitHub, found as Lumen finds its own: checked once a day after starting (and from
 /// 设置 › 更新), installed by downloading the installer for this architecture, checking it against GitHub's SHA-256,
-/// then running it while the app closes. CreeperUX/CreeperUX-Music is public: nothing to sign in with. UI thread only.
+/// then running it while the app closes. CreeperUX/Sonus is public: nothing to sign in with. UI thread only.
 /// </summary>
 public sealed class UpdateService(AppSettings settings)
 {

@@ -1,12 +1,12 @@
 // A fake GitHub for the update checks (as Lumen's tools/e2e/FakeServers): the releases API of the public
-// CreeperUX/CreeperUX-Music, read without signing in (a request that carries credentials anyway is noted: authSent).
+// CreeperUX/Sonus, read without signing in (a request that carries credentials anyway is noted: authSent).
 // It lists 9.9.0, a test version 9.10.0-beta.1 and a draft; each installer is a few hundred KB of bytes whose SHA-256
 // the listing carries ("digest", as GitHub's). An asset's API address answers with a redirect to its storage, as
 // GitHub's does. Nothing here is a real installer: test instances only download and check it.
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 
-const REPO = '/repos/CreeperUX/CreeperUX-Music';
+const REPO = '/repos/CreeperUX/Sonus';
 
 /** The bytes of a fake installer (different for every name). */
 export function fakeSetup(name) {

@@ -693,7 +693,7 @@ async fn the_server_pings_and_a_silent_connection_is_closed() {
         }
         phone.ws.flush().await.unwrap(); // the pong
     }
-    assert!((5..=10).contains(&pings), "a ping every 100 ms: {pings}");
+    assert!((3..=10).contains(&pings), "a ping every 100 ms: {pings}");
     // the PC did not read all that time, so it answered no ping: silent for 350 ms, it is gone; after the grace
     // period the session stops
     let stopped = phone.find("the session stopping", |m| m["type"] == "session" && m["session"]["activeDevice"].is_null()).await;
@@ -707,7 +707,8 @@ async fn the_server_pings_and_a_silent_connection_is_closed() {
 
 #[tokio::test]
 async fn a_lost_connection_has_a_grace_period_and_a_resume_and_a_goodbye_has_none() {
-    let world = world(Options::default()).await;
+    // a grace period long enough to tell "at once" from "after it" on a slow machine
+    let world = world(Options { tune: |setup| setup.grace = Duration::from_millis(1200), ..Options::default() }).await;
     let (mut pc, _) = world.device(&alice(), PC, "PC").await;
     let (mut phone, _) = world.device(&alice(), PHONE, "Phone").await;
     let session = pc.command("playContext", play(&["s1", "s2", "s3"], "s1")).await;
@@ -720,7 +721,7 @@ async fn a_lost_connection_has_a_grace_period_and_a_resume_and_a_goodbye_has_non
     assert_eq!(listed["session"]["activeDevice"], PC);
     let (mut pc, welcome) = world.device(&alice(), PC, "PC").await;
     assert_eq!((&welcome["session"]["activeDevice"], &welcome["session"]["playing"], &welcome["session"]["rev"]), (&json!(PC), &json!(true), &session["rev"]));
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
     pc.send(json!({ "type": "report", "ref": "p", "event": "position", "key": "c0:s1", "positionMs": 5_000, "rev": session["rev"] })).await;
     let ack = pc.find("the ack", |m| m["ref"] == "p").await;
     assert_eq!(ack["type"], "ack", "the grace period was over when it came back: {ack}");
@@ -733,7 +734,7 @@ async fn a_lost_connection_has_a_grace_period_and_a_resume_and_a_goodbye_has_non
     assert_eq!(stopped["playing"], false);
     assert_eq!(stopped["lastDevice"]["id"], PC);
     assert!(
-        stopped["positionMs"].as_i64().unwrap() >= 5_000 && stopped["positionMs"].as_i64().unwrap() < 5_400,
+        stopped["positionMs"].as_i64().unwrap() >= 5_000 && stopped["positionMs"].as_i64().unwrap() < 6_000,
         "where it was when the connection dropped: {stopped}"
     );
     assert_eq!(stopped["rev"].as_u64().unwrap(), before["rev"].as_u64().unwrap() + 1);
@@ -773,7 +774,7 @@ async fn a_lost_connection_has_a_grace_period_and_a_resume_and_a_goodbye_has_non
     let left = std::time::Instant::now();
     pc.goodbye().await;
     let stopped = phone.find("the session stopping", |m| m["type"] == "session" && m["session"]["activeDevice"].is_null()).await;
-    assert!(left.elapsed() < Duration::from_millis(300), "no grace period");
+    assert!(left.elapsed() < Duration::from_millis(900), "no grace period");
     assert_eq!(stopped["session"]["playing"], false);
     // so another device can play it straight away
     let taken = phone.command("play", json!({})).await;

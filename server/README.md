@@ -403,10 +403,21 @@ On Windows on ARM (the fork's x64 binary, 0.64.2-sonus.10), this server started 
   last change is checked in `tests/connect.rs`, and in this test on systems with signals: Windows can only kill.)
 - `node --test tools/contract/auth-routes.test.mjs`: 6 of 6, as before.
 
-Not checked here: the Windows and Android clients against this server (the Windows client's two-instance check,
-`tools/e2e/connect-v2.mjs`, runs against the demo server; pointing it at this server is the next step); the 30 s ping
-and 75 s timeout at their real lengths (the tests shorten them; the grace period's 10 s is checked at its real
-length); a real proxy in front of the WebSocket; many users or devices at once; the image (CI builds it).
+- **The Windows client against this server**: `node tools/e2e/acceptance.mjs --arch=ARM64 --only=signin,connect` with
+  `SONUS_TEST_SERVER` pointing at this server in front of the frozen Navidrome (a library of 53 generated songs of
+  one to two minutes, throwaway users, through the tests' recording proxy): 20 of 20, one skipped. The app saw
+  version 2 in the extensions and used it. Two silent instances of the app on one account: both in the device list;
+  the first plays and the second shows the same song, "正在「第一台」上播放" and the position moving, silent; the
+  second's next, add to queue, pause and play steer the first; the device list's volume slider; "这台电脑" moves
+  playback at the same song and position and stops the first; the first, now a remote, pauses and plays the second;
+  the second pauses and closes: the session stays on the server ("上次在「第二台」播放"); the first presses play and
+  continues it. Skipped: the network loss of over 10 s with a resume, which needs the demo server's hook that cuts
+  one device's connection (that sequence is checked by `connect2.test.mjs` and `tests/connect.rs`).
+
+Not checked here: the Android client against this server; the Windows app's other acceptance rounds against it
+(they do not touch Connect); the 30 s ping and 75 s timeout at their real lengths (the tests shorten them; the grace
+period's 10 s is checked at its real length); a real proxy in front of the WebSocket; many users or devices at once;
+the image (CI builds it).
 
 ### The `/auth` routes (phase 2, part 2), 2026-11-24
 

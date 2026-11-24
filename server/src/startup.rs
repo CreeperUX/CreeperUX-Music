@@ -58,6 +58,7 @@ pub async fn local(shared: &Shared, upstream: &Uri, base_path: &str) -> Result<L
                 info!(hashed, "app passwords made before API keys now work as API keys");
             }
             let signer = session_secret(&db, &keys)?;
+            auth::store::prepare(&db)?;
             // the server's own tables (additive: Navidrome's are never altered), made at the first start
             let connect = Connect::new(connect::Setup::new(db.clone()))?;
             Ok((db, signer, connect))

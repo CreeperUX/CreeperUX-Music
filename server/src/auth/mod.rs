@@ -9,6 +9,12 @@
 //! too (404, 405, as Navidrome's router): nothing under it reaches Navidrome but CORS preflights, so Navidrome's own
 //! sign-in is not a second door.
 //!
+//! Three things are stricter here than in Navidrome's fork, on purpose (the security review of 2026-11-24, "weaknesses
+//! by design"): with the policy `required`, an account's first set-up takes a one-time enrolment code besides the
+//! password; and allowing an app's browser sign-in, making an app password, and an admin's reset of someone's two-step
+//! verification each take a verification code of the acting account, when it has two-step verification: a session
+//! alone does none of them.
+//!
 //! Ported from Navidrome and its CreeperUX fork (GPL-3.0), © the Navidrome authors.
 
 pub mod device;
@@ -52,6 +58,7 @@ pub const MAX_BODY_BYTES: usize = 8 << 10;
 const MAX_WRONG_CODES: u32 = 10;
 const WRONG_CODES_WINDOW: Duration = Duration::from_secs(3600);
 const TOO_MANY_CODES: &str = "Too many wrong verification codes; try again later";
+const TOO_MANY_ENROLMENT_CODES: &str = "Too many wrong enrolment codes; try again later";
 
 struct WrongCodes {
     since: Instant,
@@ -70,6 +77,9 @@ const BODY_WITHIN: Duration = Duration::from_secs(10);
 
 /// The audience of a setup token: no API takes it, only the two setup routes.
 const AUDIENCE_SETUP: &str = "sonus-2fa-setup";
+/// A second audience, on the setup token `createAdmin` answers with: the first admin has nobody to get an enrolment
+/// code from, so this token (15 minutes, for the account just made) sets two-step verification up without one.
+const AUDIENCE_FIRST_ADMIN: &str = "sonus-2fa-first-admin";
 const SETUP_TOKEN_SECONDS: i64 = 15 * 60;
 
 pub struct Auth {
@@ -132,6 +142,7 @@ enum Route {
     AppPasswordDelete(String),
     UserStatus(String),
     UserReset(String),
+    UserEnrolmentCode(String),
     DeviceStart,
     DevicePoll,
     DeviceRevoke,
@@ -186,6 +197,7 @@ fn route(method: &Method, path: &str) -> Result<Route, Miss> {
         ["app-passwords", id] if parameter(id) => vec![("DELETE", Route::AppPasswordDelete(id.to_string()))],
         ["2fa", "users", id] if parameter(id) => vec![("GET", Route::UserStatus(id.to_string()))],
         ["2fa", "users", id, "reset"] if parameter(id) => vec![("POST", Route::UserReset(id.to_string()))],
+        ["2fa", "users", id, "enrolment-code"] if parameter(id) => vec![("POST", Route::UserEnrolmentCode(id.to_string()))],
         ["device", code] if parameter(code) => vec![("GET", Route::DeviceInfo(code.to_string()))],
         ["device", code, "approve"] if parameter(code) => vec![("POST", Route::DeviceApprove(code.to_string()))],
         ["device", code, "deny"] if parameter(code) => vec![("POST", Route::DeviceDeny(code.to_string()))],
@@ -199,6 +211,14 @@ fn route(method: &Method, path: &str) -> Result<Route, Miss> {
         allowed.push(m);
     }
     if allowed.is_empty() { Err(Miss::NotFound) } else { Err(Miss::MethodNotAllowed(allowed)) }
+}
+
+/// A setup route's body (`Auth::setup_request`).
+struct SetupRequest {
+    token: String,
+    code: String,
+    enrolment: String,
+    app_password: Option<String>,
 }
 
 /// What a handler answers, before the headers every answer gets.
@@ -228,6 +248,7 @@ fn two_factor(step: &str, message: &str) -> Reply {
 const NOT_AUTHENTICATED: &str = "Not authenticated";
 const BAD_PAYLOAD: &str = "invalid request payload";
 const INVALID_CODE: &str = "Invalid verification code";
+const CODE_REQUIRED: &str = "Verification code required";
 const UNKNOWN_ERROR: &str = "Unknown error authenticating user. Please try again";
 
 /// The parts of a request the handlers need, owned: they run on a blocking thread.
@@ -240,6 +261,8 @@ struct Sent {
     proxy_user: Option<String>,
     /// The address rate limits count for.
     address: String,
+    /// The address as it is shown to a person.
+    client: String,
     /// The body, None when it was longer than Navidrome reads or did not arrive.
     body: Option<Bytes>,
 }
@@ -270,6 +293,15 @@ impl Sent {
             }
         }
         Some(out)
+    }
+
+    /// A code sent with a request that had no body before codes were asked for: no body is no code. None: a body
+    /// that is not the JSON object expected.
+    fn code(&self) -> Option<String> {
+        match &self.body {
+            Some(body) if body.iter().all(u8::is_ascii_whitespace) => Some(String::new()),
+            _ => self.fields(["code"]).map(|[code]| code),
+        }
     }
 
     /// The body decoded into Go's `map[string]string`: every value a string (or null), keys as written.
@@ -343,6 +375,7 @@ impl Auth {
             query: query.unwrap_or_default(),
             proxy_user: request.proxy_user.map(|name| String::from_utf8_lossy(name).into_owned()),
             address: crate::subsonic::limiter_address(request.client),
+            client: request.client.to_string(),
             body,
         };
         let auth = self.clone();
@@ -379,7 +412,7 @@ impl Auth {
             Route::CreateAdmin => self.create_admin(sent),
             Route::Setup => self.setup_begin(sent),
             Route::Confirm => self.setup_confirm(sent),
-            Route::Status => self.status(&signed_in().id),
+            Route::Status => self.status(&signed_in().id, false),
             Route::RecoveryCodes => self.with_code(signed_in(), sent, |auth, user| match store::new_recovery_codes(&auth.db, &user.id) {
                 Ok(codes) => ok(json!({ "recoveryCodes": codes })),
                 Err(e) => fail(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -388,13 +421,14 @@ impl Auth {
             Route::AppPasswords => self.app_passwords(signed_in()),
             Route::AppPasswordCreate => self.app_password_create(signed_in(), sent),
             Route::AppPasswordDelete(id) => self.app_password_delete(signed_in(), &id),
-            Route::UserStatus(id) => self.admin_only(signed_in(), || self.status(&id)),
-            Route::UserReset(id) => self.admin_only(signed_in(), || self.user_reset(signed_in(), &id)),
+            Route::UserStatus(id) => self.admin_only(signed_in(), || self.status(&id, true)),
+            Route::UserReset(id) => self.admin_only(signed_in(), || self.user_reset(signed_in(), &id, sent)),
+            Route::UserEnrolmentCode(id) => self.admin_only(signed_in(), || self.user_enrolment_code(signed_in(), &id, sent)),
             Route::DeviceStart => self.device_start(sent),
             Route::DevicePoll => self.device_poll(sent),
             Route::DeviceRevoke => self.device_revoke(sent),
-            Route::DeviceInfo(code) => self.device_info(&code),
-            Route::DeviceApprove(code) => self.device_approve(signed_in(), &code),
+            Route::DeviceInfo(code) => self.device_info(signed_in(), &code),
+            Route::DeviceApprove(code) => self.device_approve(signed_in(), &code, sent),
             Route::DeviceDeny(code) => self.device_deny(signed_in(), &code),
         };
         (reply, rate)
@@ -429,15 +463,17 @@ impl Auth {
         Some(user)
     }
 
-    /// The fork's `userForSetup`: the user a setup token (or a session token) names.
-    fn user_for_setup(&self, token: &str) -> Option<User> {
+    /// The fork's `userForSetup`: the user a setup token (or a session token) names; and whether the token is the
+    /// first admin's, from `createAdmin`.
+    fn user_for_setup(&self, token: &str) -> Option<(User, bool)> {
         if token.is_empty() {
             return None;
         }
         let claims = self.signer.verify(token, Utc::now().timestamp()).ok()?;
         let user = store::find_user(&self.db, &self.keys, &claims.subject).ok()??;
         jwt::check(&claims, &user.id, user.token_epoch, AUDIENCE_SETUP).ok()?;
-        Some(user)
+        let first_admin = claims.audience.iter().any(|a| a == AUDIENCE_FIRST_ADMIN);
+        Some((user, first_admin))
     }
 
     // ------------------------------------------------------------ tokens and the sign-in's answer
@@ -494,11 +530,13 @@ impl Auth {
     fn login(&self, sent: &Sent) -> Reply {
         let Some(data) = sent.string_map() else { return fail(StatusCode::UNPROCESSABLE_ENTITY, BAD_PAYLOAD) };
         // otp: the authenticator or recovery code, when two-step verification asks for one
-        self.sign_in(text(&data, "username"), text(&data, "password"), text(&data, "otp"))
+        // appPassword: a name; an app password of that name is made with the sign-in (see `with_app_password`)
+        self.sign_in(text(&data, "username"), text(&data, "password"), text(&data, "otp"), data.get("appPassword").and_then(Value::as_str), false)
     }
 
-    /// Navidrome's `doLogin`.
-    fn sign_in(&self, username: &str, password: &str, code: &str) -> Reply {
+    /// Navidrome's `doLogin`. `app_password`: the name of an app password to make with the sign-in. `first_admin`:
+    /// the account was made by this very request.
+    fn sign_in(&self, username: &str, password: &str, code: &str, app_password: Option<&str>, first_admin: bool) -> Reply {
         let user = match store::find_user(&self.db, &self.keys, username) {
             Ok(user) => user,
             Err(e) => {
@@ -515,15 +553,33 @@ impl Auth {
         if let Err(e) = store::touch_last_login(&self.db, &user.id) {
             error!(error = %e, "could not note a sign-in");
         }
-        if let Some(reply) = self.second_step(&user, code) {
+        if let Some(reply) = self.second_step(&user, code, first_admin) {
             return reply;
         }
-        ok(Value::Object(self.signed_in_payload(&user)))
+        ok(Value::Object(self.with_app_password(&user, app_password, self.signed_in_payload(&user))))
+    }
+
+    /// A sign-in's answer with an app password made in the same request (`newAppPassword`, as `POST /app-passwords`
+    /// answers), when the request names one. A client that signs in with the password and a code and then keeps an
+    /// app password of its own (the web client) needs one code this way, not two: making an app password from a
+    /// session takes a code of its own, and an authenticator's code is taken once.
+    fn with_app_password(&self, user: &User, name: Option<&str>, mut payload: Map<String, Value>) -> Map<String, Value> {
+        let Some(name) = name else { return payload };
+        let name: String = name.chars().take(64).collect();
+        match store::create_app_password(&self.db, &self.keys, &user.id, &name, store::Kind::Handed) {
+            Ok((made, password)) => {
+                info!(username = %user.user_name, name = %made.name, "app password created with the sign-in");
+                payload.insert("newAppPassword".into(), json!({ "appPassword": app_password_json(&made), "password": password }));
+            }
+            // the sign-in stands; the client sees that no app password came
+            Err(e) => error!(username = %user.user_name, error = %e, "could not make the app password asked for with the sign-in"),
+        }
+        payload
     }
 
     /// The fork's `twoFactorSignIn`, after a correct password: Some when the request is answered here (a code is
     /// missing or wrong, or the user must set it up first), None when the sign-in goes on.
-    fn second_step(&self, user: &User, code: &str) -> Option<Reply> {
+    fn second_step(&self, user: &User, code: &str, first_admin: bool) -> Option<Reply> {
         if self.policy == TwoFactor::Off {
             return None;
         }
@@ -536,7 +592,7 @@ impl Auth {
         };
         if enabled {
             if code.is_empty() {
-                return Some(two_factor("code", "Verification code required"));
+                return Some(two_factor("code", CODE_REQUIRED));
             }
             return match self.check_code(user, code) {
                 Code::Right => None,
@@ -548,11 +604,14 @@ impl Auth {
             };
         }
         if self.policy == TwoFactor::Required {
-            // not set up yet: a short-lived token that only the setup routes take, instead of a session
-            let token = self.signer.sign(&self.claims(user, &[AUDIENCE_SETUP], SETUP_TOKEN_SECONDS));
+            // not set up yet: a short-lived token that only the setup routes take, instead of a session. The password
+            // was enough to get it, so it is not enough to set up with: that takes the account's enrolment code too
+            let audience: &[&str] = if first_admin { &[AUDIENCE_SETUP, AUDIENCE_FIRST_ADMIN] } else { &[AUDIENCE_SETUP] };
+            let token = self.signer.sign(&self.claims(user, audience, SETUP_TOKEN_SECONDS));
             let mut reply = two_factor("setup", "Two-step verification must be set up");
             if let Some(Value::Object(body)) = &mut reply.body {
                 body.insert("setupToken".into(), json!(token));
+                body.insert("enrolmentCodeRequired".into(), json!(!first_admin));
             }
             return Some(reply);
         }
@@ -561,17 +620,29 @@ impl Auth {
 
     /// Checks a code for the user's two-step verification, counting the wrong ones per account.
     fn check_code(&self, user: &User, code: &str) -> Code {
+        self.counted(&user.id, user, "verification", || store::verify(&self.db, &self.keys, &user.id, code, Utc::now()).map_err(|e| e.to_string()))
+    }
+
+    /// Checks an account's enrolment code (it is used up only when the set-up is confirmed), counting the wrong ones
+    /// per account as verification codes are, in a count of their own.
+    fn check_enrolment_code(&self, user: &User, code: &str) -> Code {
+        let key = format!("enrolment:{}", user.id);
+        self.counted(&key, user, "enrolment", || store::enrolment_code_matches(&self.db, &user.id, code, Utc::now()).map_err(|e| e.to_string()))
+    }
+
+    /// Runs a check of a code, unless too many wrong ones were counted under `key`; a wrong one is counted.
+    fn counted(&self, key: &str, user: &User, kind: &str, check: impl FnOnce() -> Result<bool, String>) -> Code {
         let refused = |codes: &mut HashMap<String, WrongCodes>| {
             codes.retain(|_, wrong| wrong.since.elapsed() < WRONG_CODES_WINDOW);
-            codes.get(&user.id).is_some_and(|wrong| wrong.count >= MAX_WRONG_CODES)
+            codes.get(key).is_some_and(|wrong| wrong.count >= MAX_WRONG_CODES)
         };
         if refused(&mut self.wrong_codes.lock().expect("the wrong codes' lock")) {
             return Code::Refused;
         }
-        let right = match store::verify(&self.db, &self.keys, &user.id, code, Utc::now()) {
+        let right = match check() {
             Ok(right) => right,
             Err(e) => {
-                error!(user = %user.user_name, error = %e, "two-step verification: could not check the code");
+                error!(user = %user.user_name, error = %e, kind, "two-step verification: could not check the code");
                 return Code::Wrong;
             }
         };
@@ -583,12 +654,54 @@ impl Auth {
         if right {
             return Code::Right;
         }
-        let wrong = codes.entry(user.id.clone()).or_insert(WrongCodes { since: Instant::now(), count: 0 });
+        let wrong = codes.entry(key.to_string()).or_insert(WrongCodes { since: Instant::now(), count: 0 });
         wrong.count += 1;
         if wrong.count == MAX_WRONG_CODES {
-            warn!(username = %user.user_name, "two-step verification: too many wrong codes for this account, none is taken for an hour");
+            warn!(username = %user.user_name, kind, "two-step verification: too many wrong codes for this account, none is taken for an hour");
         }
         Code::Wrong
+    }
+
+    /// What a session alone must not do (hand an app a key, make an app password, reset someone's two-step
+    /// verification): for an account with two-step verification, a code from its authenticator, or a recovery code.
+    /// An account without it (the policy is `off`, or `optional` and not set up) goes on as it is. Err: the answer.
+    fn own_code(&self, user: &User, code: &str) -> Result<(), Reply> {
+        match self.two_factor_enabled(user) {
+            Ok(false) => Ok(()),
+            Ok(true) if code.is_empty() => Err(two_factor("code", CODE_REQUIRED)),
+            Ok(true) => match self.check_code(user, code) {
+                Code::Right => Ok(()),
+                Code::Wrong => {
+                    warn!(username = %user.user_name, "a wrong verification code was sent with a signed-in request");
+                    Err(two_factor("code", INVALID_CODE))
+                }
+                Code::Refused => Err(fail(StatusCode::TOO_MANY_REQUESTS, TOO_MANY_CODES)),
+            },
+            Err(e) => {
+                error!(user = %user.user_name, error = %e, "two-step verification: could not read the user's setup");
+                Err(fail(StatusCode::INTERNAL_SERVER_ERROR, UNKNOWN_ERROR))
+            }
+        }
+    }
+
+    /// The enrolment code a first set-up must carry: Ok(None) when this set-up needs none, Ok(Some) the code that
+    /// checked out, Err the answer. None is needed when the policy is not `required` (whoever is signed in turns
+    /// two-step verification on for themselves), and for the first admin, by the token `createAdmin` answered.
+    fn enrolment(&self, user: &User, first_admin: bool, code: String) -> Result<Option<String>, Reply> {
+        if self.policy != TwoFactor::Required || first_admin {
+            return Ok(None);
+        }
+        if code.trim().is_empty() {
+            return Err(two_factor("enrolment", "Enrolment code required"));
+        }
+        match self.check_enrolment_code(user, &code) {
+            Code::Right => Ok(Some(code)),
+            Code::Wrong => {
+                warn!(username = %user.user_name, "two-step verification: a set-up was refused, wrong enrolment code");
+                Err(two_factor("enrolment", "Invalid enrolment code"))
+            }
+            Code::Refused => Err(fail(StatusCode::TOO_MANY_REQUESTS, TOO_MANY_ENROLMENT_CODES)),
+        }
     }
 
     fn create_admin(&self, sent: &Sent) -> Reply {
@@ -597,7 +710,7 @@ impl Auth {
         match store::create_first_admin(&self.db, &self.keys, username, password) {
             Ok(true) => {
                 warn!(user = username, "the first user, an admin, was created");
-                self.sign_in(username, password, "")
+                self.sign_in(username, password, "", None, true)
             }
             Ok(false) => fail(StatusCode::FORBIDDEN, "Cannot create another first admin"),
             Err(e) => {
@@ -609,10 +722,14 @@ impl Auth {
 
     // ------------------------------------------------------------ setting two-step verification up
 
-    /// A setup route's body: `token` (a setup token, a session's, or else the session header's) and `code`.
-    fn setup_request(&self, sent: &Sent) -> Option<(String, String)> {
-        let [token, code] = sent.fields(["token", "code"])?;
-        Some((if token.is_empty() { sent.bearer.clone() } else { token }, code))
+    /// A setup route's body: `token` (a setup token, a session's, or else the session header's), `code`,
+    /// `enrolmentCode` (a first set-up's, when the server requires two-step verification) and `appPassword` (the name
+    /// of an app password to make with the sign-in a confirmation ends in).
+    fn setup_request(&self, sent: &Sent) -> Option<SetupRequest> {
+        let [token, code, enrolment, app_password] = sent.fields(["token", "code", "enrolmentCode", "appPassword"])?;
+        let named =
+            sent.json().is_some_and(|body| body.as_object().is_some_and(|o| o.iter().any(|(k, v)| k.eq_ignore_ascii_case("appPassword") && v.is_string())));
+        Some(SetupRequest { token: if token.is_empty() { sent.bearer.clone() } else { token }, code, enrolment, app_password: named.then_some(app_password) })
     }
 
     /// Starts setting an authenticator up: a new secret, its link and QR code. Replacing one already in use takes a
@@ -621,8 +738,8 @@ impl Auth {
         if self.policy == TwoFactor::Off {
             return fail(StatusCode::FORBIDDEN, "Two-step verification is turned off on this server");
         }
-        let Some((token, code)) = self.setup_request(sent) else { return fail(StatusCode::UNPROCESSABLE_ENTITY, BAD_PAYLOAD) };
-        let Some(user) = self.user_for_setup(&token) else { return fail(StatusCode::UNAUTHORIZED, NOT_AUTHENTICATED) };
+        let Some(SetupRequest { token, code, enrolment, .. }) = self.setup_request(sent) else { return fail(StatusCode::UNPROCESSABLE_ENTITY, BAD_PAYLOAD) };
+        let Some((user, first_admin)) = self.user_for_setup(&token) else { return fail(StatusCode::UNAUTHORIZED, NOT_AUTHENTICATED) };
         match self.two_factor_enabled(&user) {
             Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
             Ok(true) => match self.check_code(&user, &code) {
@@ -630,7 +747,12 @@ impl Auth {
                 Code::Wrong => return two_factor("code", INVALID_CODE),
                 Code::Refused => return fail(StatusCode::TOO_MANY_REQUESTS, TOO_MANY_CODES),
             },
-            Ok(false) => {}
+            // a first set-up: nothing is made, no secret handed out, without the enrolment code
+            Ok(false) => {
+                if let Err(reply) = self.enrolment(&user, first_admin, enrolment) {
+                    return reply;
+                }
+            }
         }
         let (secret, uri) = match store::begin_setup(&self.db, &self.keys, &user.id, &user.user_name) {
             Ok(begun) => begun,
@@ -649,11 +771,24 @@ impl Auth {
     /// Checks a code from the new authenticator; when it is right, that authenticator is the one in use, the user gets
     /// their recovery codes, and is signed in (as the sign-in answers).
     fn setup_confirm(&self, sent: &Sent) -> Reply {
-        let Some((token, code)) = self.setup_request(sent) else { return fail(StatusCode::UNPROCESSABLE_ENTITY, BAD_PAYLOAD) };
-        let Some(user) = self.user_for_setup(&token) else { return fail(StatusCode::UNAUTHORIZED, NOT_AUTHENTICATED) };
-        let codes = match store::confirm_setup(&self.db, &self.keys, &user.id, &code, Utc::now()) {
+        let Some(SetupRequest { token, code, enrolment, app_password }) = self.setup_request(sent) else {
+            return fail(StatusCode::UNPROCESSABLE_ENTITY, BAD_PAYLOAD);
+        };
+        let Some((user, first_admin)) = self.user_for_setup(&token) else { return fail(StatusCode::UNAUTHORIZED, NOT_AUTHENTICATED) };
+        // a first set-up is confirmed with the enrolment code too: knowing a secret that waits is not enough (one may
+        // wait from before enrolment codes), and the code is used up with the confirmation
+        let enrolment = match store::is_set_up(&self.db, &user.id) {
+            Ok(true) => None,
+            Ok(false) => match self.enrolment(&user, first_admin, enrolment) {
+                Ok(enrolment) => enrolment,
+                Err(reply) => return reply,
+            },
+            Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        };
+        let codes = match store::confirm_setup(&self.db, &self.keys, &user.id, &code, enrolment.as_deref(), Utc::now()) {
             Ok(codes) => codes,
             Err(store::ConfirmError::InvalidCode) => return two_factor("setup", INVALID_CODE),
+            Err(store::ConfirmError::InvalidEnrolment) => return two_factor("enrolment", "Invalid enrolment code"),
             Err(store::ConfirmError::NoSetup) => return fail(StatusCode::CONFLICT, "No two-step verification being set up"),
             Err(store::ConfirmError::Store(e)) => {
                 error!(user = %user.user_name, error = %e, "two-step verification: could not confirm the setup");
@@ -666,14 +801,15 @@ impl Auth {
             Ok(Some(found)) if found.id == user.id => found,
             _ => User { token_epoch: user.token_epoch + 1, ..user },
         };
-        let mut payload = self.signed_in_payload(&user);
+        let mut payload = self.with_app_password(&user, app_password.as_deref(), self.signed_in_payload(&user));
         payload.insert("recoveryCodes".into(), json!(codes));
         ok(Value::Object(payload))
     }
 
     // ------------------------------------------------------------ signed in: the user's own
 
-    fn status(&self, user_id: &str) -> Reply {
+    /// `for_admin`: an admin looking at a user also sees whether an enrolment code waits for them.
+    fn status(&self, user_id: &str, for_admin: bool) -> Reply {
         match store::status(&self.db, user_id) {
             Ok(status) => {
                 let mut body = Map::new();
@@ -688,6 +824,11 @@ impl Auth {
                     body.insert("enabledAt".into(), json!(at));
                 }
                 body.insert("recoveryCodesLeft".into(), json!(status.recovery_codes_left));
+                if for_admin {
+                    if let Ok(Some(until)) = store::enrolment_code_expiry(&self.db, user_id, Utc::now()) {
+                        body.insert("enrolmentCodeExpiresAt".into(), json!(gotime::to_json(&until)));
+                    }
+                }
                 ok(Value::Object(body))
             }
             Err(e) => fail(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -725,7 +866,11 @@ impl Auth {
     }
 
     fn app_password_create(&self, user: &User, sent: &Sent) -> Reply {
-        let Some([name]) = sent.fields(["name"]) else { return fail(StatusCode::UNPROCESSABLE_ENTITY, BAD_PAYLOAD) };
+        let Some([name, code]) = sent.fields(["name", "code"]) else { return fail(StatusCode::UNPROCESSABLE_ENTITY, BAD_PAYLOAD) };
+        // an app password is a permanent key that skips two-step verification: a session alone does not make one
+        if let Err(reply) = self.own_code(user, &code) {
+            return reply;
+        }
         let name: String = name.chars().take(64).collect();
         match store::create_app_password(&self.db, &self.keys, &user.id, &name, store::Kind::Typed) {
             Ok((made, password)) => {
@@ -757,14 +902,57 @@ impl Auth {
     }
 
     /// Removes someone's two-step verification (a lost phone and no recovery codes): they set it up again at their next
-    /// sign-in. Their app passwords keep working.
-    fn user_reset(&self, admin: &User, user_id: &str) -> Reply {
-        match store::disable(&self.db, user_id) {
-            Ok(()) => {
-                warn!(admin = %admin.user_name, user_id, "two-step verification reset by an admin");
-                no_content()
+    /// sign-in. Their app passwords keep working. It takes the admin's own verification code: an admin's session is
+    /// otherwise worth every account. Where two-step verification is required, the answer carries the enrolment code
+    /// the user sets it up again with (`enrolmentCode`, `expiresAt`), shown this once.
+    fn user_reset(&self, admin: &User, user_id: &str, sent: &Sent) -> Reply {
+        let Some(code) = sent.code() else { return fail(StatusCode::UNPROCESSABLE_ENTITY, BAD_PAYLOAD) };
+        if let Err(reply) = self.own_code(admin, &code) {
+            return reply;
+        }
+        if let Err(e) = store::disable(&self.db, user_id) {
+            return fail(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+        }
+        warn!(admin = %admin.user_name, user_id, "two-step verification reset by an admin");
+        if self.policy != TwoFactor::Required {
+            return no_content();
+        }
+        match self.issue_enrolment_code(admin, user_id) {
+            // as before enrolment codes: resetting someone who is not there changes nothing and says so with 204
+            Err(reply) if reply.status == StatusCode::NOT_FOUND => no_content(),
+            Ok(reply) | Err(reply) => reply,
+        }
+    }
+
+    /// Makes an enrolment code for a user without two-step verification: one who was just made (through Navidrome's
+    /// own API, which knows nothing of these codes), or who was there before the server asked for them. An earlier
+    /// code of theirs stops working. It takes the admin's own verification code.
+    fn user_enrolment_code(&self, admin: &User, user_id: &str, sent: &Sent) -> Reply {
+        if self.policy != TwoFactor::Required {
+            return fail(StatusCode::CONFLICT, "Enrolment codes are used only where two-step verification is required");
+        }
+        let Some(code) = sent.code() else { return fail(StatusCode::UNPROCESSABLE_ENTITY, BAD_PAYLOAD) };
+        if let Err(reply) = self.own_code(admin, &code) {
+            return reply;
+        }
+        match self.issue_enrolment_code(admin, user_id) {
+            Ok(reply) | Err(reply) => reply,
+        }
+    }
+
+    /// Ok: the code and when it stops working. Err: why there is none.
+    fn issue_enrolment_code(&self, admin: &User, user_id: &str) -> Result<Reply, Reply> {
+        match store::issue_enrolment_code(&self.db, user_id, &admin.id, Utc::now()) {
+            Ok(store::Issued::Code(code, until)) => {
+                info!(admin = %admin.user_name, user_id, "an enrolment code was made");
+                Ok(ok(json!({ "enrolmentCode": code, "expiresAt": gotime::to_json(&until) })))
             }
-            Err(e) => fail(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            Ok(store::Issued::NoSuchUser) => Err(fail(StatusCode::NOT_FOUND, "No such user")),
+            Ok(store::Issued::AlreadySetUp) => Err(fail(StatusCode::CONFLICT, "Two-step verification is set up for this user: reset it first")),
+            Err(e) => {
+                error!(admin = %admin.user_name, user_id, error = %e, "could not make an enrolment code");
+                Err(fail(StatusCode::INTERNAL_SERVER_ERROR, "Could not make an enrolment code"))
+            }
         }
     }
 
@@ -772,7 +960,7 @@ impl Auth {
 
     fn device_start(&self, sent: &Sent) -> Reply {
         let Some([client, device]) = sent.fields(["client", "device"]) else { return fail(StatusCode::UNPROCESSABLE_ENTITY, BAD_PAYLOAD) };
-        match self.devices.start(&client, &device, &sent.address) {
+        match self.devices.start(&client, &device, &sent.address, &sent.client) {
             Ok(started) => ok(json!({
                 "deviceCode": started.device_code,
                 "userCode": started.user_code,
@@ -810,15 +998,34 @@ impl Auth {
 
     const NO_SIGN_IN_WAITING: &'static str = "No sign-in waiting for this code: it may have expired";
 
-    fn device_info(&self, code: &str) -> Reply {
+    /// What asks: the app and device as they named themselves, the address the request came from, and whether
+    /// allowing it takes a verification code of the user who looks.
+    fn device_info(&self, user: &User, code: &str) -> Reply {
         match self.devices.info(code) {
-            Some(info) => ok(json!({ "userCode": info.user_code, "client": info.client, "device": info.device, "expiresIn": info.expires_in })),
+            Some(info) => ok(json!({
+                "userCode": info.user_code,
+                "client": info.client,
+                "device": info.device,
+                "address": info.address,
+                "expiresIn": info.expires_in,
+                "codeRequired": !matches!(self.two_factor_enabled(user), Ok(false)),
+            })),
             None => fail(StatusCode::NOT_FOUND, Self::NO_SIGN_IN_WAITING),
         }
     }
 
-    /// The signed-in user allows the app: an API key is made for it, named after the app and the device.
-    fn device_approve(&self, user: &User, code: &str) -> Reply {
+    /// The signed-in user allows the app: an API key is made for it, named after the app and the device. With
+    /// two-step verification, it takes a verification code: someone signed in who is talked into opening an
+    /// attacker's approval link does not hand a permanent key over with one click.
+    fn device_approve(&self, user: &User, code: &str, sent: &Sent) -> Reply {
+        let Some(own) = sent.code() else { return fail(StatusCode::UNPROCESSABLE_ENTITY, BAD_PAYLOAD) };
+        // a code is used by being checked: not for a sign-in that is not there
+        if self.devices.info(code).is_none() {
+            return fail(StatusCode::NOT_FOUND, Self::NO_SIGN_IN_WAITING);
+        }
+        if let Err(reply) = self.own_code(user, &own) {
+            return reply;
+        }
         let make_key = |name: &str| store::create_app_password(&self.db, &self.keys, &user.id, name, store::Kind::Handed).map(|(_, key)| key);
         match self.devices.approve(code, &user.user_name, make_key) {
             Some(Ok(())) => {
@@ -926,6 +1133,8 @@ mod tests {
         assert_eq!(found("DELETE", "/app-passwords/abc"), Ok(Route::AppPasswordDelete("abc".into())));
         assert_eq!(found("GET", "/2fa/users/u1"), Ok(Route::UserStatus("u1".into())));
         assert_eq!(found("POST", "/2fa/users/u1/reset"), Ok(Route::UserReset("u1".into())));
+        assert_eq!(found("POST", "/2fa/users/u1/enrolment-code"), Ok(Route::UserEnrolmentCode("u1".into())));
+        assert_eq!(found("GET", "/2fa/users/u1/enrolment-code"), Err(Miss::MethodNotAllowed(vec!["POST"])));
         assert_eq!(found("POST", "/device/start"), Ok(Route::DeviceStart));
         assert_eq!(found("GET", "/device/BCDF-GHJK"), Ok(Route::DeviceInfo("BCDF-GHJK".into())));
         assert_eq!(found("POST", "/device/BCDF-GHJK/approve"), Ok(Route::DeviceApprove("BCDF-GHJK".into())));
@@ -962,6 +1171,7 @@ mod tests {
             (Route::AppPasswordDelete(String::new()), false, true),
             (Route::UserStatus(String::new()), false, true),
             (Route::UserReset(String::new()), false, true),
+            (Route::UserEnrolmentCode(String::new()), false, true),
             (Route::DeviceStart, true, false),
             (Route::DevicePoll, false, false),
             (Route::DeviceRevoke, true, false),
@@ -981,6 +1191,7 @@ mod tests {
             query: String::new(),
             proxy_user: None,
             address: String::new(),
+            client: String::new(),
             body: Some(Bytes::from(body.to_string())),
         }
     }

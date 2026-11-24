@@ -18,6 +18,7 @@ use hyper::header::{self, HeaderMap};
 use hyper::{Method, Request, Response, StatusCode};
 use rusqlite::Connection;
 use serde_json::{Value, json};
+use sonus_server::auth::store::{self, Issued};
 use sonus_server::auth::{Auth, Setup, totp};
 use sonus_server::config::TwoFactor;
 use sonus_server::db::Db;
@@ -51,6 +52,8 @@ struct World {
     database: PathBuf,
     dir: PathBuf,
     base: &'static str,
+    /// The server's own handle on the database, for what an admin would do by hand.
+    store: Arc<Db>,
 }
 
 impl Drop for World {
@@ -76,6 +79,8 @@ async fn world(options: Options) -> World {
         conn.execute("UPDATE user SET is_admin = 1 WHERE id = ?1", [&root]).unwrap();
     }
     drop(conn);
+    let db = Db::open(&file).unwrap();
+    sonus_server::auth::store::prepare(&db).unwrap();
 
     let reached = Arc::new(AtomicUsize::new(0));
     let counter = reached.clone();
@@ -85,7 +90,7 @@ async fn world(options: Options) -> World {
     })
     .await;
     let auth = Auth::new(Setup {
-        db: Db::open(&file).unwrap(),
+        db: db.clone(),
         keys,
         two_factor: options.policy,
         signer: Signer::new(SECRET.as_bytes()),
@@ -99,7 +104,7 @@ async fn world(options: Options) -> World {
     });
     let setup = GatewaySetup { trusted: options.trusted, base_path: options.base_path, checks_sign_ins: true, auth: Some(auth), ..GatewaySetup::default() };
     let (gateway, _) = gateway(navidrome, setup).await;
-    World { gateway, reached, database: file, dir, base: options.base_path }
+    World { gateway, reached, database: file, dir, base: options.base_path, store: db }
 }
 
 fn now() -> i64 {
@@ -142,20 +147,37 @@ impl World {
         self.post("/login", json!({ "username": user, "password": password, "otp": otp }), "").await
     }
 
-    /// Goes through alice's first sign-in: the setup token, the secret, the confirmed code. The secret, the session
-    /// and the recovery codes.
+    /// An enrolment code for the user, as an admin makes one (`id-<name>`: the test database's ids).
+    fn enrolment_code(&self, user: &str) -> String {
+        match store::issue_enrolment_code(&self.store, &format!("id-{user}"), "test", chrono::Utc::now()).unwrap() {
+            Issued::Code(code, _) => code,
+            other => panic!("no enrolment code for {user}: {other:?}"),
+        }
+    }
+
+    /// Goes through a user's first sign-in with an enrolment code made for them: see `set_up_with`.
     async fn set_up(&self, user: &str, password: &str) -> (String, String, Vec<String>) {
+        let enrolment = self.enrolment_code(user);
+        self.set_up_with(user, password, &enrolment).await
+    }
+
+    /// Goes through a user's first sign-in: the setup token, the secret (for the enrolment code), the confirmed code.
+    /// The secret, the session and the recovery codes. The code confirmed is the step's before now, so the test has
+    /// two more from the authenticator (now's and the next), each taken once.
+    async fn set_up_with(&self, user: &str, password: &str, enrolment: &str) -> (String, String, Vec<String>) {
         let (status, _, body) = self.sign_in(user, password, "").await;
         assert_eq!((status, &body["twoFactor"]), (StatusCode::UNAUTHORIZED, &json!("setup")), "{body}");
+        assert_eq!(body["enrolmentCodeRequired"], true);
         let token = body["setupToken"].as_str().unwrap().to_string();
-        let (status, _, body) = self.post("/2fa/setup", json!({ "token": token }), "").await;
+        let (status, _, body) = self.post("/2fa/setup", json!({ "token": token, "enrolmentCode": enrolment }), "").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let secret = body["secret"].as_str().unwrap().to_string();
         assert!(body["qr"].as_str().unwrap().starts_with("data:image/png;base64,"));
         assert_eq!(body["issuer"], "Sonus");
         assert_eq!(body["account"], user);
         assert!(body["uri"].as_str().unwrap().starts_with("otpauth://totp/Sonus:") && body["uri"].as_str().unwrap().contains(&secret));
-        let (status, _, body) = self.post("/2fa/confirm", json!({ "token": token, "code": totp::code(&secret, now()).unwrap() }), "").await;
+        let code = totp::code(&secret, now() - 30).unwrap();
+        let (status, _, body) = self.post("/2fa/confirm", json!({ "token": token, "code": code, "enrolmentCode": enrolment }), "").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(body.get("subsonicToken").is_none() && body.get("subsonicSalt").is_none(), "no password-derived token with two-step verification");
         let codes = body["recoveryCodes"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_string()).collect();
@@ -323,7 +345,8 @@ async fn the_setup_token_opens_nothing_else_and_gives_no_session_before_the_code
     assert_eq!(claims.audience, ["sonus-2fa-setup"]);
     assert!((890..=900).contains(&(claims.expires_at - now())), "fifteen minutes");
     // nothing is being set up yet
-    let (status, _, body) = w.post("/2fa/confirm", json!({ "token": setup_token, "code": "123456" }), "").await;
+    let enrolment = w.enrolment_code("alice");
+    let (status, _, body) = w.post("/2fa/confirm", json!({ "token": setup_token, "code": "123456", "enrolmentCode": enrolment }), "").await;
     assert_eq!((status, error(&body)), (StatusCode::CONFLICT, "No two-step verification being set up"));
     // no signed-in route takes it
     for path in ["/2fa", "/app-passwords", "/device/BCDF-GHJK"] {
@@ -336,8 +359,8 @@ async fn the_setup_token_opens_nothing_else_and_gives_no_session_before_the_code
         assert_eq!((status, error(&answer)), (StatusCode::UNAUTHORIZED, "Not authenticated"));
     }
     // a wrong code while setting up
-    assert_eq!(w.post("/2fa/setup", json!({ "token": setup_token }), "").await.0, StatusCode::OK);
-    let (status, _, body) = w.post("/2fa/confirm", json!({ "token": setup_token, "code": "000000" }), "").await;
+    assert_eq!(w.post("/2fa/setup", json!({ "token": setup_token, "enrolmentCode": enrolment }), "").await.0, StatusCode::OK);
+    let (status, _, body) = w.post("/2fa/confirm", json!({ "token": setup_token, "code": "000000", "enrolmentCode": enrolment }), "").await;
     assert_eq!((status, &body["twoFactor"], error(&body)), (StatusCode::UNAUTHORIZED, &json!("setup"), "Invalid verification code"));
     let enabled: i64 = w.db().query_row("SELECT count(*) FROM sonus_two_factor WHERE confirmed_at IS NOT NULL", [], |r| r.get(0)).unwrap();
     assert_eq!(enabled, 0, "off until a code from the new secret is confirmed");
@@ -423,7 +446,7 @@ async fn a_signed_in_user_manages_app_passwords_and_recovery_codes() {
     let w = world(Options::default()).await;
     let (_, session, recovery) = w.set_up("alice", "sesame").await;
 
-    let (status, _, body) = w.post("/app-passwords", json!({ "name": " 书房电脑 " }), &session).await;
+    let (status, _, body) = w.post("/app-passwords", json!({ "name": " 书房电脑 ", "code": recovery[2] }), &session).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let password = body["password"].as_str().unwrap().to_string();
     assert_eq!(password.len(), 19);
@@ -438,8 +461,8 @@ async fn a_signed_in_user_manages_app_passwords_and_recovery_codes() {
     assert_eq!(Keys::new(KEY).open(&sealed).unwrap(), password.as_bytes());
     assert_eq!(hash, sonus_server::secrets::api_key_hash(password.replace('-', "").to_uppercase().as_bytes()));
 
-    assert_eq!(w.post("/app-passwords", json!({ "name": "" }), &session).await.2["appPassword"]["name"], "App", "no name");
-    let long = w.post("/app-passwords", json!({ "name": "长".repeat(100) }), &session).await.2;
+    assert_eq!(w.post("/app-passwords", json!({ "name": "", "code": recovery[3] }), &session).await.2["appPassword"]["name"], "App", "no name");
+    let long = w.post("/app-passwords", json!({ "name": "长".repeat(100), "code": recovery[4] }), &session).await.2;
     assert_eq!(long["appPassword"]["name"].as_str().unwrap().chars().count(), 64);
     let (status, _, list) = w.get("/app-passwords", &session).await;
     assert_eq!(status, StatusCode::OK);
@@ -475,21 +498,40 @@ async fn a_signed_in_user_manages_app_passwords_and_recovery_codes() {
 #[tokio::test]
 async fn an_admin_resets_someones_two_step_verification_and_their_app_passwords_stay() {
     let w = world(Options::default()).await;
-    let (_, alice, _) = w.set_up("alice", "sesame").await;
-    let (_, root, _) = w.set_up("root", "toor").await;
-    w.post("/app-passwords", json!({ "name": "phone" }), &alice).await;
-    let other = w.post("/app-passwords", json!({ "name": "root's" }), &root).await.2["appPassword"]["id"].as_str().unwrap().to_string();
+    let (_, alice, alices) = w.set_up("alice", "sesame").await;
+    let (secret, root, roots) = w.set_up("root", "toor").await;
+    assert_eq!(w.post("/app-passwords", json!({ "name": "phone", "code": alices[0] }), &alice).await.0, StatusCode::OK);
+    let other = w.post("/app-passwords", json!({ "name": "root's", "code": roots[0] }), &root).await.2["appPassword"]["id"].as_str().unwrap().to_string();
     assert_eq!(w.call(Method::DELETE, &format!("/app-passwords/{other}"), None, &alice).await.0, StatusCode::NOT_FOUND, "only its user revokes it");
 
     let (status, _, body) = w.get("/2fa/users/id-alice", &root).await;
-    assert_eq!((status, &body["enabled"], &body["recoveryCodesLeft"]), (StatusCode::OK, &json!(true), &json!(10)));
-    assert_eq!(w.post("/2fa/users/id-alice/reset", json!(null), &root).await.0, StatusCode::NO_CONTENT);
-    assert_eq!(w.get("/2fa/users/id-alice", &root).await.2, json!({ "mode": "required", "enabled": false, "recoveryCodesLeft": 0 }));
+    assert_eq!((status, &body["enabled"], &body["recoveryCodesLeft"]), (StatusCode::OK, &json!(true), &json!(9)), "one was used for the app password");
+    // the admin's session alone resets nobody: it takes the admin's own code
+    for (body, said) in
+        [(json!(null), "Verification code required"), (json!({}), "Verification code required"), (json!({ "code": "000000" }), "Invalid verification code")]
+    {
+        let (status, _, answer) = w.post("/2fa/users/id-alice/reset", body, &root).await;
+        assert_eq!((status, &answer["twoFactor"], error(&answer)), (StatusCode::UNAUTHORIZED, &json!("code"), said));
+    }
+    assert_eq!(w.call(Method::POST, "/2fa/users/id-alice/reset", None, &root).await.0, StatusCode::UNAUTHORIZED, "no body is no code");
+    assert_eq!(w.get("/2fa/users/id-alice", &root).await.2["enabled"], true, "nothing was reset");
+    let (status, _, reset) = w.post("/2fa/users/id-alice/reset", json!({ "code": totp::code(&secret, now()).unwrap() }), &root).await;
+    assert_eq!(status, StatusCode::OK, "{reset}");
+    // the answer carries what alice sets it up again with, once
+    let enrolment = reset["enrolmentCode"].as_str().unwrap().to_string();
+    assert!(enrolment.len() == 14 && enrolment.split('-').all(|g| g.len() == 4), "{enrolment}");
+    assert!(reset["expiresAt"].as_str().unwrap().ends_with('Z'));
+    let seen = w.get("/2fa/users/id-alice", &root).await.2;
+    assert_eq!((&seen["mode"], &seen["enabled"], &seen["recoveryCodesLeft"]), (&json!("required"), &json!(false), &json!(0)));
+    assert_eq!(seen["enrolmentCodeExpiresAt"], reset["expiresAt"], "the admin sees that a code waits, not the code");
+    let kept: String = w.db().query_row("SELECT code_hash FROM sonus_enrolment_code WHERE user_id = 'id-alice'", [], |r| r.get(0)).unwrap();
+    assert!(kept.len() == 64 && !kept.contains(&enrolment), "kept as a hash only");
     // they set it up again at their next sign-in; their app passwords are still there
     assert_eq!(w.sign_in("alice", "sesame", "").await.2["twoFactor"], "setup");
     assert_eq!(w.get("/app-passwords", &alice).await.2.as_array().unwrap().len(), 1);
     // and setting it up again ends the sessions from before
-    let (_, again, _) = w.set_up("alice", "sesame").await;
+    let (_, again, _) = w.set_up_with("alice", "sesame", &enrolment).await;
+    assert!(w.get("/2fa/users/id-alice", &root).await.2.get("enrolmentCodeExpiresAt").is_none(), "used up");
     assert_eq!(w.get("/app-passwords", &alice).await.0, StatusCode::UNAUTHORIZED);
     assert_eq!(w.get("/app-passwords", &again).await.2.as_array().unwrap().len(), 1);
 }
@@ -734,4 +776,304 @@ async fn futures(w: &World, n: usize) -> Vec<Value> {
         out.push(w.post("/device/start", json!({ "client": "Sonus" }), "").await.2);
     }
     out
+}
+
+// ---------------------------------------------------------------- stricter than Navidrome's fork, on purpose
+
+/// The wrong codes an account may be sent in an hour (`auth::MAX_WRONG_CODES`).
+const WRONG_CODES: usize = 10;
+
+#[tokio::test]
+async fn the_password_alone_does_not_set_two_step_verification_up() {
+    let w = world(Options::default()).await;
+    let (_, _, body) = w.sign_in("alice", "sesame", "").await;
+    let token = body["setupToken"].as_str().unwrap().to_string();
+    let begin = |enrolment: Value| w.post("/2fa/setup", json!({ "token": token, "enrolmentCode": enrolment }), "");
+    let refused =
+        |answer: Answer, said: &str| assert_eq!((answer.0, &answer.2["twoFactor"], error(&answer.2)), (StatusCode::UNAUTHORIZED, &json!("enrolment"), said));
+
+    // no code was made for alice: nothing she, or whoever has her password, can send sets it up
+    refused(w.post("/2fa/setup", json!({ "token": token }), "").await, "Enrolment code required");
+    refused(begin(json!("")).await, "Enrolment code required");
+    refused(begin(json!("abcd-efgh-jkmn")).await, "Invalid enrolment code");
+    // another user's code is not hers
+    let roots = w.enrolment_code("root");
+    refused(begin(json!(roots)).await, "Invalid enrolment code");
+    // nor is a session of hers from before the server required it enough (here: a token as an older sign-in gave)
+    let old_session = token_for(session_claims("alice", 0));
+    refused(w.post("/2fa/setup", json!({}), &old_session).await, "Enrolment code required");
+    let waiting: i64 = w.db().query_row("SELECT count(*) FROM sonus_two_factor", [], |r| r.get(0)).unwrap();
+    assert_eq!(waiting, 0, "no secret was made or handed out");
+
+    // hers: any case, with or without dashes
+    let code = w.enrolment_code("alice");
+    let (status, _, body) = begin(json!(code.replace('-', "").to_uppercase())).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let secret = body["secret"].as_str().unwrap().to_string();
+    // confirming takes it too: a secret that waits is not enough
+    let confirm =
+        |enrolment: &str, at: i64| w.post("/2fa/confirm", json!({ "token": token, "code": totp::code(&secret, at).unwrap(), "enrolmentCode": enrolment }), "");
+    refused(confirm("", now()).await, "Enrolment code required");
+    refused(confirm(&roots, now()).await, "Invalid enrolment code");
+    // a code past its time is no code
+    w.db().execute("UPDATE sonus_enrolment_code SET expires_at = ?1 WHERE user_id = 'id-alice'", [now() - 1]).unwrap();
+    refused(confirm(&code, now()).await, "Invalid enrolment code");
+    refused(begin(json!(code)).await, "Invalid enrolment code");
+    // a new one replaces it, and works once
+    let fresh = w.enrolment_code("alice");
+    refused(confirm(&code, now()).await, "Invalid enrolment code");
+    let (status, _, body) = confirm(&fresh, now() - 30).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let left: i64 = w.db().query_row("SELECT count(*) FROM sonus_enrolment_code WHERE user_id = 'id-alice'", [], |r| r.get(0)).unwrap();
+    assert_eq!(left, 0, "used up with the confirmation");
+    // after an admin's reset (here by hand), the used code enrols nobody again
+    store::disable(&w.store, "id-alice").unwrap();
+    let (_, _, body) = w.sign_in("alice", "sesame", "").await;
+    let again = body["setupToken"].as_str().unwrap().to_string();
+    refused(w.post("/2fa/setup", json!({ "token": again, "enrolmentCode": fresh }), "").await, "Invalid enrolment code");
+    assert_eq!(w.reached.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn enrolment_codes_cannot_be_guessed_ten_wrong_ones_and_none_is_looked_at() {
+    let w = world(Options::default()).await;
+    let code = w.enrolment_code("alice");
+    let (_, _, body) = w.sign_in("alice", "sesame", "").await;
+    let token = body["setupToken"].as_str().unwrap().to_string();
+    for n in 0..WRONG_CODES {
+        let route = if n % 2 == 0 { "/2fa/setup" } else { "/2fa/confirm" };
+        let (status, _, body) = w.post(route, json!({ "token": token, "code": "000000", "enrolmentCode": format!("aaaa-bbbb-cc{n:02}") }), "").await;
+        assert_eq!((status, error(&body)), (StatusCode::UNAUTHORIZED, "Invalid enrolment code"), "guess {n}");
+    }
+    for route in ["/2fa/setup", "/2fa/confirm"] {
+        let (status, _, body) = w.post(route, json!({ "token": token, "code": "000000", "enrolmentCode": code }), "").await;
+        assert_eq!((status, error(&body)), (StatusCode::TOO_MANY_REQUESTS, "Too many wrong enrolment codes; try again later"), "the right one neither");
+    }
+    // another account is not held up by it, and the count is not the verification codes' one
+    let roots = w.enrolment_code("root");
+    let (secret, session, _) = w.set_up_with("root", "toor", &roots).await;
+    assert_eq!(w.post("/2fa/recovery-codes", json!({ "code": totp::code(&secret, now()).unwrap() }), &session).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn the_first_admin_sets_it_up_without_an_enrolment_code_only_with_the_token_of_its_making() {
+    let w = world(Options { empty: true, ..Options::default() }).await;
+    let (status, _, body) = w.post("/createAdmin", json!({ "username": "owner", "password": "secret" }), "").await;
+    assert_eq!((status, &body["twoFactor"], &body["enrolmentCodeRequired"]), (StatusCode::UNAUTHORIZED, &json!("setup"), &json!(false)), "{body}");
+    let first = body["setupToken"].as_str().unwrap().to_string();
+    let claims = Signer::new(SECRET.as_bytes()).verify(&first, now()).unwrap();
+    assert_eq!(claims.audience, ["sonus-2fa-setup", "sonus-2fa-first-admin"]);
+    assert!((890..=900).contains(&(claims.expires_at - now())), "fifteen minutes");
+    // signing in afterwards, with the password, gives a token that does need the code
+    let (_, _, body) = w.sign_in("owner", "secret", "").await;
+    assert_eq!(body["enrolmentCodeRequired"], true);
+    let later = body["setupToken"].as_str().unwrap().to_string();
+    let (status, _, body) = w.post("/2fa/setup", json!({ "token": later }), "").await;
+    assert_eq!((status, error(&body)), (StatusCode::UNAUTHORIZED, "Enrolment code required"));
+    // the first token is no session
+    assert_eq!(w.get("/2fa", &first).await.0, StatusCode::UNAUTHORIZED);
+    let (status, _, body) = w.post("/2fa/setup", json!({ "token": first }), "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let secret = body["secret"].as_str().unwrap().to_string();
+    let (status, _, body) = w.post("/2fa/confirm", json!({ "token": first, "code": totp::code(&secret, now()).unwrap() }), "").await;
+    assert_eq!((status, &body["isAdmin"]), (StatusCode::OK, &json!(true)), "{body}");
+}
+
+#[tokio::test]
+async fn an_admin_makes_an_enrolment_code_for_a_user_without_two_step_verification() {
+    let w = world(Options::default()).await;
+    let w = &w;
+    let (secret, root, recovery) = w.set_up("root", "toor").await;
+    let root = &root;
+    let make = |user: &'static str, body: Value| async move { w.post(&format!("/2fa/users/{user}/enrolment-code"), body, root).await };
+    // the admin's own code first
+    let (status, _, body) = make("id-alice", json!({})).await;
+    assert_eq!((status, &body["twoFactor"], error(&body)), (StatusCode::UNAUTHORIZED, &json!("code"), "Verification code required"));
+    assert_eq!(make("id-alice", json!({ "code": "000000" })).await.0, StatusCode::UNAUTHORIZED);
+    let (status, _, made) = make("id-alice", json!({ "code": totp::code(&secret, now()).unwrap() })).await;
+    assert_eq!(status, StatusCode::OK, "{made}");
+    // a second one replaces the first
+    let (status, _, second) = make("id-alice", json!({ "code": recovery[0] })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(made["enrolmentCode"], second["enrolmentCode"]);
+    let (_, _, body) = w.sign_in("alice", "sesame", "").await;
+    let token = body["setupToken"].as_str().unwrap().to_string();
+    let (status, _, body) = w.post("/2fa/setup", json!({ "token": token, "enrolmentCode": made["enrolmentCode"] }), "").await;
+    assert_eq!((status, error(&body)), (StatusCode::UNAUTHORIZED, "Invalid enrolment code"));
+    let (_, alice, _) = w.set_up_with("alice", "sesame", second["enrolmentCode"].as_str().unwrap()).await;
+
+    // nobody to make one for; someone who is set up; and only admins
+    let (status, _, body) = make("id-nobody", json!({ "code": recovery[1] })).await;
+    assert_eq!((status, error(&body)), (StatusCode::NOT_FOUND, "No such user"));
+    let (status, _, body) = make("id-alice", json!({ "code": recovery[2] })).await;
+    assert_eq!((status, error(&body)), (StatusCode::CONFLICT, "Two-step verification is set up for this user: reset it first"));
+    let (status, _, body) = w.post("/2fa/users/id-root/enrolment-code", json!({ "code": "000000" }), &alice).await;
+    assert_eq!((status, error(&body)), (StatusCode::FORBIDDEN, "Only admins can do this"));
+    assert_eq!(w.post("/2fa/users/id-root/enrolment-code", json!({}), "").await.0, StatusCode::UNAUTHORIZED);
+
+    // where two-step verification is not required there are no enrolment codes: a reset answers as it did
+    let optional = world(Options { policy: TwoFactor::Optional, ..Options::default() }).await;
+    let admin = optional.sign_in("root", "toor", "").await.2["token"].as_str().unwrap().to_string();
+    let (status, _, body) = optional.post("/2fa/users/id-alice/enrolment-code", json!({}), &admin).await;
+    assert_eq!((status, error(&body)), (StatusCode::CONFLICT, "Enrolment codes are used only where two-step verification is required"));
+    assert_eq!(
+        optional.call(Method::POST, "/2fa/users/id-alice/reset", None, &admin).await.0,
+        StatusCode::NO_CONTENT,
+        "an admin without two-step verification, as before"
+    );
+}
+
+#[tokio::test]
+async fn a_session_alone_does_not_hand_an_app_a_key() {
+    let w = world(Options::default()).await;
+    let (secret, session, recovery) = w.set_up("alice", "sesame").await;
+    let start = w.post("/device/start", json!({ "client": "Sonus", "device": "Phone" }), "").await.2;
+    let (device, code) = (start["deviceCode"].as_str().unwrap().to_string(), start["userCode"].as_str().unwrap().to_string());
+    // the approval page is told who asks, from where, and that allowing it takes a code
+    let info = w.get(&format!("/device/{code}"), &session).await.2;
+    assert_eq!(
+        (&info["client"], &info["device"], &info["address"], &info["codeRequired"]),
+        (&json!("Sonus"), &json!("Phone"), &json!("127.0.0.1"), &json!(true))
+    );
+    let (w, path, session) = (&w, format!("/device/{code}/approve"), &session);
+    let path = &path;
+    let approve = |body: Option<Value>| async move { w.call(Method::POST, path, body, session).await };
+    for (body, said) in [
+        (None, "Verification code required"),
+        (Some(json!({})), "Verification code required"),
+        (Some(json!({ "code": "000000" })), "Invalid verification code"),
+    ] {
+        let (status, _, answer) = approve(body).await;
+        assert_eq!((status, &answer["twoFactor"], error(&answer)), (StatusCode::UNAUTHORIZED, &json!("code"), said));
+    }
+    assert_eq!(approve(Some(json!({ "code": 123456 }))).await.0, StatusCode::UNPROCESSABLE_ENTITY, "a code is a string");
+    assert_eq!(w.post("/device/poll", json!({ "deviceCode": device }), "").await.2["status"], "pending", "a wrong code refuses nothing");
+    assert_eq!(w.get("/app-passwords", session).await.2, json!([]), "and makes no key");
+    // a code is not spent on a sign-in that is not there
+    let (status, _, _) = w.post("/device/ZZZZ-ZZZZ/approve", json!({ "code": totp::code(&secret, now()).unwrap() }), session).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(approve(Some(json!({ "code": totp::code(&secret, now()).unwrap() }))).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(w.post("/device/poll", json!({ "deviceCode": device }), "").await.2["status"], "approved");
+    // a recovery code does it too; refusing takes none
+    let again = w.post("/device/start", json!({}), "").await.2["userCode"].as_str().unwrap().to_string();
+    assert_eq!(w.post(&format!("/device/{again}/approve"), json!({ "code": recovery[0] }), session).await.0, StatusCode::NO_CONTENT);
+    let third = w.post("/device/start", json!({}), "").await.2["userCode"].as_str().unwrap().to_string();
+    assert_eq!(w.call(Method::POST, &format!("/device/{third}/deny"), None, session).await.0, StatusCode::NO_CONTENT);
+
+    // without two-step verification (the policy is optional and it is not set up), as before: no code
+    let optional = world(Options { policy: TwoFactor::Optional, ..Options::default() }).await;
+    let plain = optional.sign_in("alice", "sesame", "").await.2["token"].as_str().unwrap().to_string();
+    let code = optional.post("/device/start", json!({}), "").await.2["userCode"].as_str().unwrap().to_string();
+    assert_eq!(optional.get(&format!("/device/{code}"), &plain).await.2["codeRequired"], false);
+    assert_eq!(optional.call(Method::POST, &format!("/device/{code}/approve"), None, &plain).await.0, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn a_session_alone_makes_no_app_password_and_one_is_made_with_a_sign_in_that_asks() {
+    let w = world(Options::default()).await;
+    let (secret, session, recovery) = w.set_up("alice", "sesame").await;
+    for (body, said) in [(json!({ "name": "x" }), "Verification code required"), (json!({ "name": "x", "code": "000000" }), "Invalid verification code")] {
+        let (status, _, answer) = w.post("/app-passwords", body, &session).await;
+        assert_eq!((status, &answer["twoFactor"], error(&answer)), (StatusCode::UNAUTHORIZED, &json!("code"), said));
+    }
+    assert_eq!(w.get("/app-passwords", &session).await.2, json!([]));
+    assert_eq!(w.post("/app-passwords", json!({ "name": "x", "code": totp::code(&secret, now()).unwrap() }), &session).await.0, StatusCode::OK);
+
+    // a sign-in with the password and a code can ask for one in the same request: one code, not two
+    let (status, _, body) =
+        w.post("/login", json!({ "username": "alice", "password": "sesame", "otp": recovery[0], "appPassword": "Sonus (Firefox)" }), "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let made = &body["newAppPassword"];
+    assert_eq!(made["appPassword"]["name"], "Sonus (Firefox)");
+    assert_eq!(made["password"].as_str().unwrap().replace('-', "").len(), 32);
+    assert!(body["token"].is_string());
+    // not without the code, nor with a wrong one
+    for otp in ["", "000000"] {
+        let (status, _, body) = w.post("/login", json!({ "username": "alice", "password": "sesame", "otp": otp, "appPassword": "x" }), "").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body.get("newAppPassword").is_none());
+    }
+    assert_eq!(w.get("/app-passwords", &session).await.2.as_array().unwrap().len(), 2);
+    // and with the confirmation of a first set-up
+    let enrolment = w.enrolment_code("root");
+    let (_, _, body) = w.sign_in("root", "toor", "").await;
+    let token = body["setupToken"].as_str().unwrap().to_string();
+    let begun = w.post("/2fa/setup", json!({ "token": token, "enrolmentCode": enrolment }), "").await.2;
+    let code = totp::code(begun["secret"].as_str().unwrap(), now()).unwrap();
+    let (status, _, body) = w.post("/2fa/confirm", json!({ "token": token, "code": code, "enrolmentCode": enrolment, "appPassword": "" }), "").await;
+    assert_eq!((status, &body["newAppPassword"]["appPassword"]["name"]), (StatusCode::OK, &json!("App")), "{body}");
+    assert_eq!(body["recoveryCodes"].as_array().unwrap().len(), 10);
+
+    // without two-step verification, as before
+    let optional = world(Options { policy: TwoFactor::Optional, ..Options::default() }).await;
+    let plain = optional.sign_in("alice", "sesame", "").await.2["token"].as_str().unwrap().to_string();
+    assert_eq!(optional.post("/app-passwords", json!({ "name": "x" }), &plain).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn the_wrong_code_limit_of_an_account_counts_across_everything_that_takes_a_code() {
+    let w = world(Options::default()).await;
+    let (secret, session, recovery) = w.set_up("root", "toor").await;
+    let code = w.post("/device/start", json!({}), "").await.2["userCode"].as_str().unwrap().to_string();
+    let routes = [
+        format!("/device/{code}/approve"),
+        "/app-passwords".to_string(),
+        "/2fa/users/id-alice/reset".to_string(),
+        "/2fa/users/id-alice/enrolment-code".to_string(),
+    ];
+    for n in 0..WRONG_CODES {
+        let (status, _, body) = w.post(&routes[n % routes.len()], json!({ "name": "x", "code": "000000" }), &session).await;
+        assert_eq!((status, error(&body)), (StatusCode::UNAUTHORIZED, "Invalid verification code"), "wrong code {n}");
+    }
+    // now no code is looked at, on any of them, nor at the sign-in: the right ones neither
+    for (route, right) in routes.iter().zip([totp::code(&secret, now()).unwrap(), recovery[0].clone(), recovery[1].clone(), recovery[2].clone()]) {
+        let (status, _, body) = w.post(route, json!({ "name": "x", "code": right }), &session).await;
+        assert_eq!((status, error(&body)), (StatusCode::TOO_MANY_REQUESTS, "Too many wrong verification codes; try again later"), "{route}");
+    }
+    assert_eq!(w.sign_in("root", "toor", &recovery[3]).await.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(w.get("/app-passwords", &session).await.2, json!([]), "nothing was made");
+    assert_eq!(w.get("/2fa/users/id-alice", &session).await.2.get("enrolmentCodeExpiresAt"), None);
+    assert_eq!(w.post("/device/poll", json!({ "deviceCode": "x" }), "").await.0, StatusCode::OK, "what takes no code goes on");
+}
+
+#[test]
+fn the_servers_command_line_makes_an_enrolment_code_for_an_admin_nobody_can_make_one_for() {
+    let dir = std::env::temp_dir().join(format!("sonus-enrol-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let keys = Keys::new(KEY);
+    let conn = database::create(&dir.join("navidrome.db"));
+    let root = database::add_user(&conn, &keys, "root", "toor");
+    drop(conn);
+    let folder = dir.to_string_lossy().into_owned();
+    let env = |policy: &'static str| {
+        let folder = folder.clone();
+        move |name: &str| match name {
+            "ND_DATAFOLDER" => Some(folder.clone()),
+            "ND_SONUS_TWOFACTOR" => Some(policy.to_string()),
+            _ => None,
+        }
+    };
+    let run = |args: &[&str], policy: &'static str| sonus_server::enrol::run(args.iter().map(Into::into).collect(), &env(policy));
+
+    assert!(run(&[], "required").unwrap_err().starts_with("usage:"));
+    assert_eq!(run(&["nobody"], "required").unwrap_err(), "no user named nobody");
+    assert!(run(&["root"], "optional").unwrap_err().contains("not required"));
+    let said = run(&["ROOT"], "required").unwrap();
+    let code = said.lines().next().unwrap().strip_prefix("Enrolment code for ROOT: ").unwrap().to_string();
+    let db = Db::open(&dir.join("navidrome.db")).unwrap();
+    assert!(store::enrolment_code_matches(&db, &root, &code, chrono::Utc::now()).unwrap());
+    let by: String = Connection::open(dir.join("navidrome.db")).unwrap().query_row("SELECT created_by FROM sonus_enrolment_code", [], |r| r.get(0)).unwrap();
+    assert_eq!(by, "server");
+    // someone who is set up: only with --reset, which removes it first
+    Connection::open(dir.join("navidrome.db"))
+        .unwrap()
+        .execute("INSERT INTO sonus_two_factor (user_id, secret, confirmed_at) VALUES (?1, 'sealed', 'now')", [&root])
+        .unwrap();
+    assert!(run(&["root"], "required").unwrap_err().contains("--reset"));
+    let said = run(&["root", "--reset"], "required").unwrap();
+    assert!(said.contains("was removed"), "{said}");
+    assert!(!store::is_set_up(&db, &root).unwrap());
+    drop(db);
+    let _ = std::fs::remove_dir_all(&dir);
 }

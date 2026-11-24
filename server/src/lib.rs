@@ -7,6 +7,7 @@ pub mod auth;
 pub mod config;
 pub mod connect;
 pub mod db;
+pub mod enrol;
 pub mod gateway;
 pub mod gotime;
 pub mod id;

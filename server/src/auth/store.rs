@@ -6,7 +6,7 @@
 //! Ported from Navidrome and its CreeperUX fork (GPL-3.0), © the Navidrome authors.
 
 use chrono::{DateTime, Local, Utc};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use super::totp;
 use crate::config::TwoFactor;
@@ -200,6 +200,8 @@ pub enum ConfirmError {
     /// Nothing is being set up.
     NoSetup,
     InvalidCode,
+    /// The enrolment code was used or replaced while the request was under way.
+    InvalidEnrolment,
     Store(StoreError),
 }
 
@@ -210,8 +212,9 @@ impl<E: Into<StoreError>> From<E> for ConfirmError {
 }
 
 /// Checks a code from the secret being set up; when it matches, that secret becomes the one in use and the user gets
-/// new recovery codes (the old ones stop working).
-pub fn confirm_setup(db: &Db, keys: &Keys, user_id: &str, code: &str, now: DateTime<Utc>) -> Result<Vec<String>, ConfirmError> {
+/// new recovery codes (the old ones stop working). `enrolment`: the enrolment code a first set-up was allowed by, used
+/// up in the same transaction (so one code sets one authenticator up, whatever arrives at once).
+pub fn confirm_setup(db: &Db, keys: &Keys, user_id: &str, code: &str, enrolment: Option<&str>, now: DateTime<Utc>) -> Result<Vec<String>, ConfirmError> {
     let pending: Option<String> =
         db.read_blocking(|conn| conn.query_row("SELECT pending_secret FROM sonus_two_factor WHERE user_id = ?1", [user_id], |r| r.get(0)).optional())?;
     let Some(pending) = pending.filter(|p| !p.is_empty()) else { return Err(ConfirmError::NoSetup) };
@@ -219,15 +222,23 @@ pub fn confirm_setup(db: &Db, keys: &Keys, user_id: &str, code: &str, now: DateT
     let Some(step) = totp::match_step(&secret, code, now.timestamp()) else { return Err(ConfirmError::InvalidCode) };
     let codes = new_codes()?;
     let (id, at, hashes) = (user_id.to_string(), gotime::format(&now), codes.iter().map(|c| recovery_hash(c)).collect::<Vec<_>>());
-    db.write_blocking(move |tx| {
+    let (enrolment, unix) = (enrolment.map(recovery_hash), now.timestamp());
+    let done = db.write_blocking(move |tx| {
+        if let Some(hash) = &enrolment {
+            let used = tx.execute("DELETE FROM sonus_enrolment_code WHERE user_id = ?1 AND code_hash = ?2 AND expires_at > ?3", (&id, hash, unix))?;
+            if used != 1 {
+                return Ok(false);
+            }
+        }
         tx.execute(
             "UPDATE sonus_two_factor SET secret = pending_secret, pending_secret = '', confirmed_at = ?1, last_step = ?2 WHERE user_id = ?3",
             (&at, step, &id),
         )?;
         end_sessions(tx, &id)?;
-        replace_recovery_codes(tx, &id, &hashes)
+        replace_recovery_codes(tx, &id, &hashes)?;
+        Ok(true)
     })?;
-    Ok(codes)
+    if done { Ok(codes) } else { Err(ConfirmError::InvalidEnrolment) }
 }
 
 /// Checks a code at sign-in: from the authenticator (each one once: a code seen before is refused), or one of the
@@ -264,7 +275,7 @@ pub fn new_recovery_codes(db: &Db, user_id: &str) -> Result<Vec<String>, StoreEr
 /// epoch). When two-step verification is turned on: a session opened before, with the password alone, would
 /// otherwise go on, and be renewed for as long as it is used. (Turning it off, or an admin's reset, ends none: those
 /// sessions were opened with a code, and after a reset the next set-up ends them.)
-fn end_sessions(tx: &rusqlite::Transaction<'_>, user_id: &str) -> rusqlite::Result<()> {
+fn end_sessions(tx: &Transaction<'_>, user_id: &str) -> rusqlite::Result<()> {
     tx.execute("UPDATE user SET token_epoch = token_epoch + 1 WHERE id = ?1", [user_id]).map(|_| ())
 }
 
@@ -274,8 +285,128 @@ pub fn disable(db: &Db, user_id: &str) -> Result<(), DbError> {
     let id = user_id.to_string();
     db.write_blocking(move |tx| {
         tx.execute("DELETE FROM sonus_two_factor WHERE user_id = ?1", [&id])?;
+        tx.execute("DELETE FROM sonus_enrolment_code WHERE user_id = ?1", [&id])?;
         tx.execute("DELETE FROM sonus_recovery_code WHERE user_id = ?1", [&id]).map(|_| ())
     })
+}
+
+// ---------------------------------------------------------------- enrolment codes
+
+/// The version of this part of the server's own schema (`sonus_server_schema`, as Sonus Connect's tables).
+pub const ENROLMENT_SCHEMA_VERSION: i64 = 1;
+const ENROLMENT_PART: &str = "enrolment";
+
+/// How long an enrolment code can be used: long enough to reach its user by hand, with the password.
+pub const ENROLMENT_CODE_SECONDS: i64 = 7 * 24 * 3600;
+
+/// Makes the enrolment codes' table when the database has none yet: the server's own, in its own namespace
+/// (`docs/server-roadmap.md`, principle 3); Navidrome's tables are not altered.
+///
+/// `sonus_enrolment_code (user_id, code_hash, expires_at, created_at, created_by)`: at most one code per user, kept
+/// only as a hash (as recovery codes are), with the time it stops working (seconds since 1970) and the admin who made
+/// it (a user id, or `server` for one made on the server's command line).
+pub fn prepare(db: &Db) -> Result<(), String> {
+    let failed = |e: DbError| format!("cannot prepare the enrolment codes' table: {e}");
+    let mut found = db.read_blocking(enrolment_schema).map_err(failed)?;
+    if found.is_none() {
+        found = db
+            .write_blocking(|tx| {
+                tx.execute_batch("CREATE TABLE IF NOT EXISTS sonus_server_schema (part TEXT PRIMARY KEY, version INTEGER NOT NULL);")?;
+                if let Some(version) = enrolment_schema(tx)? {
+                    return Ok(Some(version));
+                }
+                tx.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS sonus_enrolment_code (
+                         user_id TEXT PRIMARY KEY REFERENCES user(id) ON DELETE CASCADE,
+                         code_hash TEXT NOT NULL,
+                         expires_at INTEGER NOT NULL,
+                         created_at INTEGER NOT NULL,
+                         created_by TEXT NOT NULL
+                     );",
+                )?;
+                tx.execute("INSERT INTO sonus_server_schema (part, version) VALUES (?1, ?2)", (ENROLMENT_PART, ENROLMENT_SCHEMA_VERSION))?;
+                Ok(Some(ENROLMENT_SCHEMA_VERSION))
+            })
+            .map_err(failed)?;
+    }
+    match found {
+        Some(ENROLMENT_SCHEMA_VERSION) => Ok(()),
+        other => Err(format!(
+            "the database's enrolment codes are at version {}, but this Sonus server knows {ENROLMENT_SCHEMA_VERSION}: it was used by a newer server",
+            other.unwrap_or(0)
+        )),
+    }
+}
+
+fn enrolment_schema(conn: &Connection) -> rusqlite::Result<Option<i64>> {
+    let has_table: Option<String> =
+        conn.query_row("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sonus_server_schema'", [], |r| r.get(0)).optional()?;
+    if has_table.is_none() {
+        return Ok(None);
+    }
+    conn.query_row("SELECT version FROM sonus_server_schema WHERE part = ?1", [ENROLMENT_PART], |r| r.get(0)).optional()
+}
+
+/// What issuing an enrolment code can answer besides the code.
+#[derive(Debug, PartialEq)]
+pub enum Issued {
+    /// The code, shown this once, and when it stops working.
+    Code(String, DateTime<Utc>),
+    NoSuchUser,
+    /// The user has two-step verification set up: there is nothing to enrol.
+    AlreadySetUp,
+}
+
+/// Makes a one-time enrolment code for a user who has no two-step verification yet: with the policy `required`, the
+/// first set-up of the account takes it, so the password alone does not enrol an authenticator. A code made before
+/// stops working. `by`: who made it.
+pub fn issue_enrolment_code(db: &Db, user_id: &str, by: &str, now: DateTime<Utc>) -> Result<Issued, StoreError> {
+    let code = id::readable(12, 4)?;
+    // whole seconds, as it is stored: what is answered now is what is read back later
+    let expires = DateTime::from_timestamp(now.timestamp() + ENROLMENT_CODE_SECONDS, 0).unwrap_or(now);
+    let row = (user_id.to_string(), recovery_hash(&code), expires.timestamp(), now.timestamp(), by.to_string());
+    let outcome = db.write_blocking(move |tx| {
+        let known: i64 = tx.query_row("SELECT count(*) FROM user WHERE id = ?1", [&row.0], |r| r.get(0))?;
+        if known == 0 {
+            return Ok(Some(Issued::NoSuchUser));
+        }
+        if confirmed(tx, &row.0)? {
+            return Ok(Some(Issued::AlreadySetUp));
+        }
+        tx.execute("DELETE FROM sonus_enrolment_code WHERE expires_at <= ?1", [row.3])?;
+        tx.execute("INSERT OR REPLACE INTO sonus_enrolment_code (user_id, code_hash, expires_at, created_at, created_by) VALUES (?1, ?2, ?3, ?4, ?5)", row)?;
+        Ok(None)
+    })?;
+    Ok(outcome.unwrap_or(Issued::Code(code, expires)))
+}
+
+/// Whether this is the user's enrolment code, still good. It is used up when the set-up is confirmed (`confirm_setup`).
+pub fn enrolment_code_matches(db: &Db, user_id: &str, code: &str, now: DateTime<Utc>) -> Result<bool, DbError> {
+    let hash = recovery_hash(code);
+    let stored: Option<String> = db.read_blocking(|conn| {
+        conn.query_row("SELECT code_hash FROM sonus_enrolment_code WHERE user_id = ?1 AND expires_at > ?2", (user_id, now.timestamp()), |r| r.get(0)).optional()
+    })?;
+    // the comparison takes the same time whatever differs
+    Ok(stored.is_some_and(|stored| bool::from(subtle::ConstantTimeEq::ct_eq(stored.as_bytes(), hash.as_bytes()))))
+}
+
+/// When the enrolment code that waits for the user stops working; None when none waits.
+pub fn enrolment_code_expiry(db: &Db, user_id: &str, now: DateTime<Utc>) -> Result<Option<DateTime<Utc>>, DbError> {
+    let at: Option<i64> = db.read_blocking(|conn| {
+        conn.query_row("SELECT expires_at FROM sonus_enrolment_code WHERE user_id = ?1 AND expires_at > ?2", (user_id, now.timestamp()), |r| r.get(0))
+            .optional()
+    })?;
+    Ok(at.and_then(|at| DateTime::from_timestamp(at, 0)))
+}
+
+/// The id of the user of this name (any ASCII case), for the server's command line.
+pub fn user_id(db: &Db, username: &str) -> Result<Option<String>, DbError> {
+    db.read_blocking(|conn| conn.query_row("SELECT id FROM user WHERE user_name = ?1 COLLATE NOCASE ORDER BY id LIMIT 1", [username], |r| r.get(0)).optional())
+}
+
+/// Whether the user has two-step verification set up and confirmed, whatever the policy.
+pub fn is_set_up(db: &Db, user_id: &str) -> Result<bool, DbError> {
+    db.read_blocking(|conn| confirmed(conn, user_id))
 }
 
 const RECOVERY_CODES: usize = 10;
@@ -284,7 +415,7 @@ fn new_codes() -> Result<Vec<String>, getrandom::Error> {
     (0..RECOVERY_CODES).map(|_| id::readable(10, 5)).collect()
 }
 
-fn replace_recovery_codes(tx: &rusqlite::Transaction, user_id: &str, hashes: &[String]) -> rusqlite::Result<()> {
+fn replace_recovery_codes(tx: &Transaction, user_id: &str, hashes: &[String]) -> rusqlite::Result<()> {
     tx.execute("DELETE FROM sonus_recovery_code WHERE user_id = ?1", [user_id])?;
     for hash in hashes {
         tx.execute("INSERT OR IGNORE INTO sonus_recovery_code (user_id, code_hash) VALUES (?1, ?2)", (user_id, hash))?;

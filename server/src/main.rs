@@ -16,6 +16,20 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // `sonus-server enrolment-code <user>`: not the server, a word to its database (enrol.rs)
+    let mut args = std::env::args_os().skip(1);
+    if args.next().is_some_and(|first| first == sonus_server::enrol::COMMAND) {
+        return match sonus_server::enrol::run(args.collect(), &|name| std::env::var(name).ok()) {
+            Ok(said) => {
+                println!("{said}");
+                ExitCode::SUCCESS
+            }
+            Err(why) => {
+                eprintln!("{why}");
+                ExitCode::from(1)
+            }
+        };
+    }
     // SONUS_LOG=debug: one line per request; the HTTP library's own debug lines (its connection pool) only when named
     let filter = std::env::var("SONUS_LOG").ok().filter(|f| !f.trim().is_empty()).unwrap_or_else(|| "info".into());
     let filter = if filter.contains("hyper") { filter } else { format!("{filter},hyper=info,hyper_util=info") };

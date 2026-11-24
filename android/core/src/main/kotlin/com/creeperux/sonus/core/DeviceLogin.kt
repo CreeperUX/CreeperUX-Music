@@ -154,7 +154,16 @@ object DeviceLogin {
 /** The app's name, and the client name the server lists it as ("Sonus (Pixel 9)"), as the Windows app's AppName. */
 object AppName {
     const val NAME = "Sonus"
+    private const val FORMER = "CreeperUX Music"
+
     fun client(device: String) = "$NAME ($device)"
+
+    /** The device in a client name, from this app or its former name ("Sonus (PC)", "CreeperUX Music (PC)" → "PC");
+     *  another client's name as it is. */
+    fun deviceOf(client: String): String {
+        for (app in listOf(NAME, FORMER)) if (client.startsWith("$app (") && client.endsWith(")")) return client.substring(app.length + 2, client.length - 1)
+        return client
+    }
 }
 
 /** When a play counts (the Windows app's MusicService.OnTick): past half the song or four minutes, whichever is sooner. */

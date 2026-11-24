@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The app icon (assets/icon.svg) as a logo: the slate square, the amber ring and the play triangle -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="44dp" android:height="44dp" android:viewportWidth="256" android:viewportHeight="256">
+    <path android:pathData="M64,8 H192 A56,56 0 0 1 248,64 V192 A56,56 0 0 1 192,248 H64 A56,56 0 0 1 8,192 V64 A56,56 0 0 1 64,8 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient android:type="linear" android:startX="0" android:startY="8" android:endX="0" android:endY="248">
+                <item android:offset="0" android:color="#FF2A3237" />
+                <item android:offset="1" android:color="#FF111416" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <path android:strokeWidth="22" android:fillColor="#00000000" android:pathData="M128,52 A76,76 0 1,1 128,204 A76,76 0 1,1 128,52 Z">
+        <aapt:attr name="android:strokeColor">
+            <gradient android:type="linear" android:startX="0" android:startY="52" android:endX="0" android:endY="204">
+                <item android:offset="0" android:color="#FFFFCF3D" />
+                <item android:offset="1" android:color="#FFE59A00" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <path android:fillColor="#F8B700" android:strokeColor="#F8B700" android:strokeWidth="10" android:strokeLineJoin="round" android:pathData="M114,100 L158,128 L114,156 Z" />
+</vector>

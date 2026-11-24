@@ -1,6 +1,8 @@
 package com.creeperux.sonus.core
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -26,7 +28,6 @@ import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
-import kotlin.math.max
 
 /**
  * A client for Navidrome or any server speaking the Subsonic API with the OpenSubsonic extensions
@@ -79,7 +80,8 @@ class SubsonicClient(val login: Login, val clientName: String, private val http:
         }
     }
 
-    private suspend fun callOnce(method: String, extra: List<Pair<String, Any?>>, postWanted: Boolean): JsonObject {
+    // off the caller's thread: a page of 500 songs is parsed on a pool thread, never on the main thread
+    private suspend fun callOnce(method: String, extra: List<Pair<String, Any?>>, postWanted: Boolean): JsonObject = withContext(Dispatchers.IO) {
         val parameters = params(extra)
         val post = postWanted && "formPost" in extensions // a server that does not say it reads POSTed forms gets GET
         val url = "${login.server}/rest/$method.view"
@@ -110,7 +112,7 @@ class SubsonicClient(val login: Login, val clientName: String, private val http:
             val code = J.int(e, "code")
             throw SubsonicException(code, ERRORS[code] ?: J.str(e, "message") ?: "服务器拒绝了请求。")
         }
-        return r
+        r
     }
 
     // ---------------------------------------------------------------- the server and the library
@@ -172,7 +174,7 @@ class SubsonicClient(val login: Login, val clientName: String, private val http:
         if (songs.isEmpty() && albums.isNotEmpty()) {
             for (a in albums) songs += J.array(J.obj(call("getAlbum", listOf("id" to J.str(a, "id"))), "album"), "song")
         }
-        LibraryBuilder.build(albums, songs)
+        withContext(Dispatchers.Default) { LibraryBuilder.build(albums, songs) }
     }
 
     /** The number of songs the server has (to notice a rescan), or null when it does not say. */
@@ -376,8 +378,8 @@ class SubsonicClient(val login: Login, val clientName: String, private val http:
             val client = SubsonicClient(login, clientName, http)
             try {
                 client.call("ping")
-            } catch (_: ServerUnreachableException) {
-                throw ServerUnreachableException("连不上 $baseUrl。检查地址和网络；服务器在外网时需要 HTTPS。")
+            } catch (e: ServerUnreachableException) {
+                throw ServerUnreachableException("连不上 $baseUrl。检查地址和网络；服务器在外网时需要 HTTPS。", e.cause ?: e)
             } catch (_: NotSubsonicException) {
                 throw ServerUnreachableException("$baseUrl 不像是 Navidrome（没有 Subsonic API 的回应）。")
             }
@@ -418,8 +420,6 @@ internal object Html {
         }
     }
 }
-
-internal fun max0(x: Int) = max(0, x)
 
 /** Rethrows cancellation; for catch-alls around background requests. */
 internal fun Throwable.rethrowIfCancelled() {

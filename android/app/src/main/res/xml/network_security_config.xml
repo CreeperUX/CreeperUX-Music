@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A music server at home is often reached over plain HTTP: on the local network, or through a Tailscale tailnet, where
+     WireGuard encrypts the traffic. The sign-in page warns before plain HTTP to a host on the internet, as the Windows
+     app does (Hosts.isPlainOverInternet). -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

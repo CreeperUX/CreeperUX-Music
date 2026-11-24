@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- assets/icon.svg's ring (r 76, stroke 22) and triangle on a 108 dp adaptive icon canvas, scaled by 0.287 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:strokeWidth="6.3" android:fillColor="#00000000"
+        android:pathData="M54,32.2 A21.8,21.8 0 1,1 54,75.8 A21.8,21.8 0 1,1 54,32.2 Z">
+        <aapt:attr name="android:strokeColor">
+            <gradient android:type="linear" android:startX="0" android:startY="29" android:endX="0" android:endY="79">
+                <item android:offset="0" android:color="#FFFFCF3D" />
+                <item android:offset="1" android:color="#FFE59A00" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <path android:fillColor="#F8B700" android:strokeColor="#F8B700" android:strokeWidth="2.9" android:strokeLineJoin="round"
+        android:pathData="M50,46 L62.6,54 L50,62 Z" />
+</vector>

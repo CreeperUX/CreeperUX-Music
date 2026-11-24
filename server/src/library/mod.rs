@@ -15,11 +15,14 @@
 //! JSON; `player.rs` the player a request comes from.
 
 pub mod browse;
+pub mod catalog;
 pub mod entities;
 pub mod json;
+pub mod lists;
 pub mod natural;
 pub mod player;
 pub mod query;
+pub mod search;
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -44,7 +47,7 @@ use player::{Player, Players, Registration};
 use query::{QueryError, Viewer};
 
 /// The methods answered here (each also as `<name>.view`). Everything else is Navidrome's.
-pub const METHODS: &[&str] = &["ping", "getSong", "getAlbum", "getAlbumList2"];
+pub const METHODS: &[&str] = &["ping", "getSong", "getAlbum", "getAlbumList2", "search3", "getStarred2", "getPlaylists", "getPlaylist", "getPlayQueue"];
 
 /// Whether a method is one of the library's.
 pub fn answers(method: &str) -> bool {

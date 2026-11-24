@@ -1,5 +1,6 @@
 -- The library's tables as the frozen Navidrome (0.64.2-sonus.10) makes them: the CREATE statements of a database the
--- fork made (tools/fixtures), unchanged. For the tests of server/src/library (tests/library.rs).
+-- fork made (tools/fixtures), unchanged, with its FTS5 tables and the triggers that fill them. For the tests of
+-- server/src/library (tests/library.rs).
 CREATE TABLE "media_file"
 (
     id                      varchar(255)                         not null
@@ -100,6 +101,31 @@ CREATE TABLE "album"
         references library
             on delete cascade
 , imported_at datetime default '0000-00-00 00:00:00' not null, missing boolean default false not null, mbz_release_group_id varchar default '' not null, tags jsonb default '{}' not null, participants jsonb default '{}' not null, folder_ids jsonb default '[]' not null, explicit_status varchar default '' not null, average_rating REAL NOT NULL DEFAULT 0, search_participants TEXT NOT NULL DEFAULT '', search_normalized TEXT NOT NULL DEFAULT '', rg_album_gain real, rg_album_peak real);
+CREATE TABLE "artist"
+(
+    id                       varchar(255)                      not null
+        primary key,
+    name                     varchar(255)           default '' not null,
+    full_text                varchar(255)           default '',
+    biography                varchar(255)           default '' not null,
+    small_image_url          varchar(255)           default '' not null,
+    medium_image_url         varchar(255)           default '' not null,
+    large_image_url          varchar(255)           default '' not null,
+    external_url             varchar(255)           default '' not null,
+    external_info_updated_at datetime,
+    order_artist_name        varchar collate NOCASE default '' not null,
+    sort_artist_name         varchar collate NOCASE default '' not null,
+    mbz_artist_id            varchar                default '' not null
+, missing boolean default false not null, similar_artists jsonb default '[]' not null, updated_at datetime default current_time not null, created_at datetime default current_time not null, average_rating REAL NOT NULL DEFAULT 0, search_normalized TEXT NOT NULL DEFAULT '', uploaded_image VARCHAR(255) DEFAULT '');
+CREATE TABLE "library_artist"
+(
+    library_id integer NOT NULL DEFAULT 1
+        REFERENCES library(id) ON DELETE CASCADE,
+    artist_id varchar NOT NULL
+        REFERENCES artist(id) ON DELETE CASCADE,
+    stats text DEFAULT '{}',
+    CONSTRAINT library_artist_ux UNIQUE (library_id, artist_id)
+);
 CREATE TABLE "annotation"
 (
 	user_id     varchar(255)    not null
@@ -201,3 +227,180 @@ CREATE TABLE media_file_tags(
         references tag (id) on delete cascade,
     constraint media_file_tags unique (media_file_id, tag_id)
 );
+CREATE TABLE "playlist"
+(
+    id           varchar(255)                              not null
+        primary key,
+    name         varchar(255) collate NOCASE default ''    not null,
+    comment      varchar(255)                default ''    not null,
+    duration     real                        default 0     not null,
+    song_count   integer                     default 0     not null,
+    public       bool                        default FALSE not null,
+    created_at   datetime,
+    updated_at   datetime,
+    path         string                      default ''    not null,
+    sync         bool                        default false not null,
+    size         integer                     default 0     not null,
+    rules        varchar,
+    evaluated_at datetime,
+    owner_id     varchar(255)                              not null
+        constraint playlist_user_user_id_fk
+            references user
+            on update cascade on delete cascade
+, uploaded_image VARCHAR(255) DEFAULT '', external_image_url VARCHAR(255) DEFAULT '', average_rating REAL NOT NULL DEFAULT 0, imported_hash varchar default '' not null);
+CREATE TABLE "playlist_tracks"
+(
+	id integer default 0 not null,
+	playlist_id varchar(255) not null
+		constraint playlist_tracks_playlist_id_fk
+			references playlist
+				on update cascade on delete cascade,
+	media_file_id varchar(255) not null
+);
+CREATE TABLE "playqueue"(
+    id varchar(255) not null,
+    user_id varchar(255) not null
+        references user(id)
+        on update cascade on delete cascade,
+    current integer not null default 0,
+    changed_by varchar(255),
+    items varchar(255),
+    created_at datetime,
+    updated_at datetime
+, position integer);
+CREATE VIRTUAL TABLE album_fts USING fts5(
+			name, sort_album_name, album_artist,
+			search_participants, discs, catalog_num, album_version, search_normalized,
+			content='', content_rowid='rowid',
+			tokenize='unicode61 remove_diacritics 2'
+		);
+CREATE VIRTUAL TABLE artist_fts USING fts5(
+			name, sort_artist_name, search_normalized,
+			content='', content_rowid='rowid',
+			tokenize='unicode61 remove_diacritics 2'
+		);
+CREATE VIRTUAL TABLE media_file_fts USING fts5(
+			title, album, artist, album_artist,
+			sort_title, sort_album_name, sort_artist_name, sort_album_artist_name,
+			disc_subtitle, search_participants, search_normalized,
+			content='', content_rowid='rowid',
+			tokenize='unicode61 remove_diacritics 2'
+		);
+CREATE TRIGGER album_fts_ad AFTER DELETE ON album BEGIN
+			INSERT INTO album_fts(album_fts, rowid, name, sort_album_name, album_artist,
+				search_participants, discs, catalog_num, album_version, search_normalized)
+			VALUES ('delete', OLD.rowid, OLD.name, COALESCE(OLD.sort_album_name, ''), COALESCE(OLD.album_artist, ''),
+				COALESCE(OLD.search_participants, ''), COALESCE(OLD.discs, ''),
+				COALESCE(OLD.catalog_num, ''),
+				COALESCE((SELECT group_concat(json_extract(je.value, '$.value'), ' ')
+					FROM json_each(OLD.tags, '$.albumversion') AS je), ''),
+				COALESCE(OLD.search_normalized, ''));
+		END;
+CREATE TRIGGER album_fts_ai AFTER INSERT ON album BEGIN
+			INSERT INTO album_fts(rowid, name, sort_album_name, album_artist,
+				search_participants, discs, catalog_num, album_version, search_normalized)
+			VALUES (NEW.rowid, NEW.name, COALESCE(NEW.sort_album_name, ''), COALESCE(NEW.album_artist, ''),
+				COALESCE(NEW.search_participants, ''), COALESCE(NEW.discs, ''),
+				COALESCE(NEW.catalog_num, ''),
+				COALESCE((SELECT group_concat(json_extract(je.value, '$.value'), ' ')
+					FROM json_each(NEW.tags, '$.albumversion') AS je), ''),
+				COALESCE(NEW.search_normalized, ''));
+		END;
+CREATE TRIGGER album_fts_au AFTER UPDATE ON album
+		WHEN
+			OLD.name IS NOT NEW.name OR
+			OLD.sort_album_name IS NOT NEW.sort_album_name OR
+			OLD.album_artist IS NOT NEW.album_artist OR
+			OLD.search_participants IS NOT NEW.search_participants OR
+			OLD.discs IS NOT NEW.discs OR
+			OLD.catalog_num IS NOT NEW.catalog_num OR
+			OLD.tags IS NOT NEW.tags OR
+			OLD.search_normalized IS NOT NEW.search_normalized
+		BEGIN
+			INSERT INTO album_fts(album_fts, rowid, name, sort_album_name, album_artist,
+				search_participants, discs, catalog_num, album_version, search_normalized)
+			VALUES ('delete', OLD.rowid, OLD.name, COALESCE(OLD.sort_album_name, ''), COALESCE(OLD.album_artist, ''),
+				COALESCE(OLD.search_participants, ''), COALESCE(OLD.discs, ''),
+				COALESCE(OLD.catalog_num, ''),
+				COALESCE((SELECT group_concat(json_extract(je.value, '$.value'), ' ')
+					FROM json_each(OLD.tags, '$.albumversion') AS je), ''),
+				COALESCE(OLD.search_normalized, ''));
+			INSERT INTO album_fts(rowid, name, sort_album_name, album_artist,
+				search_participants, discs, catalog_num, album_version, search_normalized)
+			VALUES (NEW.rowid, NEW.name, COALESCE(NEW.sort_album_name, ''), COALESCE(NEW.album_artist, ''),
+				COALESCE(NEW.search_participants, ''), COALESCE(NEW.discs, ''),
+				COALESCE(NEW.catalog_num, ''),
+				COALESCE((SELECT group_concat(json_extract(je.value, '$.value'), ' ')
+					FROM json_each(NEW.tags, '$.albumversion') AS je), ''),
+				COALESCE(NEW.search_normalized, ''));
+		END;
+CREATE TRIGGER artist_fts_ad AFTER DELETE ON artist BEGIN
+			INSERT INTO artist_fts(artist_fts, rowid, name, sort_artist_name, search_normalized)
+			VALUES ('delete', OLD.rowid, OLD.name, COALESCE(OLD.sort_artist_name, ''),
+				COALESCE(OLD.search_normalized, ''));
+		END;
+CREATE TRIGGER artist_fts_ai AFTER INSERT ON artist BEGIN
+			INSERT INTO artist_fts(rowid, name, sort_artist_name, search_normalized)
+			VALUES (NEW.rowid, NEW.name, COALESCE(NEW.sort_artist_name, ''),
+				COALESCE(NEW.search_normalized, ''));
+		END;
+CREATE TRIGGER artist_fts_au AFTER UPDATE ON artist
+		WHEN
+			OLD.name IS NOT NEW.name OR
+			OLD.sort_artist_name IS NOT NEW.sort_artist_name OR
+			OLD.search_normalized IS NOT NEW.search_normalized
+		BEGIN
+			INSERT INTO artist_fts(artist_fts, rowid, name, sort_artist_name, search_normalized)
+			VALUES ('delete', OLD.rowid, OLD.name, COALESCE(OLD.sort_artist_name, ''),
+				COALESCE(OLD.search_normalized, ''));
+			INSERT INTO artist_fts(rowid, name, sort_artist_name, search_normalized)
+			VALUES (NEW.rowid, NEW.name, COALESCE(NEW.sort_artist_name, ''),
+				COALESCE(NEW.search_normalized, ''));
+		END;
+CREATE TRIGGER media_file_fts_ad AFTER DELETE ON media_file BEGIN
+			INSERT INTO media_file_fts(media_file_fts, rowid, title, album, artist, album_artist,
+				sort_title, sort_album_name, sort_artist_name, sort_album_artist_name,
+				disc_subtitle, search_participants, search_normalized)
+			VALUES ('delete', OLD.rowid, OLD.title, OLD.album, OLD.artist, OLD.album_artist,
+				OLD.sort_title, OLD.sort_album_name, OLD.sort_artist_name, OLD.sort_album_artist_name,
+				COALESCE(OLD.disc_subtitle, ''), COALESCE(OLD.search_participants, ''),
+				COALESCE(OLD.search_normalized, ''));
+		END;
+CREATE TRIGGER media_file_fts_ai AFTER INSERT ON media_file BEGIN
+			INSERT INTO media_file_fts(rowid, title, album, artist, album_artist,
+				sort_title, sort_album_name, sort_artist_name, sort_album_artist_name,
+				disc_subtitle, search_participants, search_normalized)
+			VALUES (NEW.rowid, NEW.title, NEW.album, NEW.artist, NEW.album_artist,
+				NEW.sort_title, NEW.sort_album_name, NEW.sort_artist_name, NEW.sort_album_artist_name,
+				COALESCE(NEW.disc_subtitle, ''), COALESCE(NEW.search_participants, ''),
+				COALESCE(NEW.search_normalized, ''));
+		END;
+CREATE TRIGGER media_file_fts_au AFTER UPDATE ON media_file
+		WHEN
+			OLD.title IS NOT NEW.title OR
+			OLD.album IS NOT NEW.album OR
+			OLD.artist IS NOT NEW.artist OR
+			OLD.album_artist IS NOT NEW.album_artist OR
+			OLD.sort_title IS NOT NEW.sort_title OR
+			OLD.sort_album_name IS NOT NEW.sort_album_name OR
+			OLD.sort_artist_name IS NOT NEW.sort_artist_name OR
+			OLD.sort_album_artist_name IS NOT NEW.sort_album_artist_name OR
+			OLD.disc_subtitle IS NOT NEW.disc_subtitle OR
+			OLD.search_participants IS NOT NEW.search_participants OR
+			OLD.search_normalized IS NOT NEW.search_normalized
+		BEGIN
+			INSERT INTO media_file_fts(media_file_fts, rowid, title, album, artist, album_artist,
+				sort_title, sort_album_name, sort_artist_name, sort_album_artist_name,
+				disc_subtitle, search_participants, search_normalized)
+			VALUES ('delete', OLD.rowid, OLD.title, OLD.album, OLD.artist, OLD.album_artist,
+				OLD.sort_title, OLD.sort_album_name, OLD.sort_artist_name, OLD.sort_album_artist_name,
+				COALESCE(OLD.disc_subtitle, ''), COALESCE(OLD.search_participants, ''),
+				COALESCE(OLD.search_normalized, ''));
+			INSERT INTO media_file_fts(rowid, title, album, artist, album_artist,
+				sort_title, sort_album_name, sort_artist_name, sort_album_artist_name,
+				disc_subtitle, search_participants, search_normalized)
+			VALUES (NEW.rowid, NEW.title, NEW.album, NEW.artist, NEW.album_artist,
+				NEW.sort_title, NEW.sort_album_name, NEW.sort_artist_name, NEW.sort_album_artist_name,
+				COALESCE(NEW.disc_subtitle, ''), COALESCE(NEW.search_participants, ''),
+				COALESCE(NEW.search_normalized, ''));
+		END;

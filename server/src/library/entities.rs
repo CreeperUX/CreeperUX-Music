@@ -6,6 +6,7 @@
 
 use crate::config::LibraryOptions;
 
+use super::catalog::{Artist, Playlist, Rules};
 use super::json::Json;
 use super::query::{Album, ItemImage, Participant, Song, Tags};
 
@@ -431,6 +432,80 @@ pub fn song_members(j: &mut Json, song: &Song, context: &Context) {
         j.int_ne("count", counts.get(i).map(|n| parse_int32(n)).unwrap_or(0));
         j.end_object();
     });
+}
+
+/// `toArtistID3` (`responses.ArtistID3`) for an artist known to have no picture. One with a picture, or whose
+/// picture is not resolved yet, also carries `artistImageUrl`, a link signed by Navidrome: such answers are
+/// Navidrome's (`artist_is_answerable`).
+pub fn artist(j: &mut Json, artist: &Artist, context: &Context) {
+    let options = context.options;
+    j.begin_object();
+    j.string("id", &artist.id);
+    j.string("name", &artist.name);
+    j.string_ne("coverArt", &cover_art("ar", &artist.id, &artist.image.hash, artist.image.absent));
+    // getArtistAlbumCount: as album artist, or with Subsonic.ArtistParticipations as artist too
+    let role = if options.artist_participations { "maincredit" } else { "albumartist" };
+    j.int("albumCount", int32(artist.album_count(role)));
+    if artist.annotations.starred {
+        j.time_some("starred", artist.annotations.starred_at.as_deref());
+    }
+    j.int_ne("userRating", int32(artist.annotations.rating));
+    if options.enable_average_rating {
+        j.float_ne("averageRating", artist.annotations.average_rating);
+    }
+    // toOSArtistID3: not for the clients named in Subsonic.LegacyClients, found by substring as for albums
+    if !options.legacy_clients.contains(context.client) {
+        j.string("musicBrainzId", &artist.mbz_artist_id);
+        j.string("sortName", sort_name(&artist.sort_artist_name, &artist.order_artist_name, options));
+        // Go lists the roles from a map, in no order; here they come sorted
+        j.array("roles", artist.album_counts.iter(), |j, (role, _)| j.string_value(role));
+    }
+    j.end_object();
+}
+
+/// Whether an artist's answer can be made here: only when the artist is known to have no picture.
+pub fn artist_is_answerable(artist: &Artist) -> bool {
+    artist.image.absent
+}
+
+/// `buildPlaylist` (`responses.Playlist`)'s members: `song_count` and `duration` are the stored ones for a list of
+/// playlists, and counted from the songs for a playlist shown with them.
+pub fn playlist_members(j: &mut Json, playlist: &Playlist, song_count: i64, duration: f64, viewer_id: &str, context: &Context) {
+    let options = context.options;
+    let minimal = is_client_in_list(&options.minimal_clients, context.client);
+    j.string("id", &playlist.id);
+    j.string("name", &playlist.name);
+    if !minimal {
+        j.string_ne("comment", &playlist.comment);
+    }
+    j.int("songCount", int32(song_count));
+    j.int("duration", int32_of_float32(duration));
+    if minimal {
+        j.time("created", playlist.created_at.as_deref());
+        j.time("changed", playlist.updated_at.as_deref());
+        return;
+    }
+    j.boolean_ne("public", playlist.public);
+    j.string_ne("owner", &playlist.owner_name);
+    j.time("created", playlist.created_at.as_deref());
+    j.time("changed", playlist.updated_at.as_deref());
+    j.string_ne("coverArt", &cover_art("pl", &playlist.id, &playlist.image.hash, playlist.image.absent));
+    // buildOSPlaylist
+    if is_client_in_list(&options.legacy_clients, context.client) {
+        return;
+    }
+    if playlist.rules() == Rules::Plain {
+        // someone else's, or one Navidrome keeps in step with a file
+        j.boolean("readonly", playlist.owner_id != viewer_id || playlist.sync);
+    } else {
+        j.boolean("readonly", true);
+        j.time_some("validUntil", playlist.valid_until(options.smart_playlist_refresh_delay).as_deref());
+    }
+}
+
+/// A playlist's length as Navidrome adds it up for a playlist shown with its songs (`refreshStats`): in float32.
+pub fn songs_duration(songs: &[Song]) -> f64 {
+    songs.iter().fold(0f32, |sum, song| sum + song.duration as f32) as f64
 }
 
 #[cfg(test)]

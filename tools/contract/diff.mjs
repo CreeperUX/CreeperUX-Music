@@ -51,7 +51,7 @@ const COMPARED_JSON_HEADERS = ['x-total-count'];
 /** The header a debug build of the Rust server marks its own answers with (server/src/library/mod.rs). */
 export const ANSWERED_HEADER = 'x-sonus-answered';
 /** The Subsonic methods the Rust server answers itself from the database, in JSON, once the request is signed in. */
-export const ANSWERED_BY_RUST = ['ping', 'getSong', 'getAlbum', 'getAlbumList2'];
+export const ANSWERED_BY_RUST = ['ping', 'getSong', 'getAlbum', 'getAlbumList2', 'search3', 'getStarred2', 'getPlaylists', 'getPlaylist', 'getPlayQueue'];
 
 // ---------------------------------------------------------------- the corpus
 
@@ -61,7 +61,8 @@ export function expand(corpus) {
     if (!r.for) { out.push(r); continue; }
     for (const key of r.for) {
       const { for: _, ...rest } = r;
-      out.push(JSON.parse(JSON.stringify({ ...rest, name: `${r.name} ${key}` }).replaceAll('{{$}}', key)));
+      // the key goes into JSON text: escaped as JSON escapes it (a key may hold quotes or a backslash)
+      out.push(JSON.parse(JSON.stringify({ ...rest, name: `${r.name} ${key}` }).replaceAll('{{$}}', JSON.stringify(key).slice(1, -1))));
     }
   }
   return out;

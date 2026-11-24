@@ -106,6 +106,8 @@ pub struct LibraryOptions {
     /// `Search.Backend` is `legacy` (default `fts`), and `Search.FullString` (default off).
     pub legacy_search: bool,
     pub search_full_string: bool,
+    /// `SmartPlaylistRefreshDelay` (default 5 s): how long a smart playlist's songs are good (`validUntil`).
+    pub smart_playlist_refresh_delay: Duration,
 }
 
 impl Default for LibraryOptions {
@@ -125,6 +127,7 @@ impl Default for LibraryOptions {
             ignored_articles: "The El La Los Las Le Les Os As O A".into(),
             legacy_search: false,
             search_full_string: false,
+            smart_playlist_refresh_delay: Duration::from_secs(5),
         }
     }
 }
@@ -328,6 +331,13 @@ impl Config {
                         Some(v) => v,
                         // the option's old name, which Navidrome still reads when the new one is set nowhere
                         None => nd.get_bool("searchfullstring")?.unwrap_or(d.search_full_string),
+                    },
+                    smart_playlist_refresh_delay: match nd.get("smartplaylistrefreshdelay")? {
+                        // Navidrome: a negative delay falls back to the default
+                        Some(v) => parse_go_duration(&v)
+                            .ok_or_else(|| format!("SmartPlaylistRefreshDelay={v} is not a duration (5s, 1m)"))?
+                            .unwrap_or(d.smart_playlist_refresh_delay),
+                        None => d.smart_playlist_refresh_delay,
                     },
                 }
             },

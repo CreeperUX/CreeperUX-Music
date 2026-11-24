@@ -4,7 +4,13 @@
 #![deny(unsafe_code)]
 
 pub mod config;
+pub mod db;
 pub mod gateway;
+pub mod gotime;
+pub mod routes;
+pub mod secrets;
+pub mod startup;
+pub mod subsonic;
 pub mod supervisor;
 pub mod trust;
 

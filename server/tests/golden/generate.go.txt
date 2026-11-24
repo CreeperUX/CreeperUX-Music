@@ -1,0 +1,53 @@
+// Golden values for the Sonus server's unit tests, made by Navidrome's own code (utils.Encrypt) and Go's stdlib.
+package main
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/navidrome/navidrome/utils"
+)
+
+func key(s string) []byte { k := sha256.Sum256([]byte(s)); return k[:] }
+
+// core/twofactor/store.go, keyHash (unexported there)
+func keyHash(k string) string {
+	normal := strings.ToLower(strings.NewReplacer("-", "", " ", "").Replace(strings.TrimSpace(k)))
+	sum := sha256.Sum256([]byte(normal))
+	return hex.EncodeToString(sum[:])
+}
+
+func main() {
+	plains := []string{"sesame", "", "pässword 密码 🎵", "abcd-efgh-jkmn-pqrs", strings.Repeat("x", 300)}
+	write := func(file, k string) {
+		var sb strings.Builder
+		sb.WriteString("&[\n")
+		for _, p := range plains {
+			enc, err := utils.Encrypt(context.Background(), key(k), p)
+			if err != nil { panic(err) }
+			dec, err := utils.Decrypt(context.Background(), key(k), enc)
+			if err != nil || dec != p { panic("round trip") }
+			fmt.Fprintf(&sb, "    (%q, %q),\n", p, enc)
+		}
+		sb.WriteString("]\n")
+		if err := os.WriteFile(file, []byte(sb.String()), 0o644); err != nil { panic(err) }
+	}
+	write(os.Args[1]+"/encrypt_default_key.in", "just for obfuscation")
+	write(os.Args[1]+"/encrypt_custom_key.in", "sonus golden key ✓")
+	var sb strings.Builder
+	sb.WriteString("&[\n")
+	for _, k := range []string{"abcd-efgh-jkmn-pqrs", " ABCDEFGH JKMN-PQRS ", "abcdefghjkmnpqrs", "ÄÖ-ü ß", ""} {
+		fmt.Fprintf(&sb, "    (%q, %q),\n", k, keyHash(k))
+	}
+	sb.WriteString("]\n")
+	os.WriteFile(os.Args[1]+"/key_hash.in", []byte(sb.String()), 0o644)
+	// the reverse: what the Rust server sealed (argv 2..: key, plain, sealed) opens with Navidrome's utils.Decrypt
+	for i := 2; i+2 < len(os.Args); i += 3 {
+		dec, err := utils.Decrypt(context.Background(), key(os.Args[i]), os.Args[i+2])
+		fmt.Printf("go opens rust's: %v\n", err == nil && dec == os.Args[i+1])
+	}
+}

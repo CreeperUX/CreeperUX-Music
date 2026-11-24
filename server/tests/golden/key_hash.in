@@ -1,0 +1,7 @@
+&[
+    ("abcd-efgh-jkmn-pqrs", "54a4c55a9009eae9f27d09ce2693cecaa2f44fd29978f881c314b3c88d7307bb"),
+    (" ABCDEFGH JKMN-PQRS ", "54a4c55a9009eae9f27d09ce2693cecaa2f44fd29978f881c314b3c88d7307bb"),
+    ("abcdefghjkmnpqrs", "54a4c55a9009eae9f27d09ce2693cecaa2f44fd29978f881c314b3c88d7307bb"),
+    ("ÄÖ-ü ß", "8936c58d0dbc35c6360711356fa6fa67f2d66c70122213704fbb9388e5c66e2d"),
+    ("", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+]

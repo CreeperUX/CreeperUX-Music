@@ -1,7 +1,7 @@
 //! Navidrome's command line, as its root command reads it (cobra/pflag: `--name value`, `--name=value`, `-c value`,
 //! `-cvalue`, `-nc value`). The container's arguments go to Navidrome unchanged; the gateway only looks for what
-//! concerns it: the config file and `BaseURL`, which it reads too, and the address, port and TLS flags, which would
-//! outrank the gateway's own settings for Navidrome and so stop it.
+//! concerns it: the config file, `BaseURL` and `DataFolder`, which it reads too, and the address, port and TLS flags,
+//! which would outrank the gateway's own settings for Navidrome and so stop it.
 
 use std::ffi::{OsStr, OsString};
 
@@ -11,6 +11,8 @@ pub struct Flags {
     pub config_file: Option<OsString>,
     /// `--baseurl`.
     pub base_url: Option<String>,
+    /// `--datafolder`.
+    pub data_folder: Option<String>,
 }
 
 /// The root command's flags that take a value: long name, shorthand, and whether the gateway cannot run with it
@@ -73,6 +75,10 @@ pub fn scan(args: &[OsString]) -> Result<Flags, String> {
             }
             ("baseurl", _) => {
                 flags.base_url = Some(value.to_string_lossy().into_owned());
+                Ok(())
+            }
+            ("datafolder", _) => {
+                flags.data_folder = Some(value.to_string_lossy().into_owned());
                 Ok(())
             }
             _ => Ok(()),
@@ -165,6 +171,7 @@ mod tests {
             assert_eq!(scan_str(args).unwrap().config_file, Some(OsString::from("/data/a.toml")), "{args:?}");
         }
         assert_eq!(scan_str(&["--baseurl", "/music"]).unwrap().base_url.as_deref(), Some("/music"));
+        assert_eq!(scan_str(&["--datafolder=/data", "--musicfolder", "/music"]).unwrap().data_folder.as_deref(), Some("/data"));
         assert_eq!(scan_str(&["--loglevel", "--baseurl"]).unwrap(), Flags::default(), "a value that looks like a flag is a value");
         assert_eq!(scan_str(&[]).unwrap(), Flags::default());
         assert_eq!(scan_str(&["--unknown", "--enabletranscodingconfig=false", "--"]).unwrap(), Flags::default());

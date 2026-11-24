@@ -10,6 +10,7 @@ mod flags;
 use std::ffi::OsString;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use hyper::Uri;
 use hyper::header::HeaderName;
@@ -43,6 +44,81 @@ pub struct Config {
     pub base_path: String,
     /// The config file read, if any.
     pub config_file: Option<PathBuf>,
+    /// Navidrome's settings the server shares with it, for the parts it answers itself.
+    pub shared: Shared,
+}
+
+/// Navidrome's settings that the parts of the server answered here need too, read as Navidrome reads them.
+#[derive(Clone, PartialEq)]
+pub struct Shared {
+    /// `DataFolder` (default: the working directory).
+    pub data_folder: String,
+    /// `DbPath`, empty when unset: `navidrome.db` in the data folder (see `db::locate`).
+    pub db_path: String,
+    /// `PasswordEncryptionKey`, empty when unset (see `secrets`). Never logged.
+    pub password_encryption_key: String,
+    /// `AuthRequestLimit` (default 5): failed sign-ins allowed per window; 0 or less turns the limit off.
+    pub auth_request_limit: i64,
+    /// `AuthWindowLength` (default 20 s).
+    pub auth_window: Duration,
+    /// `Sonus.TwoFactor` (default required).
+    pub two_factor: TwoFactor,
+    /// `HTTPHeaders.FrameOptions` (default DENY): the `X-Frame-Options` Navidrome answers with.
+    pub frame_options: String,
+}
+
+impl std::fmt::Debug for Shared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // the key stays out of logs and test output
+        f.debug_struct("Shared")
+            .field("data_folder", &self.data_folder)
+            .field("db_path", &self.db_path)
+            .field("password_encryption_key", &if self.password_encryption_key.is_empty() { "(unset)" } else { "(set)" })
+            .field("auth_request_limit", &self.auth_request_limit)
+            .field("auth_window", &self.auth_window)
+            .field("two_factor", &self.two_factor)
+            .field("frame_options", &self.frame_options)
+            .finish()
+    }
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Shared {
+            data_folder: ".".into(),
+            db_path: String::new(),
+            password_encryption_key: String::new(),
+            auth_request_limit: 5,
+            auth_window: DEFAULT_AUTH_WINDOW,
+            two_factor: TwoFactor::Required,
+            frame_options: "DENY".into(),
+        }
+    }
+}
+
+/// Navidrome's `consts.DefaultAuthWindowLength`.
+pub const DEFAULT_AUTH_WINDOW: Duration = Duration::from_secs(20);
+
+/// The fork's two-step verification policy (`Sonus.TwoFactor`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TwoFactor {
+    /// Everyone: a user without it sets it up at the next web sign-in.
+    Required,
+    /// Each user decides.
+    Optional,
+    /// Neither asked nor checked.
+    Off,
+}
+
+impl TwoFactor {
+    /// As the fork's `twofactor.CurrentMode`: anything unknown is Required.
+    pub fn parse(value: &str) -> TwoFactor {
+        match value.trim().to_lowercase().as_str() {
+            "optional" => TwoFactor::Optional,
+            "off" => TwoFactor::Off,
+            _ => TwoFactor::Required,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -76,7 +152,7 @@ impl Config {
             Some(path) => Some(ConfigFile::read(&path, sources.files)?),
             None => None,
         };
-        let nd = Navidrome { var, base_url_flag: flags.base_url, file: file.as_ref() };
+        let nd = Navidrome { var, base_url_flag: flags.base_url, data_folder_flag: flags.data_folder, file: file.as_ref() };
         if let Some(file) = &file {
             // these would outrank the environment the gateway gives Navidrome (see Navidrome::get)
             for name in ["address", "port", "extauth.trustedsources", "extauth.userheader"] {
@@ -118,6 +194,26 @@ impl Config {
             }
         }
         let base_path = nd.get("baseurl")?.map(|url| base_path(&url)).unwrap_or_default();
+        let defaults = Shared::default();
+        let shared = Shared {
+            data_folder: nd.get("datafolder")?.unwrap_or(defaults.data_folder),
+            db_path: nd.get("dbpath")?.unwrap_or_default(),
+            password_encryption_key: nd.get("passwordencryptionkey")?.unwrap_or_default(),
+            auth_request_limit: match nd.get("authrequestlimit")? {
+                Some(v) => v.trim().parse().map_err(|_| format!("AuthRequestLimit={v} is not a number"))?,
+                None => defaults.auth_request_limit,
+            },
+            auth_window: match nd.get("authwindowlength")? {
+                // Navidrome: a negative length falls back to the default, and so does none at all
+                Some(v) => match parse_go_duration(&v).ok_or_else(|| format!("AuthWindowLength={v} is not a duration (20s, 1m30s)"))? {
+                    Some(window) if !window.is_zero() => window,
+                    _ => DEFAULT_AUTH_WINDOW,
+                },
+                None => defaults.auth_window,
+            },
+            two_factor: nd.get("sonus.twofactor")?.map(|v| TwoFactor::parse(&v)).unwrap_or(defaults.two_factor),
+            frame_options: nd.get("httpheaders.frameoptions")?.filter(|v| !v.is_empty()).unwrap_or(defaults.frame_options),
+        };
 
         let (upstream, navidrome, upstream_user_header) = match get(var, "SONUS_NAVIDROME_URL") {
             Some(url) => {
@@ -152,7 +248,7 @@ impl Config {
                 (uri, Some(NavidromeProcess { bin, port: internal, args: sources.args, env, env_remove }), upstream_user_header)
             }
         };
-        Ok(Config { listen, upstream, navidrome, trusted, user_header, upstream_user_header, base_path, config_file: file.map(|f| f.path) })
+        Ok(Config { listen, upstream, navidrome, trusted, user_header, upstream_user_header, base_path, config_file: file.map(|f| f.path), shared })
     }
 }
 
@@ -160,6 +256,7 @@ impl Config {
 struct Navidrome<'a> {
     var: &'a dyn Fn(&str) -> Option<String>,
     base_url_flag: Option<String>,
+    data_folder_flag: Option<String>,
     file: Option<&'a ConfigFile>,
 }
 
@@ -170,10 +267,13 @@ impl Navidrome<'_> {
         if let Some(value) = self.file.and_then(|f| f.get_env_named(name)) {
             return self.text(name, value).map(Some);
         }
-        if name == "baseurl" {
-            if let Some(flag) = &self.base_url_flag {
-                return Ok(Some(flag.clone()));
-            }
+        let flag = match name {
+            "baseurl" => &self.base_url_flag,
+            "datafolder" => &self.data_folder_flag,
+            _ => &None,
+        };
+        if let Some(flag) = flag {
+            return Ok(Some(flag.clone()));
         }
         if let Some(value) = (self.var)(&env_name(name)).filter(|v| !v.is_empty()) {
             return Ok(Some(value));
@@ -224,6 +324,39 @@ fn parse_port(value: Option<String>, name: &str, default: u16) -> Result<u16, St
         None => Ok(default),
         Some(v) => v.trim().parse::<u16>().ok().filter(|p| *p != 0).ok_or_else(|| format!("{name}={v} is not a port")),
     }
+}
+
+/// A duration as Navidrome (viper) reads one: Go's `time.ParseDuration` (`20s`, `1m30s`, `1.5h`, `300ms`), or a bare
+/// number, which is nanoseconds. Some(None): a negative one. None: not a duration.
+fn parse_go_duration(text: &str) -> Option<Option<Duration>> {
+    let text = text.trim();
+    let (negative, rest) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    if rest.is_empty() {
+        return None;
+    }
+    let mut nanos = 0f64;
+    if !rest.contains(['n', 's', 'u', 'µ', 'm', 'h']) {
+        nanos = rest.parse::<u64>().ok()? as f64;
+    } else {
+        let mut rest = rest;
+        while !rest.is_empty() {
+            let digits = rest.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(rest.len());
+            let number: f64 = rest[..digits].parse().ok()?;
+            rest = &rest[digits..];
+            let (unit, scale) = [("ns", 1e0), ("us", 1e3), ("µs", 1e3), ("μs", 1e3), ("ms", 1e6), ("s", 1e9), ("m", 6e10), ("h", 3.6e12)]
+                .into_iter()
+                .find(|(unit, _)| rest.starts_with(unit))?;
+            rest = &rest[unit.len()..];
+            nanos += number * scale;
+        }
+    }
+    if negative && nanos > 0.0 {
+        return Some(None);
+    }
+    Some(Some(Duration::from_nanos(nanos as u64)))
 }
 
 /// `BaseURL`'s path, as Navidrome takes it: `/music` from `/music` or from `https://example.com/music?x`.
@@ -390,6 +523,62 @@ mod tests {
         let c = load(&[("ND_EXTAUTH_TRUSTEDSOURCES", "10.0.0.0/8, 172.16.0.0/12")], &[], None).unwrap();
         assert!(c.trusted.contains("10.0.0.1".parse().unwrap()));
         assert!(!c.trusted.contains("172.16.0.1".parse().unwrap()), "Navidrome does not believe \" 172.16.0.0/12\" either");
+    }
+
+    #[test]
+    fn shared_settings_are_read_as_navidrome_reads_them() {
+        let c = load(&[], &[], None).unwrap();
+        assert_eq!(c.shared, Shared::default());
+        assert_eq!((c.shared.auth_request_limit, c.shared.auth_window, c.shared.two_factor), (5, Duration::from_secs(20), TwoFactor::Required));
+
+        let toml = "DataFolder = '/data'\nPasswordEncryptionKey = 'from the file'\nAuthRequestLimit = 9\nAuthWindowLength = '1m30s'\n\
+                    [Sonus]\nTwoFactor = 'Optional'\n[HTTPHeaders]\nFrameOptions = 'SAMEORIGIN'";
+        let c = load(&[], &[], Some(toml)).unwrap();
+        assert_eq!(c.shared.data_folder, "/data");
+        assert_eq!(c.shared.db_path, "");
+        assert_eq!(c.shared.password_encryption_key, "from the file");
+        assert_eq!(c.shared.auth_request_limit, 9);
+        assert_eq!(c.shared.auth_window, Duration::from_secs(90));
+        assert_eq!(c.shared.two_factor, TwoFactor::Optional);
+        assert_eq!(c.shared.frame_options, "SAMEORIGIN");
+        assert!(!format!("{c:?}").contains("from the file"), "the key is not in debug output");
+
+        let env = [
+            ("ND_DATAFOLDER", "/env"),
+            ("ND_DBPATH", "/db/nd.db?_busy_timeout=1"),
+            ("ND_PASSWORDENCRYPTIONKEY", "from the environment"),
+            ("ND_AUTHREQUESTLIMIT", "0"),
+            ("ND_AUTHWINDOWLENGTH", "5s"),
+            ("ND_SONUS_TWOFACTOR", "off"),
+        ];
+        let c = load(&env, &[], Some(toml)).unwrap();
+        assert_eq!(c.shared.data_folder, "/env", "the environment over the file");
+        assert_eq!(c.shared.db_path, "/db/nd.db?_busy_timeout=1");
+        assert_eq!(c.shared.password_encryption_key, "from the environment");
+        assert_eq!((c.shared.auth_request_limit, c.shared.auth_window, c.shared.two_factor), (0, Duration::from_secs(5), TwoFactor::Off));
+        assert_eq!(load(&env, &["--datafolder", "/flag"], Some(toml)).unwrap().shared.data_folder, "/flag", "a flag over both");
+
+        assert_eq!(load(&[("ND_SONUS_TWOFACTOR", "sometimes")], &[], None).unwrap().shared.two_factor, TwoFactor::Required, "unknown is required");
+        assert_eq!(load(&[("ND_AUTHWINDOWLENGTH", "-5s")], &[], None).unwrap().shared.auth_window, Duration::from_secs(20), "negative: the default");
+        assert_eq!(load(&[("ND_AUTHWINDOWLENGTH", "0")], &[], None).unwrap().shared.auth_window, Duration::from_secs(20));
+        assert!(load(&[("ND_AUTHREQUESTLIMIT", "many")], &[], None).is_err());
+        assert!(load(&[("ND_AUTHWINDOWLENGTH", "soon")], &[], None).is_err());
+    }
+
+    #[test]
+    fn durations_as_go_parses_them() {
+        let d = |text| parse_go_duration(text);
+        assert_eq!(d("20s"), Some(Some(Duration::from_secs(20))));
+        assert_eq!(d("1m30s"), Some(Some(Duration::from_secs(90))));
+        assert_eq!(d("1.5h"), Some(Some(Duration::from_secs(5400))));
+        assert_eq!(d("300ms"), Some(Some(Duration::from_millis(300))));
+        assert_eq!(d("2000000000"), Some(Some(Duration::from_secs(2))), "a bare number is nanoseconds");
+        assert_eq!(d("0"), Some(Some(Duration::ZERO)));
+        assert_eq!(d("-1s"), Some(None));
+        assert_eq!(d(""), None);
+        assert_eq!(d("5 s"), None);
+        assert_eq!(d("5x"), None);
+        assert_eq!(d("s"), None);
     }
 
     #[test]

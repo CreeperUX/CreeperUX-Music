@@ -302,7 +302,9 @@ async fn hop_by_hop_headers_stay_on_their_hop() {
 async fn an_untrusted_peer_cannot_choose_its_address_or_its_user() {
     // 127.0.0.1 (the test) is not in the list
     let (nd, mut requests) = recording_upstream().await;
-    let (gw, _) = gateway(nd, GatewaySetup { trusted: "10.0.0.0/8", user_header: Some("Remote-User"), upstream_user_header: "remote-user", ready: true }).await;
+    let (gw, _) =
+        gateway(nd, GatewaySetup { trusted: "10.0.0.0/8", user_header: Some("Remote-User"), upstream_user_header: "remote-user", ..GatewaySetup::default() })
+            .await;
     let spoofed = |req: hyper::http::request::Builder| {
         req.header(header::HOST, "h")
             .header("x-forwarded-for", "203.0.113.1")
@@ -344,7 +346,7 @@ async fn an_untrusted_peer_cannot_choose_its_address_or_its_user() {
 #[tokio::test]
 async fn a_trusted_proxy_is_believed() {
     let (nd, mut requests) = recording_upstream().await;
-    let setup = GatewaySetup { trusted: "127.0.0.0/8", user_header: Some("X-Proxy-User"), upstream_user_header: "x-navidrome-user", ready: true };
+    let setup = GatewaySetup { trusted: "127.0.0.0/8", user_header: Some("X-Proxy-User"), upstream_user_header: "x-navidrome-user", ..GatewaySetup::default() };
     let (gw, _) = gateway(nd, setup).await;
     let req = Request::get("/app/")
         .header(header::HOST, "h")

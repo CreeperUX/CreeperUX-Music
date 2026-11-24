@@ -90,7 +90,8 @@ export function attachConnect2({ authenticate, isOffline = () => false, has = ()
     ws.onClose = () => {
       if (id === null || ws.dropped || r.sockets.get(id) !== ws) return;
       r.sockets.delete(id);
-      deliver(r, r.session.drop(id));
+      // a goodbye (1000, 1001) is a device leaving; anything else is a network loss, with its grace period
+      deliver(r, ws.closeCode === 1000 || ws.closeCode === 1001 ? r.session.leave(id) : r.session.drop(id));
     };
   }
 
@@ -164,7 +165,7 @@ class Socket {
       let payload = b.subarray(at + (masked ? 4 : 0), need);
       if (masked) { const mask = b.subarray(at, at + 4); payload = Buffer.from(payload.map((x, i) => x ^ mask[i & 3])); }
       this.buffer = b.subarray(need);
-      if (opcode === 0x8) { this.close(); return; }
+      if (opcode === 0x8) { this.closeCode = payload.length >= 2 ? payload.readUInt16BE(0) : 1005; this.close(); return; }
       if (opcode === 0x9) { this.#frame(0xA, payload); continue; }
       if (opcode === 0xA) continue;
       if (opcode === 0x1 || opcode === 0x0) {

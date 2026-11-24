@@ -3,7 +3,8 @@
   "what": "Test vectors of Sonus Connect version 2 (connect.md): each case is a sequence of steps; after each step the server's session, queue, device list and direct replies must be exactly `expect`.",
   "steps": {
    "send": "{ at, from, send }: the message `send` arrives from device `from`'s connection at server time `at` (ms). A `hello` opens that device's connection.",
-   "drop": "{ at, drop }: that device's connection goes away (no goodbye).",
+   "drop": "{ at, drop }: that device's connection goes away without a goodbye (a network loss: the grace period).",
+   "leave": "{ at, leave }: that device's connection is closed by the device with a goodbye (WebSocket close code 1000 or 1001): no grace period.",
    "tick": "{ at, tick: true }: only time passes (the grace period may run out). Servers check the grace period at least this often."
   },
   "expect": {
@@ -8712,6 +8713,476 @@
         }
        }
       ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "a device that leaves with a goodbye has no grace period: the session stops at once, and another can play it",
+   "random": [],
+   "steps": [
+    {
+     "at": 0,
+     "from": "pc-study-01",
+     "send": {
+      "type": "hello",
+      "deviceId": "pc-study-01",
+      "name": "书房电脑",
+      "kind": "desktop",
+      "canPlay": true,
+      "client": "vectors"
+     },
+     "expect": {
+      "session": {
+       "rev": 0,
+       "activeDevice": null,
+       "lastDevice": null,
+       "current": null,
+       "next": null,
+       "playing": false,
+       "positionMs": 0,
+       "at": 0,
+       "durationMs": 0,
+       "now": null,
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": null,
+       "queueRev": 0
+      },
+      "queue": {
+       "queueRev": 0,
+       "order": [],
+       "pointer": -1,
+       "manual": []
+      },
+      "devices": [
+       "pc-study-01"
+      ],
+      "replies": []
+     }
+    },
+    {
+     "at": 10,
+     "from": "phone-0001",
+     "send": {
+      "type": "hello",
+      "deviceId": "phone-0001",
+      "name": "手机",
+      "kind": "phone",
+      "canPlay": true,
+      "client": "vectors"
+     },
+     "expect": {
+      "session": {
+       "rev": 0,
+       "activeDevice": null,
+       "lastDevice": null,
+       "current": null,
+       "next": null,
+       "playing": false,
+       "positionMs": 0,
+       "at": 0,
+       "durationMs": 0,
+       "now": null,
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": null,
+       "queueRev": 0
+      },
+      "queue": {
+       "queueRev": 0,
+       "order": [],
+       "pointer": -1,
+       "manual": []
+      },
+      "devices": [
+       "pc-study-01",
+       "phone-0001"
+      ],
+      "replies": []
+     }
+    },
+    {
+     "at": 1000,
+     "from": "pc-study-01",
+     "send": {
+      "type": "command",
+      "ref": "playContext",
+      "action": "playContext",
+      "context": {
+       "kind": "album",
+       "id": "al0",
+       "label": "Orbit"
+      },
+      "ids": [
+       "t0",
+       "t1",
+       "t2",
+       "t3"
+      ],
+      "startId": "t1"
+     },
+     "expect": {
+      "session": {
+       "rev": 1,
+       "activeDevice": "pc-study-01",
+       "lastDevice": {
+        "id": "pc-study-01",
+        "name": "书房电脑"
+       },
+       "current": {
+        "key": "c1:t1",
+        "trackId": "t1",
+        "manual": false
+       },
+       "next": "t2",
+       "playing": true,
+       "positionMs": 0,
+       "at": 1000,
+       "durationMs": 181000,
+       "now": {
+        "title": "Song 1",
+        "artist": "Orbit",
+        "album": "Orbit",
+        "albumId": "al0",
+        "coverArt": "al0"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al0",
+        "label": "Orbit"
+       },
+       "queueRev": 1
+      },
+      "queue": {
+       "queueRev": 1,
+       "order": [
+        "t0",
+        "t1",
+        "t2",
+        "t3"
+       ],
+       "pointer": 1,
+       "manual": []
+      },
+      "devices": [
+       "pc-study-01",
+       "phone-0001"
+      ],
+      "replies": [
+       {
+        "to": "pc-study-01",
+        "msg": {
+         "type": "ack",
+         "ref": "playContext",
+         "rev": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "at": 6000,
+     "leave": "phone-0001",
+     "expect": {
+      "session": {
+       "rev": 1,
+       "activeDevice": "pc-study-01",
+       "lastDevice": {
+        "id": "pc-study-01",
+        "name": "书房电脑"
+       },
+       "current": {
+        "key": "c1:t1",
+        "trackId": "t1",
+        "manual": false
+       },
+       "next": "t2",
+       "playing": true,
+       "positionMs": 0,
+       "at": 1000,
+       "durationMs": 181000,
+       "now": {
+        "title": "Song 1",
+        "artist": "Orbit",
+        "album": "Orbit",
+        "albumId": "al0",
+        "coverArt": "al0"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al0",
+        "label": "Orbit"
+       },
+       "queueRev": 1
+      },
+      "queue": {
+       "queueRev": 1,
+       "order": [
+        "t0",
+        "t1",
+        "t2",
+        "t3"
+       ],
+       "pointer": 1,
+       "manual": []
+      },
+      "devices": [
+       "pc-study-01"
+      ],
+      "replies": []
+     }
+    },
+    {
+     "at": 9000,
+     "leave": "pc-study-01",
+     "expect": {
+      "session": {
+       "rev": 2,
+       "activeDevice": null,
+       "lastDevice": {
+        "id": "pc-study-01",
+        "name": "书房电脑"
+       },
+       "current": {
+        "key": "c1:t1",
+        "trackId": "t1",
+        "manual": false
+       },
+       "next": "t2",
+       "playing": false,
+       "positionMs": 8000,
+       "at": 9000,
+       "durationMs": 181000,
+       "now": {
+        "title": "Song 1",
+        "artist": "Orbit",
+        "album": "Orbit",
+        "albumId": "al0",
+        "coverArt": "al0"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al0",
+        "label": "Orbit"
+       },
+       "queueRev": 1
+      },
+      "queue": {
+       "queueRev": 1,
+       "order": [
+        "t0",
+        "t1",
+        "t2",
+        "t3"
+       ],
+       "pointer": 1,
+       "manual": []
+      },
+      "devices": [],
+      "replies": []
+     }
+    },
+    {
+     "at": 9500,
+     "from": "phone-0001",
+     "send": {
+      "type": "hello",
+      "deviceId": "phone-0001",
+      "name": "手机",
+      "kind": "phone",
+      "canPlay": true,
+      "client": "vectors"
+     },
+     "expect": {
+      "session": {
+       "rev": 2,
+       "activeDevice": null,
+       "lastDevice": {
+        "id": "pc-study-01",
+        "name": "书房电脑"
+       },
+       "current": {
+        "key": "c1:t1",
+        "trackId": "t1",
+        "manual": false
+       },
+       "next": "t2",
+       "playing": false,
+       "positionMs": 8000,
+       "at": 9000,
+       "durationMs": 181000,
+       "now": {
+        "title": "Song 1",
+        "artist": "Orbit",
+        "album": "Orbit",
+        "albumId": "al0",
+        "coverArt": "al0"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al0",
+        "label": "Orbit"
+       },
+       "queueRev": 1
+      },
+      "queue": {
+       "queueRev": 1,
+       "order": [
+        "t0",
+        "t1",
+        "t2",
+        "t3"
+       ],
+       "pointer": 1,
+       "manual": []
+      },
+      "devices": [
+       "phone-0001"
+      ],
+      "replies": []
+     }
+    },
+    {
+     "at": 10000,
+     "from": "phone-0001",
+     "send": {
+      "type": "command",
+      "ref": "playContext",
+      "action": "playContext",
+      "context": {
+       "kind": "album",
+       "id": "al0",
+       "label": "Orbit"
+      },
+      "ids": [
+       "t0",
+       "t1",
+       "t2",
+       "t3"
+      ],
+      "startId": "t2"
+     },
+     "expect": {
+      "session": {
+       "rev": 3,
+       "activeDevice": "phone-0001",
+       "lastDevice": {
+        "id": "phone-0001",
+        "name": "手机"
+       },
+       "current": {
+        "key": "c2:t2",
+        "trackId": "t2",
+        "manual": false
+       },
+       "next": "t3",
+       "playing": true,
+       "positionMs": 0,
+       "at": 10000,
+       "durationMs": 182000,
+       "now": {
+        "title": "Song 2",
+        "artist": "Orbit",
+        "album": "Orbit",
+        "albumId": "al0",
+        "coverArt": "al0"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al0",
+        "label": "Orbit"
+       },
+       "queueRev": 2
+      },
+      "queue": {
+       "queueRev": 2,
+       "order": [
+        "t0",
+        "t1",
+        "t2",
+        "t3"
+       ],
+       "pointer": 2,
+       "manual": []
+      },
+      "devices": [
+       "phone-0001"
+      ],
+      "replies": [
+       {
+        "to": "phone-0001",
+        "msg": {
+         "type": "ack",
+         "ref": "playContext",
+         "rev": 3
+        }
+       }
+      ]
+     }
+    },
+    {
+     "at": 12000,
+     "tick": true,
+     "expect": {
+      "session": {
+       "rev": 3,
+       "activeDevice": "phone-0001",
+       "lastDevice": {
+        "id": "phone-0001",
+        "name": "手机"
+       },
+       "current": {
+        "key": "c2:t2",
+        "trackId": "t2",
+        "manual": false
+       },
+       "next": "t3",
+       "playing": true,
+       "positionMs": 0,
+       "at": 10000,
+       "durationMs": 182000,
+       "now": {
+        "title": "Song 2",
+        "artist": "Orbit",
+        "album": "Orbit",
+        "albumId": "al0",
+        "coverArt": "al0"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al0",
+        "label": "Orbit"
+       },
+       "queueRev": 2
+      },
+      "queue": {
+       "queueRev": 2,
+       "order": [
+        "t0",
+        "t1",
+        "t2",
+        "t3"
+       ],
+       "pointer": 2,
+       "manual": []
+      },
+      "devices": [
+       "phone-0001"
+      ],
+      "replies": []
      }
     }
    ]

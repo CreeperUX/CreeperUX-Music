@@ -8,12 +8,13 @@ namespace Sonus.Core.Tests;
 /// <summary>
 /// Sonus Connect version 2 (docs/protocol/connect.md) against the demo server (tools/demo-server/connect2.mjs): devices
 /// share one session, the sender of the first play becomes the active device, remotes' commands change the session, a
-/// transfer moves playback, the grace period and resume, and the session outliving its devices. Each test has a demo
-/// server of its own (one session per user), with a grace period of 1.5 s instead of 10.
+/// transfer moves playback, a network loss with the grace period and resume, a device leaving with a goodbye, and the
+/// session outliving its devices. Each test has a demo server of its own (one session per user), with a grace period of
+/// 3 s instead of 10.
 /// </summary>
 public class ConnectSessionTests
 {
-    private const int GraceMs = 1500;
+    private const int GraceMs = 3000;
 
     /// <summary>A demo server for one test.</summary>
     private sealed class Demo : IAsyncDisposable
@@ -50,6 +51,14 @@ public class ConnectSessionTests
             _devices.Add(device);
             await Until(() => device.IsConnected, $"{name} connected");
             return device;
+        }
+
+        /// <summary>Cuts that device's connection without a goodbye (a network loss), refusing its reconnecting for a while.</summary>
+        public async Task DropAsync(SessionClient device, int holdMs = 0)
+        {
+            using var http = new HttpClient();
+            var r = await http.GetStringAsync($"{Url}/__test/connect2/drop?u=demo&device={device.DeviceId}&hold={holdMs}");
+            Assert.Contains("\"dropped\":true", r);
         }
 
         public async ValueTask DisposeAsync()
@@ -135,20 +144,21 @@ public class ConnectSessionTests
     }
 
     [Fact]
-    public async Task ReconnectingWithinTheGracePeriodKeepsTheDeviceActive()
+    public async Task AfterANetworkLossWithinTheGracePeriodTheDeviceIsStillActive()
     {
         await using var demo = await Demo.StartAsync();
         var phone = await demo.DeviceAsync("tests-phone-04", "手机");
         var pc = await demo.DeviceAsync("tests-pc-0004", "书房电脑");
         await pc.CommandAsync("playContext", new { context = Album, ids = Songs, startId = "t20" });
-        await pc.DisposeAsync(); // the connection goes
-        await Task.Delay(GraceMs / 3);
+        await Until(() => pc.IsActive, "active");
+        await demo.DropAsync(pc); // the connection goes without a goodbye
+        await Until(() => !pc.IsConnected, "pc noticed");
         Assert.Equal("tests-pc-0004", phone.Session.ActiveDevice); // still active, still playing
         Assert.True(phone.Session.Playing);
-        var again = await demo.DeviceAsync("tests-pc-0004", "书房电脑"); // the same device id
-        Assert.True(again.IsActive);
+        await Until(() => pc.IsConnected, "pc reconnected by itself", GraceMs); // the backoff's first second
+        Assert.True(pc.IsActive);
         await Task.Delay(GraceMs + 500);
-        Assert.True(again.IsActive);
+        Assert.True(pc.IsActive);
         Assert.True(phone.Session.Playing);
     }
 
@@ -158,19 +168,19 @@ public class ConnectSessionTests
         await using var demo = await Demo.StartAsync();
         var phone = await demo.DeviceAsync("tests-phone-05", "手机");
         var pc = await demo.DeviceAsync("tests-pc-0005", "书房电脑");
+        // it keeps playing through a network loss, and says so when it is back (the rev it last saw: kept while away)
+        pc.Resume = () => new SessionResume(pc.Session.Rev, true, 9_000);
         await pc.CommandAsync("playContext", new { context = Album, ids = Songs, startId = "t20" });
         await Until(() => pc.Session.Playing && pc.IsActive, "playing");
-        long seen = pc.Session.Rev;
-        await pc.DisposeAsync();
+        await demo.DropAsync(pc, holdMs: GraceMs + 1500); // away for longer than the grace period
         await Until(() => phone.Session.ActiveDevice is null, "stopped after the grace period", GraceMs + 3000);
         Assert.False(phone.Session.Playing);
-        Assert.InRange(phone.Session.PositionMs, 0, GraceMs); // where it was when the connection dropped, not where the grace ended
+        Assert.InRange(phone.Session.PositionMs, 0, 2000); // where it was when the connection dropped, not where the grace ended
         Assert.Equal("书房电脑", phone.Session.LastDevice?.Name);
-        // it kept playing through what was only a network loss: resume
-        var back = await demo.DeviceAsync("tests-pc-0005", "书房电脑", resume: () => new SessionResume(seen, true, 4_000));
-        Assert.True(back.IsActive);
-        Assert.True(back.Session.Playing);
-        Assert.InRange(back.Session.PositionAt(back.ServerNow), 4_000, 6_000);
+        await Until(() => pc.IsConnected, "pc back", 15_000);
+        Assert.True(pc.IsActive); // the resume was taken
+        await Until(() => phone.Session.ActiveDevice == pc.DeviceId && phone.Session.Playing, "the phone sees it play again");
+        Assert.InRange(phone.Session.PositionAt(phone.ServerNow), 9_000, 11_000);
     }
 
     [Fact]
@@ -179,36 +189,40 @@ public class ConnectSessionTests
         await using var demo = await Demo.StartAsync();
         var phone = await demo.DeviceAsync("tests-phone-06", "手机");
         var pc = await demo.DeviceAsync("tests-pc-0006", "书房电脑");
+        pc.Resume = () => new SessionResume(pc.Session.Rev, true, 9_000);
         await pc.CommandAsync("playContext", new { context = Album, ids = Songs, startId = "t20" });
         await Until(() => pc.IsActive, "active");
-        long seen = pc.Session.Rev;
-        await pc.DisposeAsync();
+        await demo.DropAsync(pc, holdMs: GraceMs + 2500);
         await Until(() => phone.Session.ActiveDevice is null, "stopped", GraceMs + 3000);
         Assert.True((await phone.CommandAsync("next")).Ok); // the session moves on without it
-        var back = await demo.DeviceAsync("tests-pc-0006", "书房电脑", resume: () => new SessionResume(seen, true, 4_000));
-        Assert.False(back.IsActive); // it stops, and shows the session as it now is
-        Assert.Equal("t21", back.Session.Current?.TrackId);
-        Assert.False(back.Session.Playing);
+        await Until(() => pc.IsConnected, "pc back", 15_000);
+        Assert.False(pc.IsActive); // it stops, and shows the session as it now is
+        Assert.Equal("t21", pc.Session.Current?.TrackId);
+        Assert.False(pc.Session.Playing);
     }
 
     [Fact]
-    public async Task TheSessionOutlivesItsDevicesAndWhoeverPressesPlayContinuesIt()
+    public async Task ADeviceThatLeavesWithAGoodbyeStopsTheSessionAtOnceAndItOutlivesItsDevices()
     {
         await using var demo = await Demo.StartAsync();
         var pc = await demo.DeviceAsync("tests-pc-0007", "书房电脑");
         await pc.CommandAsync("playContext", new { context = Album, ids = Songs, startId = "t23" });
         await pc.CommandAsync("seek", new { positionMs = 83_000 });
-        await pc.CommandAsync("pause");
-        await pc.DisposeAsync();
-        await Task.Delay(GraceMs + 500); // every device gone
+        await pc.DisposeAsync(); // the app closes: no grace period
         var laptop = await demo.DeviceAsync("tests-laptop-07", "笔记本");
         Assert.Null(laptop.Session.ActiveDevice);
+        Assert.False(laptop.Session.Playing);
         Assert.Equal("t23", laptop.Session.Current?.TrackId);
-        Assert.InRange(laptop.Session.PositionMs, 83_000, 83_500); // paused just after the seek
+        Assert.InRange(laptop.Session.PositionMs, 83_000, 84_000); // stopped where it was
         Assert.Equal("书房电脑", laptop.Session.LastDevice?.Name); // "上次在「书房电脑」播放"
         Assert.True((await laptop.CommandAsync("play")).Ok);
         await Until(() => laptop.IsActive && laptop.Session.Playing, "the laptop plays it now");
         Assert.InRange(laptop.Session.PositionAt(laptop.ServerNow), 83_000, 86_000);
+        await laptop.DisposeAsync();
+        var phone = await demo.DeviceAsync("tests-phone-07", "手机"); // every device gone: the session is still there
+        Assert.Null(phone.Session.ActiveDevice);
+        Assert.Equal("t23", phone.Session.Current?.TrackId);
+        Assert.Equal("笔记本", phone.Session.LastDevice?.Name);
     }
 
     [Fact]

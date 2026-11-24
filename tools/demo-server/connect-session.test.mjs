@@ -288,6 +288,20 @@ test('session: the grace period, and resume', () => {
   assert.equal(w.s.activeDevice, null);
 });
 
+test('session: a device that leaves with a goodbye has no grace period', () => {
+  const w = world();
+  w.hello(A); w.hello(B);
+  w.cmd(A, 'playContext', { ids: all, startId: 't0' });
+  w.later(4_000);
+  w.s.leave(A);
+  assert.equal(w.s.activeDevice, null);
+  assert.equal(w.s.playing, false);
+  assert.equal(w.s.positionMs, 4_000);
+  assert.deepEqual(w.s.deviceList().map(d => d.id), [B]);
+  w.cmd(B, 'playContext', { ids: all, startId: 't3' }); // plays on B, not on a device that left
+  assert.equal(w.s.activeDevice, B);
+});
+
 test('session: volume goes to the device it names, as a deviceCommand', () => {
   const w = world();
   w.hello(A); w.hello(B);

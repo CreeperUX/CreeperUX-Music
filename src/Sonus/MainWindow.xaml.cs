@@ -69,7 +69,6 @@ public sealed partial class MainWindow : Window, IShell
             if (_music is null || _closing) return;
             e.Cancel = true; _closing = true;
             await _music.SaveQueueNowAsync(); // the position, for another device
-            if (_session is { } session) await session.LeaveAsync();
             _connect?.Dispose();
             _session?.Dispose();
             _music.Dispose();
@@ -106,7 +105,7 @@ public sealed partial class MainWindow : Window, IShell
     {
         if (_closing) return;
         _closing = true;
-        if (_music is { } m) { await m.SaveQueueNowAsync(); if (_session is { } s) await s.LeaveAsync(); _connect?.Dispose(); _session?.Dispose(); m.Dispose(); }
+        if (_music is { } m) { await m.SaveQueueNowAsync(); _connect?.Dispose(); _session?.Dispose(); m.Dispose(); }
         Close();
     }
 
@@ -224,7 +223,6 @@ public sealed partial class MainWindow : Window, IShell
         // can also revoke it on the server's web page)
         if (_music?.Client.Login is { IsApiKey: true } keyed) _ = DeviceLogin.RevokeAsync(keyed);
         _connect?.Dispose(); _connect = null;
-        if (_session is { } leaving) await leaving.LeaveAsync();
         _session?.Dispose(); _session = null;
         _music?.Dispose();
         _music = null; Ready = false;

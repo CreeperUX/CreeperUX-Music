@@ -15,7 +15,8 @@ const ABOUT = {
   what: 'Test vectors of Sonus Connect version 2 (connect.md): each case is a sequence of steps; after each step the server\'s session, queue, device list and direct replies must be exactly `expect`.',
   steps: {
     send: '{ at, from, send }: the message `send` arrives from device `from`\'s connection at server time `at` (ms). A `hello` opens that device\'s connection.',
-    drop: '{ at, drop }: that device\'s connection goes away (no goodbye).',
+    drop: '{ at, drop }: that device\'s connection goes away without a goodbye (a network loss: the grace period).',
+    leave: '{ at, leave }: that device\'s connection is closed by the device with a goodbye (WebSocket close code 1000 or 1001): no grace period.',
     tick: '{ at, tick: true }: only time passes (the grace period may run out). Servers check the grace period at least this often.',
   },
   expect: {
@@ -186,6 +187,16 @@ const CASES = [
     [52_000, PC, s => hello(PC, '书房电脑', { resume: { rev: s.rev - 2, playing: true, positionMs: 41_000 } })],
     [53_000, PC, report('position', { positionMs: 42_000 })],
   ] },
+  { name: 'a device that leaves with a goodbye has no grace period: the session stops at once, and another can play it', random: [], steps: [
+    [0, PC, hello(PC, '书房电脑')],
+    [10, PHONE, hello(PHONE, '手机')],
+    [1000, PC, cmd('playContext', { context: album, ids: all.slice(0, 4), startId: 't1' })],
+    [6000, PHONE, { leave: PHONE }],
+    [9000, PC, { leave: PC }],
+    [9500, PHONE, hello(PHONE, '手机')],
+    [10_000, PHONE, cmd('playContext', { context: album, ids: all.slice(0, 4), startId: 't2' })],
+    [12_000, PHONE, { tick: true }],
+  ] },
   { name: 'with no active device: a remote moves the session paused; one that cannot play cannot start it; the next to press play plays', random: [], steps: [
     [0, PC, hello(PC, '书房电脑')],
     [10, PHONE, hello(PHONE, '手机')],
@@ -233,6 +244,7 @@ export function replay(c, library = LIBRARY, resolveStep = null) {
     t = step.at;
     let out;
     if (step.drop) out = s.drop(step.drop);
+    else if (step.leave) out = s.leave(step.leave);
     else if (step.tick) out = s.tick();
     else if (step.send?.type === 'hello') out = s.hello(step.send).out;
     else out = s.message(step.from, step.send);
@@ -248,7 +260,7 @@ function make() {
     const steps = [];
     const results = replay({ ...c, steps: c.steps }, LIBRARY, ([at, from, x], s) => {
       const v = typeof x === 'function' ? x(s) : x;
-      const step = v.drop ? { at, drop: v.drop } : v.tick ? { at, tick: true } : { at, from, send: v };
+      const step = v.drop ? { at, drop: v.drop } : v.leave ? { at, leave: v.leave } : v.tick ? { at, tick: true } : { at, from, send: v };
       steps.push(step);
       return step;
     });

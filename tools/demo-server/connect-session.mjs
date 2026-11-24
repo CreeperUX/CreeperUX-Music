@@ -304,7 +304,24 @@ export class ConnectSession {
     });
   }
 
-  /** The connection of that device went away. */
+  /**
+   * That device's connection closed with a goodbye (WebSocket close code 1000 or 1001: the app closed, the user signed
+   * out). It left on purpose, so there is no grace period: if it was the active device, the session stops where it is now.
+   */
+  leave(id) {
+    const d = this.devices.get(id);
+    if (!d?.online) return [];
+    if (this.activeDevice !== id) return this.#dropNow(id, this.clock());
+    return this.#change(null, {}, () => {
+      const t = this.clock();
+      this.positionMs = this.positionAt(t); this.at = t; this.playing = false;
+      this.activeDevice = null; this.grace = null;
+      d.online = false; this.devices.delete(id);
+      return { devices: true };
+    }).out;
+  }
+
+  /** The connection of that device went away without a goodbye (a network loss): the grace period. */
   drop(id) {
     const out = this.#dropNow(id, this.clock());
     return out;

@@ -320,7 +320,7 @@ public sealed partial class SessionClient : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        // a goodbye first (the server then knows at once that this device left), then the loop stops
+        // a goodbye first: the server then knows this device left on purpose (no grace period), then the loop stops
         if (_ws is { State: WebSocketState.Open } ws)
         {
             using var wait = new CancellationTokenSource(TimeSpan.FromSeconds(2));

@@ -213,7 +213,7 @@ const CASES = [
   ] },
   { name: 'volume: any device sets any device\'s volume, as a deviceCommand to it', random: [], steps: [
     [0, PC, hello(PC, '书房电脑')],
-    [10, PHONE, hello(PHONE, '手机')],
+    [10, PHONE, hello(PHONE, '手机', { volume: 0.5, muted: false })],
     [1000, PHONE, cmd('volume', { device: PC, volume: 0.3 })],
     [1100, PC, { type: 'device', ref: 'v', volume: 0.3, muted: false }],
     [2000, PC, cmd('volume', { device: PHONE, muted: true })],

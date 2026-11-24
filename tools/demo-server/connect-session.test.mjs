@@ -311,6 +311,8 @@ test('session: volume goes to the device it names, as a deviceCommand', () => {
   assert.equal(w.replies(w.cmd(B, 'volume', { device: 'device-gone', volume: 1 }), 'error')[0].code, 'offline');
   w.send(A, { type: 'device', volume: 0.25, muted: false });
   assert.equal(w.s.deviceList().find(d => d.id === A).volume, 0.25);
+  w.hello(C, { volume: 0.4, muted: true }); // said in the hello: listed so from the start
+  assert.deepEqual([w.s.deviceList().find(d => d.id === C).volume, w.s.deviceList().find(d => d.id === C).muted], [0.4, true]);
 });
 
 test('session: a stale remove still removes the rest; a stale move moves nothing; a stale rev', () => {

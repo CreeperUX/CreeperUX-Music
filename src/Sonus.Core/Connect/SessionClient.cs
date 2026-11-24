@@ -153,6 +153,9 @@ public sealed partial class SessionClient : IAsyncDisposable
     /// <summary>Asked on every (re)connect: what to say as <c>resume</c> (null: nothing). Called on a background thread.</summary>
     public Func<SessionResume?>? Resume { get; set; }
 
+    /// <summary>Asked on every (re)connect: this device's volume, said in the hello. Called on a background thread.</summary>
+    public Func<(double Volume, bool Muted)>? VolumeNow { get; set; }
+
     public event Action<bool>? ConnectionChanged;
     /// <summary>The session changed (or arrived with a welcome).</summary>
     public event Action? SessionChanged;
@@ -228,6 +231,7 @@ public sealed partial class SessionClient : IAsyncDisposable
                 await ws.ConnectAsync(Address(), stop).ConfigureAwait(false);
                 _ws = ws;
                 var hello = new JsonObject { ["type"] = "hello", ["deviceId"] = DeviceId, ["name"] = _name, ["kind"] = _kind, ["canPlay"] = _canPlay, ["client"] = _clientName };
+                if (VolumeNow is { } said) { var (volume, muted) = said(); hello["volume"] = Math.Round(volume, 3); hello["muted"] = muted; }
                 if (Resume?.Invoke() is { } resume) hello["resume"] = JsonSerializer.SerializeToNode(resume, Json);
                 if (await SendAsync(ws, hello).ConfigureAwait(false)) await ReceiveAsync(ws, stop, () => wait = TimeSpan.FromSeconds(1)).ConfigureAwait(false);
             }

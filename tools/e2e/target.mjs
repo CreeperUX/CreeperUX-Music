@@ -96,10 +96,11 @@ function makeTarget({ url, origin = url, demo, users, manifest, stop }) {
     /** What the tests take from the library (DEMO_CATALOGUE, or found on the server): see README.md. */
     catalogue: async () => (catalogue ??= demo ? structuredClone(DEMO_CATALOGUE) : await discover(t, cleanup)),
     signIns: demo ? demoSignIns(url) : serverSignIns(url, users.main),
-    /** Sonus Connect devices of the main user that the server accepted: the demo server's list, or the sockets the
-     *  proxy passed on (signed in with an API key, accepted, still open). */
+    /** Sonus Connect devices of the main user that the server accepted: the demo server's lists (version 1's and
+     *  version 2's), or the sockets the proxy passed on (signed in with an API key, accepted, still open). */
     connectDevices: async () => demo
-      ? (await fetch(`${url}/__test/devices?u=${encodeURIComponent(users.main.username)}`)).json()
+      ? [...await (await fetch(`${url}/__test/devices?u=${encodeURIComponent(users.main.username)}`)).json(),
+        ...(await (await fetch(`${url}/__test/connect2?u=${encodeURIComponent(users.main.username)}`)).json()).devices]
       : (await t.log()).sockets.filter(s => s.open && s.status === 101),
     /** Runs `fn` when the target stops (things the tests made on the server). */
     onStop: fn => cleanup.push(fn),

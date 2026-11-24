@@ -1,9 +1,12 @@
 # Sonus Connect, version 2: one playback session per user
 
-Status: specification, 2026-11-24. Not implemented yet. The server half goes into the Rust server (`server/`, roadmap
-phase 1); the Windows client, the web client, the Android client and the demo server (`tools/demo-server/connect.mjs`,
-the reference the client tests run against) implement the rest. Version 1 (`sonusConnect` v1, the Go fork's
-`server/connect`) stays for clients that have not moved yet; the two do not see each other.
+Status: specification, 2026-11-24. The server half has a reference implementation, `tools/demo-server/connect-session.mjs`
+(served by the demo server at `rest/connect?protocol=2`, `connect2.mjs`), and test vectors made from it,
+`docs/protocol/connect-vectors.json`: sequences of messages with the session, queue, devices and replies expected after
+each step. A server implementing this protocol (the Rust server, `server/`, roadmap phase 1) must give exactly those.
+The Windows client implements the client half; the web and Android clients follow. Version 1 (`sonusConnect` v1, the Go
+fork's `server/connect`, the demo's `connect.mjs`) stays for clients that have not moved yet; the two do not see each
+other.
 
 ## The rules (agreed with the user)
 
@@ -34,12 +37,12 @@ reports what really happens (it started, paused, reached the end, failed). The q
 {
   "rev": 412,                    // +1 on every change of the session or its queue
   "activeDevice": "a1b2…" ,      // null: nothing plays (rule 6/7)
-  "lastDevice": { "id": "…", "name": "书房电脑" },   // the device that played last, for "上次在「…」播放"
-  "current": { "key": "c17:tr4x…", "trackId": "tr4x…", "manual": false },   // null: an empty session
+  "lastDevice": { "id": "…", "name": "书房电脑" },   // the device that played last, for "上次在「…」播放"; while a device plays: that device
+  "current": { "key": "c17:tr4x…", "trackId": "tr4x…", "manual": false },   // null: an empty session; key: see Entries
   "next": "tr9y…",               // what follows when the current song ends (PlayQueue.Peek), for preloading; null if unknown (random, repeat one, stop after current, the end)
   "playing": true,
   "positionMs": 83500, "at": 1764001234567,   // position at server time `at`; while playing, now = positionMs + (serverNow - at)
-  "durationMs": 241000,
+  "durationMs": 241000,           // 0: not known
   "now": { "title": "…", "artist": "…", "album": "…", "albumId": "…", "coverArt": "…" },  // so any device can show it without a lookup
   "mode": "default",             // default | repeatAll | repeatOne | shuffleTracks | shuffleAlbums | shuffleFolders | random
   "stopAfterCurrent": false,
@@ -47,6 +50,10 @@ reports what really happens (it started, paused, reached the end, failed). The q
   "queueRev": 57                 // the queue's own revision: fetch or wait for `queue` when it changes
 }
 ```
+
+Whenever the current song changes, the server fills `now` and `durationMs` from its library (so every device can show
+the new song even when no device plays, after a remote's `next`); the active device's `loaded` report corrects them.
+Without an active device the session is never playing: `activeDevice: null` means `playing: false`.
 
 ### Queue
 
@@ -69,6 +76,12 @@ entries first (`q<n>`), then the context after the pointer (`c<index>:<trackId>`
 song expected there; a command whose key no longer matches (the queue moved on meanwhile) does nothing to that entry
 and is answered with `error stale` for it. Keys of manual entries are stable until the entry plays or is removed.
 
+`current.key` is the entry key the song had when it became current (`c<index>:<trackId>` for a context song, its `q<n>`
+for a song queued by hand), and it does not change while the song plays: a new order moves the pointer, not the key. So
+shuffling on or off never makes the active device load the song again, and its reports about it still apply. Two plays
+of the same entry one after the other (repeat one, `previous` more than 3 s in) keep the key; the position going back
+to 0 says that it starts again.
+
 ### Devices
 
 ```jsonc
@@ -77,6 +90,8 @@ and is answered with `error stale` for it. Keys of manual entries are stable unt
 ```
 
 `kind`: `desktop`, `web`, `phone`, `tablet`, `speaker`, `other`. `canPlay: false` is a remote that never plays.
+`volume` (0–1) and `muted` are what the device said in its `hello` or its last `device` message; until it says, 1 and
+not muted. The active device stays listed through its grace period (below), even while its connection is down.
 A device's **id is its own**: a random id the client makes once per installation (per browser profile for the web
 client) and keeps, `[A-Za-z0-9_-]{8,64}`. The same id reconnecting is the same device. Ids are per user.
 
@@ -90,7 +105,9 @@ otherwise, exactly as without Connect.
 
 The first message is the client's `hello`; the server answers `welcome` with everything a device needs to show the
 session at once (rule 2). The server pings every 30 s; a connection silent for 75 s is closed. A second connection
-with the same device id replaces the first (close code 4000). At most 32 devices per user (the one silent longest goes).
+with the same device id replaces the first (close code 4000). At most 32 devices per user: a 33rd closes the connection
+of the one silent longest (close code 4001). A client that closes its connection on purpose (the app closes, the user
+signs out) says goodbye with close code 1000 or 1001; see Grace for what that changes.
 JSON text frames, at most 1 MiB each; times are milliseconds since the Unix epoch on the server's clock (each message
 that carries `serverTime` lets a client keep the offset to its own clock).
 
@@ -99,11 +116,12 @@ that carries `serverTime` lets a client keep the offset to its own clock).
 ### Client → server
 
 Every client message may carry `ref` (a string the client picks); the server answers `ack {ref, rev}` once it is
-applied, or `error {ref, code, message}`.
+applied, or `error {ref, code, message}`. A refused message changes nothing at all (not even which device is active);
+the one exception is `remove`, below.
 
 | type | fields | |
 |---|---|---|
-| `hello` | `deviceId`, `name`, `kind`, `canPlay`, `client`, `resume?` | first message. `resume: {rev, playing, positionMs}`: this device was active, lost the connection and is still playing (see Grace) |
+| `hello` | `deviceId`, `name`, `kind`, `canPlay`, `client`, `volume?`, `muted?`, `resume?` | first message. `volume`/`muted`: this device's volume, as in `device`. `resume: {rev, playing, positionMs}`: this device was active, lost the connection and is still playing (see Grace) |
 | `command` | `action`, …, `rev?` | changes the session (below) |
 | `report` | `event`, `key`, `positionMs`, `durationMs?`, `now?`, `rev` | the active device only: what really happened (below) |
 | `device` | `volume`, `muted` | this device's own volume, on every change |
@@ -112,26 +130,28 @@ applied, or `error {ref, code, message}`.
 
 | action | fields | effect on the session |
 |---|---|---|
-| `play` | — | resume. With no active device, **the sender becomes the active device** (rule 6; `error cannotPlay` if it can't play) |
+| `play` | — | resume. With no active device, **the sender becomes the active device** (rule 6; `error cannotPlay` if it can't play). With nothing current but songs queued by hand: the first of them plays (as `next`) |
 | `pause` | — | pause |
 | `toggle` | — | play or pause |
 | `seek` | `positionMs` | move within the current song |
 | `next` | — | `PlayQueue.Next()` (manual songs first) |
 | `previous` | — | more than 3 s into the song: back to its start; otherwise `PlayQueue.Previous()` |
-| `playContext` | `context`, `ids`, `startId?`, `shuffle?`, `order?`, `positionMs?` | `PlayQueue.Start`: a new context (an album, a playlist, search results…), the manual songs kept. `order`: the context already arranged by the sender, required for `shuffleAlbums`/`shuffleFolders` (the server may not know albums and folders); otherwise the server arranges. Starts playing; with no active device the sender becomes it |
+| `playContext` | `context`, `ids`, `startId?`, `shuffle?`, `order?`, `positionMs?` | `PlayQueue.Start`: a new context (an album, a playlist, search results…), the manual songs kept. `order`: the context already arranged by the sender, required for `shuffleAlbums`/`shuffleFolders` (the server may not know albums and folders); otherwise the server arranges. With an arranged `order` and no `startId` the first song of `order` plays (the sender puts the one to start with there). Starts playing; with no active device the sender becomes it (`error cannotPlay` if it can't play, and nothing changes) |
 | `jump` | `entry` | play that queue entry (`PlayQueue.Jump`) |
 | `add` | `ids`, `next` | queue by hand, at the end or first (`PlayQueue.Add`) |
-| `move` | `order`, `keys`, `manual` | a drag in the queue panel (`PlayQueue.Move`) |
-| `remove` | `entries` | `PlayQueue.Remove` |
+| `move` | `order`, `keys`, `manual` | a drag in the queue panel (`PlayQueue.Move`). All or nothing: `order` must list exactly the current entries and `keys` must be among them, else `error stale` (`PlayQueue.Move` drops entries missing from `order`, so a move made on an older queue would delete what was queued since) |
+| `remove` | `entries` | `PlayQueue.Remove`. Keys that no longer match are answered `error stale` with `entries` (those keys); the others are removed all the same |
 | `clear` | `manual` | the hand-queued songs, or the rest of the context (`PlayQueue.Clear`) |
 | `mode` | `mode`, `order?` | the playback order (`PlayQueue.SetOrder`); `order` as for `playContext` when shuffling by album or folder |
 | `stopAfterCurrent` | `on` | |
 | `transfer` | `to`, `play?` | the only way to change the active device (rule 4): `to` becomes active at the current position, playing as before or as `play` says; the device it leaves stops. `to` may be the sender ("play here") |
 | `volume` | `device`, `volume?`, `muted?` | that device's volume (rule 8): the server passes it to that device as `deviceCommand` |
 
-A command that only reads the session (all but `transfer`, `volume`, and `play`/`playContext` with no active device)
-does not change which device is active (rule 3). Commands on an empty session that need a song (`play`, `next`…) answer
-`error nothing`.
+A command that only reads the session (all but `transfer`, `volume`, and `play`/`toggle`/`playContext` with no active
+device) does not change which device is active (rule 3). With no active device nothing plays: a remote's `next`,
+`previous` or `jump` moves the session and leaves it paused. Commands that need a song (`play`, `next`, `seek`…) on a
+session with nothing current and nothing queued answer `error nothing`. A command with `rev` that is not the session's
+rev is answered `error stale` and does nothing.
 
 #### Reports (the active device)
 
@@ -143,7 +163,11 @@ does not change which device is active (rule 3). Commands on an empty session th
 | `ended` | the current song reached its end | `PlayQueue.Next(ended: true)`: the next song, or the end of the session (`playing: false`, position 0 of the last song) |
 | `failed` | the song can't play here | skips it, as Spotify does: `PlayQueue.Next()` (not as at an end, so repeat one does not loop on it), and answers the active device `error unplayable` with a message naming the song, `trackId` and `stopped`. Five failures in a row (or none left) stop the session (`playing: false`); the next command gives a fresh try |
 
-`key` is the entry the report is about; a report for a song that is no longer current is ignored. At an `ended`, the
+`key` is the entry the report is about; a report for a song that is no longer current is ignored (`error stale`). `rev`
+is the session rev the device last followed: a `playing`, `paused` or `position` report whose `rev` is older than the
+last change a command made is ignored too (`error stale`), since the device had not yet followed it (a seek from a
+remote, say) and its position is out of date; it follows the `session` and reports again. `loaded`, `ended` and `failed`
+are guarded by `key` only. At an `ended`, the
 active device may start `next` at once (it preloaded it) without waiting for the server: the server moves to the same
 song unless the queue changed meanwhile, in which case the device follows the `session` it gets.
 
@@ -157,7 +181,10 @@ song unless the queue changed meanwhile, in which case the device follows the `s
 | `devices` | `serverTime`, `devices` | a device joined, left, or changed its volume |
 | `deviceCommand` | `action: "volume"`, `volume?`, `muted?`, `from` | another device changed this one's volume |
 | `ack` | `ref`, `rev` | a message with `ref` was applied |
-| `error` | `ref?`, `code`, `message` | `stale` (an entry key or `rev` that no longer matches), `cannotPlay`, `nothing`, `notActive` (a report from a device that isn't active), `offline` (a `volume` for a device that isn't connected), `unplayable`, `invalid` |
+| `error` | `ref?`, `code`, `message`, … | `stale` (an entry key or `rev` that no longer matches; `entries?`: the keys), `cannotPlay`, `nothing`, `notActive` (a report from a device that isn't active), `offline` (a transfer to or `volume` for a device that isn't connected), `unplayable` (`trackId`, `stopped`: the failed song, and whether the session stopped), `invalid` |
+
+`message` is for people (Chinese for now). Clients show errors to the user, except `stale` and `notActive`: the session
+moved on meanwhile, and what it is now is on its way.
 
 ### What each device does with a `session`
 
@@ -176,11 +203,16 @@ song unless the queue changed meanwhile, in which case the device follows the `s
 is back with no active device, paused at its position (rules 6, 7).
 
 **Grace.** When the active device's connection drops, the server keeps it active for 10 s, the position moving as if it
-still played. If it reconnects in time (`hello` with the same id), it stays active and its next reports correct the
-state. Otherwise the session stops: `activeDevice: null`, `playing: false`, the position where it was when the
-connection dropped (rule 7). A device that comes back later with `resume` while the session still has no active device
-and the same `rev` is made active again (it never stopped playing: a short network loss); in every other case it stops
-and shows the session as it now is.
+still played; it stays in `devices` meanwhile. If it reconnects in time (`hello` with the same id), it stays active and
+its next reports correct the state. Otherwise the session stops: `activeDevice: null`, `playing: false`, the position
+where it was when the connection dropped, or where a command put it since (rule 7). That stop is itself a change (rev
++ 1), so a `resume` is taken when the session has not changed since the stop and `resume.rev` is the rev from before
+it: the device is made active again, `playing` and `positionMs` as it says (it never stopped playing: a short network
+loss). In every other case it stops and shows the session as it now is.
+
+**A goodbye is not a network loss.** A device that closes its connection with close code 1000 or 1001 left on purpose:
+there is no grace period. If it was the active device the session stops at once where it is (`activeDevice: null`,
+`playing: false`), so another device can play it straight away instead of sending it to a device that is gone.
 
 **Devices keep playing through a network loss.** The active device does not stop its audio because its connection
 dropped; it reconnects with backoff (1 s doubling to 30 s) and `resume`s.

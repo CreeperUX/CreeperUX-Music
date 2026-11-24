@@ -5,14 +5,17 @@ namespace Sonus.Interop;
 
 /// <summary>
 /// The server sign-in (server, user, salt, token as JSON) in Windows Credential Manager, as a generic credential named
-/// "Sonus:server" ("Sonus-test:server" for test instances). It shows under Control Panel →
+/// "Sonus:server" ("Sonus-test-&lt;run&gt;:server" for test instances, &lt;run&gt; being the test run's name). It shows under Control Panel →
 /// Credential Manager → Windows Credentials. The password itself is never stored. Before 0.4 (CreeperUX Music) it was
 /// "CreeperUXMusic:server": AdoptFormer takes that over.
 /// </summary>
 internal static partial class Credentials
 {
-    private static string TargetOf(string name) => $"{(AppPaths.IsTestInstance ? "Sonus-test" : "Sonus")}:{name}";
-    private static string FormerTargetOf(string name) => $"{Core.AppName.FormerCredentialPrefix}{(AppPaths.IsTestInstance ? "-test" : "")}:{name}";
+    /// <summary>A test instance's entries carry its test run's name (SONUS_TEST_CREDENTIAL, set by tools/e2e for every instance
+    /// of a run), so two runs at once (from two checkouts) never see each other's sign-in. Letters and digits only.</summary>
+    private static readonly string TestRun = Environment.GetEnvironmentVariable("SONUS_TEST_CREDENTIAL") is { Length: > 0 and <= 32 } run && run.All(char.IsAsciiLetterOrDigit) ? "-" + run : "";
+    private static string TargetOf(string name) => $"{(AppPaths.IsTestInstance ? "Sonus-test" + TestRun : "Sonus")}:{name}";
+    private static string FormerTargetOf(string name) => $"{Core.AppName.FormerCredentialPrefix}{(AppPaths.IsTestInstance ? "-test" + TestRun : "")}:{name}";
     private static string Target => TargetOf("server");
     /// <summary>Every entry the app keeps: the sign-in.</summary>
     private static readonly string[] Names = ["server"];

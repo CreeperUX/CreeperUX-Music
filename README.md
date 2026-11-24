@@ -101,7 +101,7 @@ npm run demo             # 演示服务器 + Windows 程序（第一次会先编
 | `src/Sonus.Setup` | 安装程序窗口（WPF，和 Lumen 的一样）：里面带着 MSI，关掉 Windows Installer 自己的界面来运行它 |
 | `installer/` | MSI（WiX v5，`Package.wxs`）：按用户安装、开始菜单快捷方式 |
 | `docs/release-notes/` | 每个版本的说明，发布时作为 GitHub Release 的正文（程序的更新对话框也显示它） |
-| `tools/e2e/` | 静默的端到端测试：`acceptance.mjs`（多轮验收）、`connect-v2.mjs`（两个测试实例之间的 Connect 第 2 版）、`e2e.mjs`（测试实例、管道、截图）、`fake-github.mjs`（检查更新用的假 GitHub） |
+| `tools/e2e/` | 静默的端到端测试：`acceptance.mjs`（多轮验收）、`e2e.mjs`（测试实例、管道、截图）、`fake-github.mjs`（检查更新用的假 GitHub） |
 | `tools/demo.mjs` | 一键演示 |
 | `web/` | 网页版客户端（同一套功能的浏览器版本，演示服务器在 `/` 提供它）；`tools/check-web.mjs` 是它的验收 |
 | `assets/` | 图标（`tools/icon.mjs` 生成，与 foobar2k 同一款：深色底上的琥珀色圆环和播放符号）。`node tools/icon.mjs preview` 生成所有候选设计的对照图，`node tools/icon.mjs build <设计>` 换图标 |
@@ -136,7 +136,7 @@ powershell -File tools/package.ps1 -Arch x64 -Extract  # 一个架构，并把 M
 npm install
 dotnet test tests/Sonus.Core.Tests     # 114 项：队列逻辑、歌词、格式、令牌、服务器地址、检查更新、跨设备控制（两版，含测试向量在 PlayQueue 上重放）、接手旧名字的数据，以及对演示服务器的集成测试
 npm run check                                   # Windows 程序的多轮验收（本机架构；--arch=x64|ARM64）
-node tools/e2e/connect-v2.mjs                   # Connect 第 2 版：两个静默的测试实例，截图在 tools/e2e/.work/shots/c2-*.png
+SONUS_DEMO_CONNECT=1 node tools/e2e/acceptance.mjs --only=signin,devices,connect,browser   # 演示服务器只提供 Connect 第 1 版时（像今天的正式服务器）
 node --test tools/demo-server/connect-session.test.mjs tools/demo-server/connect2.test.mjs   # 第 2 版的会话逻辑、测试向量和演示服务器
 node tools/demo-server/connect-vectors.mjs --check                                           # 测试向量和会话逻辑一致
 npm run check:web                               # 网页版客户端
@@ -144,7 +144,7 @@ npm run check:web                               # 网页版客户端
 
 `npm run check`（`tools/e2e/acceptance.mjs`）和 Lumen 的 tools/e2e 用同样的做法，**全程静默**：
 
-- 测试实例有自己的数据目录和凭据条目 `Sonus-test:server`，不碰你自己的程序和登录。测试从旧名字升级时用的是 `CreeperUXMusic-test:*`，也不碰你自己的 `CreeperUXMusic:*`。
+- 测试实例有自己的数据目录和凭据条目 `Sonus-test-<编号>:server`，不碰你自己的程序和登录（你的是 `Sonus:server`）。编号由这份代码所在文件夹（`tools/e2e/.work`）算出：同一次验收里的几个测试实例共用它（第二台设备用第一台的登录），两份代码（两个工作区）同时跑测试也互不干扰。测试从旧名字升级时用的是 `CreeperUXMusic-test-<编号>:*`，也不碰你自己的 `CreeperUXMusic:*`。
 - 检查更新连的是本地的假 GitHub（`tools/e2e/fake-github.mjs`），测试实例只在点「检查更新」时才查（启动时不自动查），下载并校验安装程序后不会运行它。
 - 窗口被 DWM 隐藏（照常渲染，但不显示、不进任务栏、不抢焦点）。所有操作都通过命名管道走程序内的测试通道，按无障碍名称找控件，不移动鼠标、不按键盘。
 - 截图由程序自己渲染（RenderTargetBitmap），保存在 `tools/e2e/.work/shots/acc-*.png`。每一轮结束都检查测试窗口仍然隐藏，并且没有成为前台窗口。
@@ -155,7 +155,7 @@ npm run check:web                               # 网页版客户端
 
 验收里还有一项“播放时打开别的专辑，封面照样马上去取”：XAML 自带的图片下载走 WinINet，和从同一台服务器传来的音频流共用很少的几个连接，播放期间封面会一直加载不出来。现在封面由程序自己下载（`Controls/Covers.cs`，.NET HttpClient，同一地址只请求一次，最近用过的放在 48 MB 的内存缓存里），并按它在屏幕上实际占的像素（尺寸 × 显示缩放 × 界面缩放）向服务器要 64 / 128 / 256 / 512 / 1024 中够用的一档，不会把小图放大显示。
 
-验收分十四轮：首次启动与登录、每个页面（含可访问性审查和切换 60 次页面后的内存检查）、播放（暂停、拖动、计播放次数、无缝切歌、队列、电台、DSD 转码、错误、回放增益、歌词）、歌单增删改、搜索、第二台设备接着听、跨设备控制（两台设备互相看见、遥控暂停和播放、把播放转过来）、窄窗口、服务器断开与恢复、系统媒体控制、重启与退出登录、检查更新（不用令牌、请求不带凭据，正式版和测试版，下载并校验安装程序）、从 CreeperUX Music 升级（旧名字下的登录搬过来，不用重新登录；用不上的 GitHub 令牌删掉）、在浏览器中登录（允许、拒绝、取消，重启后用保存的 API 密钥登录，退出时把密钥还给服务器）。功能检查都会回读服务器状态来确认。
+验收分十四轮：首次启动与登录、每个页面（含可访问性审查和切换 60 次页面后的内存检查）、播放（暂停、拖动、计播放次数、无缝切歌、队列、电台、DSD 转码、错误、回放增益、歌词）、歌单增删改、搜索、第二台设备接着听（Connect 第 1 版或没有 Connect 时）、跨设备控制（服务器提供 Connect 第 2 版时：一个播放会话，第二台显示并遥控第一台、加歌、暂停、调第一台的音量、把播放转过来、断网后接着放、都关掉后从原处接着放；只有第 1 版时：两台设备互相看见、遥控暂停和播放、把播放转过来）、窄窗口、服务器断开与恢复、系统媒体控制、重启与退出登录、检查更新（不用令牌、请求不带凭据，正式版和测试版，下载并校验安装程序）、从 CreeperUX Music 升级（旧名字下的登录搬过来，不用重新登录；用不上的 GitHub 令牌删掉）、在浏览器中登录（允许、拒绝、取消，重启后用保存的 API 密钥登录，退出时把密钥还给服务器）。功能检查都会回读服务器状态来确认。
 演示服务器是按 Subsonic / OpenSubsonic 文档写的，**不是 Navidrome 本身**。
 
 ## 已知限制

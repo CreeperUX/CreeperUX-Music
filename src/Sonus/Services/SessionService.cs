@@ -30,6 +30,7 @@ public sealed class SessionService : IDisposable
         _client = new SessionClient(music.Client, settings.ConnectDeviceId!, name, "desktop", canPlay: true, $"Sonus {Updates.UpdateService.Current.ToString(3)} (Windows)")
         {
             Resume = ResumeState,
+            VolumeNow = () => (_music.Volume, _music.Muted),
         };
         _client.ConnectionChanged += on => _ui.TryEnqueue(() => OnConnection(on));
         _client.SessionChanged += () => _ui.TryEnqueue(Apply);

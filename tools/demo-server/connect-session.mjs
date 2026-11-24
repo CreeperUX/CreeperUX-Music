@@ -286,7 +286,8 @@ export class ConnectSession {
         id, name: isStr(msg.name) && msg.name.trim() ? msg.name.trim().slice(0, LIMITS.name) : old?.name ?? id,
         kind: KINDS.includes(msg.kind) ? msg.kind : 'other', client: isStr(msg.client) ? msg.client.slice(0, LIMITS.client) : old?.client ?? '',
         canPlay: typeof msg.canPlay === 'boolean' ? msg.canPlay : true,
-        connectedAt: old?.online ? old.connectedAt : t, volume: old?.volume ?? 1, muted: old?.muted ?? false, online: true, lastSeen: t,
+        connectedAt: old?.online ? old.connectedAt : t, online: true, lastSeen: t,
+        volume: isNum(msg.volume) ? Math.min(1, Math.max(0, msg.volume)) : old?.volume ?? 1, muted: typeof msg.muted === 'boolean' ? msg.muted : old?.muted ?? false,
       };
       this.devices.set(id, d);
       if (this.lastDevice?.id === id) this.lastDevice = { id, name: d.name };

@@ -15,6 +15,7 @@ hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "server-auto", "server-graceful", "http1", "http2", "tokio"] }
 ipnet = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 

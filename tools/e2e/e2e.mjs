@@ -1,11 +1,13 @@
 // Driving an isolated, silent test instance of the Windows app (the approach of Lumen's tools/e2e):
 // - built into tools/e2e/.work/build/<arch>, so a copy the user has open never locks the build;
-// - its own data folder (.work/data-<name>) and Credential Manager entry ("Sonus-test:server");
+// - its own data folder (.work/data-<name>), and a Credential Manager entry of this checkout's own ("Sonus-test-<run>:server",
+//   <run> made from the .work folder's path: the instances of one run share it, runs from two checkouts never meet);
 // - a cloaked window (rendered, never on screen, out of the taskbar, never activated), driven over a named pipe through
 //   the app's E2E channel (src/Sonus/Testing/E2EChannel.cs): controls are found by accessible name;
 // - screenshots with PrintWindow of the test window only (shot.ps1), and a quiet check after every round.
 // Nothing here moves the mouse, presses keys or brings a window to the front.
 import { spawn, execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { connect } from 'node:net';
 import { resolve, dirname, join } from 'node:path';
@@ -50,7 +52,7 @@ export class TestApp {
 
   async start() {
     if (!existsSync(this.exe)) throw new Error(`${this.exe} not built (node tools/e2e/acceptance.mjs builds it)`);
-    this.proc = spawn(this.exe, [], { env: { ...process.env, SONUS_E2E: this.pipe, SONUS_DATA_DIR: this.data, ...(this.demo ? { SONUS_DEMO: this.demo } : {}), ...this.env }, stdio: 'ignore' });
+    this.proc = spawn(this.exe, [], { env: { ...process.env, SONUS_E2E: this.pipe, SONUS_DATA_DIR: this.data, SONUS_TEST_CREDENTIAL: TEST_RUN, ...(this.demo ? { SONUS_DEMO: this.demo } : {}), ...this.env }, stdio: 'ignore' });
     this.pid = this.proc.pid;
     for (let i = 0; i < 150; i++) {
       try {
@@ -123,19 +125,22 @@ export class TestApp {
 }
 
 // the test instances' Credential Manager entries: the sign-in ("server"; up to 0.5.0 also "github", the token updates
-// needed while the repository was private, which the app now deletes)
-export const TEST_CREDENTIAL = 'Sonus-test:server';
-const testCredential = name => `Sonus-test:${name}`;
+// needed while the repository was private, which the app now deletes). They carry this checkout's run name (the app reads
+// SONUS_TEST_CREDENTIAL): all instances of a run share the sign-in (a second device signs in with the first one's), and two
+// checkouts testing at the same time never see, write or delete each other's. The user's own "Sonus:server" is never touched.
+export const TEST_RUN = createHash('sha1').update(work.toLowerCase()).digest('hex').slice(0, 8);
+export const testCredential = name => `Sonus-test-${TEST_RUN}:${name}`;
+export const TEST_CREDENTIAL = testCredential('server');
 export const credentialKept = (name = 'server') => { try { return execFileSync('cmdkey', ['/list'], { encoding: 'utf8' }).includes(`target=${testCredential(name)}`); } catch { return false; } };
 export const forgetCredential = (name = 'server') => { try { execFileSync('cmdkey', [`/delete:${testCredential(name)}`], { stdio: 'ignore' }); } catch { /* none */ } };
 
 // the same entries as CreeperUX Music (the app's name up to 0.3) named them: Sonus takes those over when it starts
-const formerCredential = name => `CreeperUXMusic-test:${name}`;
+export const formerCredential = name => `CreeperUXMusic-test-${TEST_RUN}:${name}`;
 export const formerCredentialKept = name => { try { return execFileSync('cmdkey', ['/list'], { encoding: 'utf8' }).includes(`target=${formerCredential(name)}`); } catch { return false; } };
 export const forgetFormerCredential = name => { try { execFileSync('cmdkey', [`/delete:${formerCredential(name)}`], { stdio: 'ignore' }); } catch { /* none */ } };
 /** Saves a test entry as CreeperUX Music did (a generic credential, the value as UTF-16), with CredWrite as the app does. */
 export const writeFormerCredential = (name, user, value) => writeEntry(formerCredential(name), user, value);
-/** The same under the test instances' own name (Sonus-test:<name>), as an earlier version left it. */
+/** The same under the test instances' own name (Sonus-test-<run>:<name>), as an earlier version left it. */
 export const writeCredential = (name, user, value) => writeEntry(testCredential(name), user, value);
 function writeEntry(target, user, value) {
   const script = `$ErrorActionPreference = 'Stop'

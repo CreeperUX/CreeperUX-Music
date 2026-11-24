@@ -39,6 +39,9 @@ public sealed class AppSettings
     /// <summary>Offer test versions (GitHub pre-releases) too.</summary>
     public bool UpdatePrerelease { get; set; }
     public DateTime? LastUpdateCheck { get; set; }
+    /// <summary>This installation's own id in Sonus Connect, made once and kept: after a reconnect or a restart it is the
+    /// same device.</summary>
+    public string? ConnectDeviceId { get; set; }
 
     private static string FilePath => Path.Combine(AppPaths.DataDirectory, "settings.json");
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = true };

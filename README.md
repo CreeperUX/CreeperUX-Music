@@ -25,6 +25,7 @@ npm run demo             # 演示服务器 + Windows 程序（第一次会先编
 值得试的地方：
 
 - 双击任意歌曲播放，拖进度条；一首播完会无缝接上下一首（下一首在 MediaPlaybackList 里提前载入）。
+- 放不出来的歌（比如服务器上文件丢了）会像 Spotify 一样跳过，并提示是哪一首；连续 5 首都放不出来才停下，播放键变成“重试”。
 - 键盘上的播放、暂停、上一首、下一首键，以及音量浮窗里的媒体卡片都能控制它。
 - 歌曲的“更多选项”→ **开始电台**：从这首歌开始，接着是相似的歌。
 - 艺人页底部的**简介**；右栏的歌词卡片和“全屏查看歌词”。
@@ -45,7 +46,23 @@ npm run demo             # 演示服务器 + Windows 程序（第一次会先编
 
 ## 跨设备控制（Sonus Connect）
 
-像 Spotify Connect 一样：播放条右侧的“设备”按钮列出同一账号下在线的设备，以及它们各自在放什么。
+像 Spotify Connect 一样。服务器的 OpenSubsonic 扩展 `sonusConnect` 列出第 2 版时用第 2 版（协议见 `docs/protocol/connect.md`）；只列出第 1 版时（今天的改版 Navidrome）用第 1 版；都没有时只在本机播放，“设备”按钮不出现，其余功能不受影响。
+
+### 第 2 版：一个账号一个播放会话，保存在服务器上
+
+- 同一账号同时只有一台设备出声（正在出声的设备）。每台设备一打开就显示这个会话：放的哪首、进度实时走、在哪台放。播放条和右栏写着琥珀色的“正在「手机」上播放”；都不放时写“上次在「书房电脑」播放”。
+- 在任何一台点歌、加队列、切歌、拖进度、改随机 / 循环、播完停止，都作用于这一个会话，正在出声的那台跟着变；队列只有一份。
+- 只有播放条右侧的“设备”按钮能换出声的设备：选一台（包括“这台电脑”），播放从同一首、同一位置转过去，原来那台立刻停下，变成遥控器。
+- 设备列表里每台设备下面有自己的音量条：音量属于每台设备，任何一台都能调任何一台的。播放条上的音量、静音和 Ctrl + ↑ ↓ 调的是正在出声的那台。
+- 都关掉后会话留在服务器上：哪台按播放，就从原处接着放，并成为出声的设备。所以第 2 版不再有启动时的“接着上次听”提示，也不再用 `savePlayQueue` / `getPlayQueue`。
+- 出声的设备断网时照样播放，自己重连（1 秒起，每次加倍，最多 30 秒）：10 秒内回来仍是出声的设备；更晚回来、而会话在这期间没变时，凭 `resume` 接着当出声的设备。服务器那边等满 10 秒就把会话停在断线时的位置。断网期间这台只能暂停、播放、拖进度，其余操作提示稍后再试。在出声的设备上关掉程序或退出登录不算断网（连接是正常关闭的）：会话立刻停在原处，别的设备马上就能接着放。
+- 每台设备第一次连上时生成自己的设备 id，存在数据目录的 `settings.json` 里（`ConnectDeviceId`），重连、重启后还是同一台设备。
+- 播放次数（scrobble）由出声的设备上报，和以前一样。
+- 服务器端的会话逻辑先在演示服务器里写成参考实现：`tools/demo-server/connect-session.mjs`（队列与程序的 `PlayQueue.cs` 一致），它的测试和测试向量 `docs/protocol/connect-vectors.json` 以后同样用来检验 Rust 服务器。改版 Navidrome 还没有第 2 版。演示服务器在 `rest/connect?protocol=2` 提供它；环境变量 `SONUS_DEMO_CONNECT=1` 让演示服务器只列出第 1 版（程序就退回第 1 版），`SONUS_DEMO_CONNECT_STORE=<文件>` 让会话在演示服务器重启后还在。
+
+### 第 1 版：遥控另一台设备
+
+播放条右侧的“设备”按钮列出同一账号下在线的设备，以及它们各自在放什么。每台设备各放各的。
 
 - 选中另一台设备后，播放条显示那台设备在放的歌（下面一行琥珀色的“正在「…」上播放”），播放、暂停、上一首、下一首、拖动进度、音量，以及空格和 Ctrl + 方向键，控制的都是那台设备。
 - 选中时，如果当前这台正在播放，播放会转过去（对方从同一首歌、同一位置接着放，这边停下）；如果这台暂停着、对方又空闲，也会转过去（到对方那里同样是暂停）；其他情况只遥控，不打断对方正在放的东西。选回“这台电脑”时同理。
@@ -65,10 +82,11 @@ npm run demo             # 演示服务器 + Windows 程序（第一次会先编
 | 喜欢 | 服务器 | `star` / `unstar`；“我喜欢的音乐”就是收藏的歌 |
 | 歌单 | 服务器 | `getPlaylists`、`createPlaylist`（新建，或整体覆盖用于排序）、`updatePlaylist`、`deletePlaylist`；别人的歌单只能播放 |
 | 封面、歌词、搜索 | 服务器 | `getCoverArt`、`getLyricsBySongId`（同步歌词）/ `getLyrics`、`search3` |
-| 换设备接着听 | 服务器存档 | 换歌、暂停、拖动、每 30 秒和关窗时 `savePlayQueue`；启动和窗口回到前台时 `getPlayQueue` |
-| 跨设备控制 | 服务器转发（CreeperUX 改版 Navidrome） | `rest/connect`（WebSocket，OpenSubsonic 扩展 `sonusConnect`）：设备列表、播放状态、遥控命令、转移播放 |
+| 换设备接着听 | 服务器存档 | Connect 第 2 版：会话本身就在服务器上。第 1 版和没有 Connect 时：换歌、暂停、拖动、每 30 秒和关窗时 `savePlayQueue`；启动和窗口回到前台时 `getPlayQueue` |
+| 跨设备控制 | 服务器（OpenSubsonic 扩展 `sonusConnect`） | 第 2 版：`rest/connect?protocol=2`（WebSocket）：会话、队列、设备、命令、出声设备的报告（演示服务器；Rust 服务器以后实现）。第 1 版：`rest/connect`（CreeperUX 改版 Navidrome）：设备列表、播放状态、遥控命令、转移播放 |
 | 歌曲电台、艺人简介 | 服务器 | `getSimilarSongs2`、`getArtistInfo2` |
-| 队列、播放顺序、播完停止、回放增益、输出设备 | 程序 | — |
+| 队列、播放顺序、播完停止 | 程序；Connect 第 2 版时是服务器上的会话（逻辑和程序的 `PlayQueue` 一样） | — |
+| 回放增益、输出设备 | 程序 | — |
 | 和其他设备同步 | — | 窗口回到前台（间隔一分钟以上）和每次刷新时重读歌单；歌曲数变了就重读曲库 |
 
 ## 结构
@@ -79,7 +97,7 @@ npm run demo             # 演示服务器 + Windows 程序（第一次会先编
 | `src/Sonus` | WinUI 3 程序：`Services/MusicService.cs`（状态与操作）、`Playback/AudioEngine.cs`（MediaPlayer，全部在自己的线程上调用）、`MainWindow`（顶栏、三栏、播放条）、`Pages/`、`Controls/`、`Testing/E2EChannel.cs`（测试通道） |
 | `tests/Sonus.Core.Tests` | 核心库测试（xUnit）：单元测试 + 对演示服务器的集成测试 |
 | `server/` | Sonus 服务器（Rust，AGPL-3.0，正在开发）：先作为网关挡在冻结版 Navidrome 前面，再逐块接管。见 `server/README.md` 和路线图 `docs/server-roadmap.md` |
-| `tools/demo-server/` | 演示服务器：`demo-server.mjs`（API）、`catalogue.mjs`（虚构曲库）、`synth.mjs`（合成音乐）、`connect.mjs`（跨设备控制）、`covers/`（封面 JPEG） |
+| `tools/demo-server/` | 演示服务器：`demo-server.mjs`（API）、`catalogue.mjs`（虚构曲库）、`synth.mjs`（合成音乐）、`connect.mjs`（跨设备控制第 1 版）、`connect2.mjs` 和 `connect-session.mjs`（第 2 版：WebSocket 和会话逻辑）、`connect-vectors.mjs`（生成测试向量）、`covers/`（封面 JPEG） |
 | `src/Sonus.Setup` | 安装程序窗口（WPF，和 Lumen 的一样）：里面带着 MSI，关掉 Windows Installer 自己的界面来运行它 |
 | `installer/` | MSI（WiX v5，`Package.wxs`）：按用户安装、开始菜单快捷方式 |
 | `docs/release-notes/` | 每个版本的说明，发布时作为 GitHub Release 的正文（程序的更新对话框也显示它） |
@@ -116,14 +134,17 @@ powershell -File tools/package.ps1 -Arch x64 -Extract  # 一个架构，并把 M
 
 ```bash
 npm install
-dotnet test tests/Sonus.Core.Tests     # 105 项：队列逻辑、歌词、格式、令牌、服务器地址、检查更新、跨设备控制、接手旧名字的数据，以及对演示服务器的集成测试
+dotnet test tests/Sonus.Core.Tests     # 114 项：队列逻辑、歌词、格式、令牌、服务器地址、检查更新、跨设备控制（两版，含测试向量在 PlayQueue 上重放）、接手旧名字的数据，以及对演示服务器的集成测试
 npm run check                                   # Windows 程序的多轮验收（本机架构；--arch=x64|ARM64）
+SONUS_DEMO_CONNECT=1 node tools/e2e/acceptance.mjs --only=signin,devices,connect,browser   # 演示服务器只提供 Connect 第 1 版时（像今天的正式服务器）
+node --test tools/demo-server/connect-session.test.mjs tools/demo-server/connect2.test.mjs   # 第 2 版的会话逻辑、测试向量和演示服务器
+node tools/demo-server/connect-vectors.mjs --check                                           # 测试向量和会话逻辑一致
 npm run check:web                               # 网页版客户端
 ```
 
 `npm run check`（`tools/e2e/acceptance.mjs`）和 Lumen 的 tools/e2e 用同样的做法，**全程静默**：
 
-- 测试实例有自己的数据目录和凭据条目 `Sonus-test:server`，不碰你自己的程序和登录。测试从旧名字升级时用的是 `CreeperUXMusic-test:*`，也不碰你自己的 `CreeperUXMusic:*`。
+- 测试实例有自己的数据目录和凭据条目 `Sonus-test-<编号>:server`，不碰你自己的程序和登录（你的是 `Sonus:server`）。编号由这份代码所在文件夹（`tools/e2e/.work`）算出：同一次验收里的几个测试实例共用它（第二台设备用第一台的登录），两份代码（两个工作区）同时跑测试也互不干扰。测试从旧名字升级时用的是 `CreeperUXMusic-test-<编号>:*`，也不碰你自己的 `CreeperUXMusic:*`。
 - 检查更新连的是本地的假 GitHub（`tools/e2e/fake-github.mjs`），测试实例只在点「检查更新」时才查（启动时不自动查），下载并校验安装程序后不会运行它。
 - 窗口被 DWM 隐藏（照常渲染，但不显示、不进任务栏、不抢焦点）。所有操作都通过命名管道走程序内的测试通道，按无障碍名称找控件，不移动鼠标、不按键盘。
 - 截图由程序自己渲染（RenderTargetBitmap），保存在 `tools/e2e/.work/shots/acc-*.png`。每一轮结束都检查测试窗口仍然隐藏，并且没有成为前台窗口。
@@ -134,7 +155,7 @@ npm run check:web                               # 网页版客户端
 
 验收里还有一项“播放时打开别的专辑，封面照样马上去取”：XAML 自带的图片下载走 WinINet，和从同一台服务器传来的音频流共用很少的几个连接，播放期间封面会一直加载不出来。现在封面由程序自己下载（`Controls/Covers.cs`，.NET HttpClient，同一地址只请求一次，最近用过的放在 48 MB 的内存缓存里），并按它在屏幕上实际占的像素（尺寸 × 显示缩放 × 界面缩放）向服务器要 64 / 128 / 256 / 512 / 1024 中够用的一档，不会把小图放大显示。
 
-验收分十四轮：首次启动与登录、每个页面（含可访问性审查和切换 60 次页面后的内存检查）、播放（暂停、拖动、计播放次数、无缝切歌、队列、电台、DSD 转码、错误、回放增益、歌词）、歌单增删改、搜索、第二台设备接着听、跨设备控制（两台设备互相看见、遥控暂停和播放、把播放转过来）、窄窗口、服务器断开与恢复、系统媒体控制、重启与退出登录、检查更新（不用令牌、请求不带凭据，正式版和测试版，下载并校验安装程序）、从 CreeperUX Music 升级（旧名字下的登录搬过来，不用重新登录；用不上的 GitHub 令牌删掉）、在浏览器中登录（允许、拒绝、取消，重启后用保存的 API 密钥登录，退出时把密钥还给服务器）。功能检查都会回读服务器状态来确认。
+验收分十四轮：首次启动与登录、每个页面（含可访问性审查和切换 60 次页面后的内存检查）、播放（暂停、拖动、计播放次数、无缝切歌、队列、电台、DSD 转码、错误、回放增益、歌词）、歌单增删改、搜索、第二台设备接着听（Connect 第 1 版或没有 Connect 时）、跨设备控制（服务器提供 Connect 第 2 版时：一个播放会话，第二台显示并遥控第一台、加歌、暂停、调第一台的音量、把播放转过来、断网后接着放、都关掉后从原处接着放；只有第 1 版时：两台设备互相看见、遥控暂停和播放、把播放转过来）、窄窗口、服务器断开与恢复、系统媒体控制、重启与退出登录、检查更新（不用令牌、请求不带凭据，正式版和测试版，下载并校验安装程序）、从 CreeperUX Music 升级（旧名字下的登录搬过来，不用重新登录；用不上的 GitHub 令牌删掉）、在浏览器中登录（允许、拒绝、取消，重启后用保存的 API 密钥登录，退出时把密钥还给服务器）。功能检查都会回读服务器状态来确认。
 演示服务器是按 Subsonic / OpenSubsonic 文档写的，**不是 Navidrome 本身**。
 
 ## 已知限制

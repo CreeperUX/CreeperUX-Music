@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Sonus.Core;
+using Sonus.Core.Connect;
 using Sonus.Playback;
 using Microsoft.UI.Dispatching;
 
@@ -14,6 +15,9 @@ public sealed record ToastMessage(string Text, bool IsError = false, string? Act
 /// Everything the window shows and does with the music: the server (client), the library and playlists, the queue, the
 /// player. Lives on the UI thread; every event is raised there. Pages read it and call it. What it shows is what the server
 /// and the engine report, except a like: that shows at once and goes back if the server refuses it.
+/// With Sonus Connect version 2 (<see cref="Session"/>) the queue and what plays are the user's session on the server: the
+/// actions below become its commands, what it shows is the session, and the engine plays only while this device is the
+/// session's active device.
 /// </summary>
 public sealed class MusicService : IDisposable
 {
@@ -36,7 +40,7 @@ public sealed class MusicService : IDisposable
         Engine = new AudioEngine(ui) { Volume = settings.Volume, Muted = settings.Muted };
         Engine.StateChanged += OnEngineState;
         Engine.Advanced += OnAdvanced;
-        Engine.Ended += () => { if (Queue.Next(ended: true) is { } id) Load(id, autoplay: true); else Stop(); };
+        Engine.Ended += OnEnded;
         Engine.NextRequested += () => Next();
         Engine.PreviousRequested += () => Previous();
         Queue.Changed += (_, _) => { QueueChanged?.Invoke(); RefreshPreload(); ScheduleSave(); };
@@ -78,7 +82,7 @@ public sealed class MusicService : IDisposable
     public PlayerState State { get; private set; } = PlayerState.Stopped;
     public string? Error { get; private set; }
     public double Position { get; private set; }
-    public double Duration => Engine.Duration ?? Current?.Duration ?? 0;
+    public double Duration => Elsewhere ? (_session is { DurationMs: > 0 } s ? s.DurationMs / 1000.0 : Current?.Duration ?? 0) : Engine.Duration ?? Current?.Duration ?? 0;
     public double Volume { get; private set; }
     public bool Muted => Engine.Muted;
     public ReplayGainMode ReplayGain { get; private set; }
@@ -217,6 +221,8 @@ public sealed class MusicService : IDisposable
 
     public void Play(PlayContext context, IReadOnlyList<string> ids, string? trackId = null, bool shuffle = false)
     {
+        if (Session is { } session) { session.PlayContext(context, ids, trackId, shuffle); return; }
+        _failures = 0;
         if (Queue.Start(context, ids, trackId, shuffle) is { } start)
         {
             SaveOrder();
@@ -253,22 +259,44 @@ public sealed class MusicService : IDisposable
         _started = DateTimeOffset.Now;
         Position = at;
         Error = null;
-        var next = Queue.Peek() is { } n && n != trackId && Library.Track(n) is { } nt ? ItemFor(nt) : null;
         ApplyVolume(t);
-        Engine.Load(ItemFor(t, at), next, autoplay);
+        Engine.Load(ItemFor(t, at), PreloadFor(trackId), autoplay);
         SetState(autoplay ? PlayerState.Loading : PlayerState.Paused);
         PositionChanged?.Invoke(at);
     }
 
+    /// <summary>What to load after <paramref name="current"/>: what the queue (or the session) says follows.</summary>
+    private EngineItem? PreloadFor(string current) =>
+        (Session is not null ? _session?.Next : Queue.Peek()) is { } n && n != current && Library.Track(n) is { } nt ? ItemFor(nt) : null;
+
     private void RefreshPreload()
     {
         if (Current is null || Engine.CurrentId != Queue.Current) return;
-        var next = Queue.Peek() is { } n && n != Queue.Current && Library.Track(n) is { } nt ? ItemFor(nt) : null;
-        Engine.SetNext(next);
+        Engine.SetNext(PreloadFor(Queue.Current!));
+    }
+
+    private void OnEnded()
+    {
+        if (Session is { } s) { if (s.IsActiveHere && _engineKey is { } key) s.Report("ended", key, Duration); return; } // the session says what follows
+        if (Queue.Next(ended: true) is { } id) Load(id, autoplay: true); else Stop();
     }
 
     private void OnAdvanced(string id)
     {
+        if (Session is { } s)
+        {
+            // the engine went on by itself to the preloaded song (gapless): the session moves there on the report
+            if (!s.IsActiveHere) return;
+            if (_engineKey is { } key) s.Report("ended", key, Duration);
+            _advancedTo = id;
+            if (!s.IsConnected && Queue.Peek() == id) Queue.Next(ended: true); // shown at once while the server can't be told
+            _counted = false;
+            _started = DateTimeOffset.Now;
+            ApplyVolume(Library.Track(id));
+            SetState(PlayerState.Playing);
+            NowPlaying(Library.Track(id));
+            return;
+        }
         // The engine moved on by itself (gapless): move the queue there too, then load what comes after
         if (Queue.Peek() == id) Queue.Next(ended: true);
         else if (Queue.Current != id) { Load(Queue.Next(ended: true) ?? id, autoplay: true); return; }
@@ -284,26 +312,58 @@ public sealed class MusicService : IDisposable
         switch (Engine.State)
         {
             case EngineState.Playing:
+                _failures = 0;
                 bool started = State is PlayerState.Loading;
                 SetState(PlayerState.Playing);
                 if (started) NowPlaying();
+                SayHere("playing");
                 break;
-            case EngineState.Paused: SetState(PlayerState.Paused); ScheduleSave(soon: true); break;
+            case EngineState.Paused: SetState(PlayerState.Paused); ScheduleSave(soon: true); SayHere("paused"); break;
             case EngineState.Loading: SetState(PlayerState.Loading); break;
-            case EngineState.Error: SetState(PlayerState.Error, $"无法播放“{Current?.Title}”：{Engine.Error}"); break;
+            case EngineState.Error:
+                if (Session is null && SkipUnplayable()) break;
+                SetState(PlayerState.Error, $"无法播放“{Current?.Title}”：{Engine.Error}");
+                SayHere("failed"); // with a session: the server skips it and says so
+                break;
             case EngineState.Stopped when State is not PlayerState.Error: break; // Ended decides what follows
         }
     }
 
-    private void NowPlaying()
+    private int _failures; // songs in a row that could not play
+
+    /// <summary>A song that can't play is skipped, as Spotify does (the next song: repeat one does not loop on it), with a
+    /// toast that names it; after five in a row, or at the end, it stops on the error with 重试. True when it skipped.</summary>
+    private bool SkipUnplayable()
     {
-        if (Current is { } t) _ = Quietly(() => Client.ScrobbleAsync(t.Id, submission: false));
+        string name = Current is { } t ? $"“{t.Title}”" : "这首歌";
+        if (++_failures >= 5)
+        {
+            Toast?.Invoke(new($"无法播放{name}；连续 {_failures} 首都无法播放，已停止播放。", true));
+            return false;
+        }
+        if (Queue.Next() is not { } next) return false;
+        Toast?.Invoke(new($"无法播放{name}，已跳到下一首。"));
+        Load(next, autoplay: true);
+        return true;
+    }
+
+    private void NowPlaying(Track? song = null)
+    {
+        if ((song ?? Current) is { } t) _ = Quietly(() => Client.ScrobbleAsync(t.Id, submission: false));
         ScheduleSave(soon: true);
     }
 
     private void OnTick()
     {
-        if (_disposed || State != PlayerState.Playing) return;
+        if (_disposed) return;
+        if (Elsewhere)
+        {
+            // another device plays (or none): the session's position, moving on while it plays there
+            if (State == PlayerState.Playing && _session is { } s) { Position = s.PositionAt(Session!.ServerNow) / 1000.0; PositionChanged?.Invoke(Position); }
+            return;
+        }
+        if (Session is not null && _sayPositionAt > 0 && Environment.TickCount64 >= _sayPositionAt) { _sayPositionAt = 0; SayHere("position"); } // a seek done
+        if (State != PlayerState.Playing) return;
         Position = Engine.Position;
         PositionChanged?.Invoke(Position);
         double d = Duration;
@@ -313,6 +373,7 @@ public sealed class MusicService : IDisposable
             _ = CountPlay(t, _started);
         }
         if (DateTimeOffset.Now - _savedAt > TimeSpan.FromSeconds(30)) ScheduleSave(soon: true); // the position, for another device
+        if (Session is not null && Environment.TickCount64 - _saidAt > 30_000) SayHere("position"); // at least every 30 s
     }
 
     private async Task CountPlay(Track t, DateTimeOffset started)
@@ -327,20 +388,38 @@ public sealed class MusicService : IDisposable
         catch (Exception ex) when (ex is ServerUnreachableException or SubsonicException) { Log.Write($"scrobble: {ex.Message}"); }
     }
 
-    public void Pause() { Engine.Pause(); SetState(PlayerState.Paused); ScheduleSave(soon: true); }
+    public void Pause()
+    {
+        if (Command("pause", engineOffline: true)) return;
+        Engine.Pause(); SetState(PlayerState.Paused); ScheduleSave(soon: true);
+    }
 
     public void Resume()
     {
+        if (Session is { } s)
+        {
+            // a song that failed here: tried again here
+            if (s.IsActiveHere && State == PlayerState.Error && Queue.Current is { } again) { Load(again, autoplay: true, at: Position); return; }
+            if (Command("play", engineOffline: true)) return;
+        }
         if (Queue.Current is not { } id) return;
+        _failures = 0;
         if (State is PlayerState.Error or PlayerState.Stopped || Engine.CurrentId != id) { Load(id, autoplay: true, at: State == PlayerState.Stopped ? 0 : Position); return; }
         Engine.Play();
         SetState(PlayerState.Loading);
     }
 
-    public void Next() { if (Queue.Next() is { } id) Load(id, autoplay: true); else Stop(); }
+    public void Next()
+    {
+        if (Command("next")) return;
+        _failures = 0;
+        if (Queue.Next() is { } id) Load(id, autoplay: true); else Stop();
+    }
 
     public void Previous()
     {
+        if (Command("previous")) return; // the server goes back to the start more than 3 s in, as below
+        _failures = 0;
         if (Position > 3) { Seek(0); return; }
         if (Queue.Previous() is { } id) Load(id, autoplay: true); else Seek(0);
     }
@@ -355,6 +434,7 @@ public sealed class MusicService : IDisposable
 
     public void Seek(double seconds)
     {
+        if (Command("seek", new { positionMs = (long)(Math.Max(0, seconds) * 1000) }, engineOffline: true)) { Position = Math.Max(0, seconds); PositionChanged?.Invoke(Position); return; }
         Position = Math.Clamp(seconds, 0, Duration > 0 ? Duration : seconds);
         Engine.Seek(Position);
         PositionChanged?.Invoke(Position);
@@ -386,6 +466,7 @@ public sealed class MusicService : IDisposable
 
     public void SetOrder(PlaybackOrder order)
     {
+        if (Session is { } s) { s.SetMode(order); return; } // the session's order (the setting stays this device's own)
         Queue.SetOrder(order); // the queue keeps the context's own order (search results, a radio) to come back to
         SaveOrder();
         PlayerChanged?.Invoke();
@@ -393,7 +474,11 @@ public sealed class MusicService : IDisposable
 
     private void SaveOrder() { _settings.Order = Queue.Order; _settings.Save(); }
 
-    public void SetStopAfterCurrent(bool on) { Queue.StopAfterCurrent = on; RefreshPreload(); PlayerChanged?.Invoke(); }
+    public void SetStopAfterCurrent(bool on)
+    {
+        if (Command("stopAfterCurrent", new { on })) return;
+        Queue.StopAfterCurrent = on; RefreshPreload(); PlayerChanged?.Invoke();
+    }
 
     public async Task SetOutputAsync(string deviceId)
     {
@@ -410,10 +495,10 @@ public sealed class MusicService : IDisposable
     }
 
     // ---------------------------------------------------------------- the queue
-    public void QueueAdd(IEnumerable<string> ids, bool next = false) => Queue.Add(ids, next);
-    public void QueueRemove(IEnumerable<string> entryIds) => Queue.Remove(entryIds);
-    public void QueueClear(bool manual) => Queue.Clear(manual);
-    public void QueueJump(string entryId) { if (Queue.Jump(entryId) is { } id) Load(id, autoplay: true); }
+    public void QueueAdd(IEnumerable<string> ids, bool next = false) { if (!Command("add", new { ids = ids.ToList(), next })) Queue.Add(ids, next); }
+    public void QueueRemove(IEnumerable<string> entryIds) { if (!Command("remove", new { entries = entryIds.ToList() })) Queue.Remove(entryIds); }
+    public void QueueClear(bool manual) { if (!Command("clear", new { manual })) Queue.Clear(manual); }
+    public void QueueJump(string entryId) { if (!Command("jump", new { entry = entryId }) && Queue.Jump(entryId) is { } id) { _failures = 0; Load(id, autoplay: true); } }
 
     /// <summary>A radio from a song: the song, then similar ones from the server (without Last.fm there: songs of the same
     /// artist or genre from the library).</summary>
@@ -432,7 +517,7 @@ public sealed class MusicService : IDisposable
     // ---------------------------------------------------------------- continue on another device
     private void ScheduleSave(bool soon = false)
     {
-        if (Queue.Current is null) return;
+        if (Queue.Current is null || Session is not null) return; // with a session the server keeps it (rule 6)
         _saveTimer ??= _ui.CreateTimer();
         _saveTimer.Stop();
         _saveTimer.Interval = TimeSpan.FromMilliseconds(soon ? 1 : 1500);
@@ -454,7 +539,7 @@ public sealed class MusicService : IDisposable
     /// <summary>Saves the queue now (the window is closing).</summary>
     public async Task SaveQueueNowAsync()
     {
-        if (Queue.Current is not { } current || State == PlayerState.Stopped) return;
+        if (Queue.Current is not { } current || State == PlayerState.Stopped || Session is not null) return;
         try { await Client.SavePlayQueueAsync(Queue.ForServer(), current, Engine.Position).WaitAsync(TimeSpan.FromSeconds(2)); }
         catch (Exception ex) { Log.Write($"queue not saved on close: {ex.Message}"); }
     }
@@ -482,6 +567,123 @@ public sealed class MusicService : IDisposable
         if (current is null || Queue.Adopt(context, ids, current) is not { } id) return false;
         Load(id, autoplay: play, at: Math.Max(0, position));
         return true;
+    }
+
+    // ---------------------------------------------------------------- Sonus Connect version 2: the session
+    /// <summary>The user's playback session on the server (Sonus Connect version 2), when the server offers it.</summary>
+    public SessionService? Session { get; private set; }
+    internal void AttachSession(SessionService session) => Session = session;
+
+    private PlaybackSession? _session;   // the session as last applied
+    private string? _engineKey;          // the session entry the engine has loaded
+    private string? _advancedTo;         // the song the engine went on to by itself (gapless), until the session follows
+    private bool _loadedSaid;            // `loaded` was reported for _engineKey
+    private long _saidAt, _sayPositionAt;
+
+    /// <summary>With a session, another device plays it (or none does): this one shows it and its engine is silent.</summary>
+    private bool Elsewhere => Session is { } s && !s.IsActiveHere;
+
+    /// <summary>Where the session plays, for the bar and the panel ("正在「手机」上播放", "上次在「书房电脑」播放"); null while this
+    /// device plays it, or without a session.</summary>
+    public string? Where => Session?.Where;
+
+    /// <summary>The user's action as a command for the session (true: done that way). Without a connection the active
+    /// device does what its engine can do by itself (<paramref name="engineOffline"/>: pause, play, seek; false: the
+    /// caller does it, and the reports tell the server later); anything else waits a moment for the connection.</summary>
+    private bool Command(string action, object? fields = null, bool engineOffline = false)
+    {
+        if (Session is not { } s) return false;
+        if (!s.IsConnected && engineOffline && s.IsActiveHere) return false;
+        s.Send(action, fields);
+        return true;
+    }
+
+    /// <summary>The session changed: its queue is shown; this device's engine follows it while this is the active device,
+    /// and is stopped at once otherwise (rule 4).</summary>
+    internal void ApplySession(PlaybackSession s, SessionQueue q, bool here)
+    {
+        if (_disposed) return;
+        _session = s;
+        var context = s.Context is { } c ? new PlayContext(c.Kind ?? "queue", c.Id ?? "", c.Label ?? "") : null;
+        Queue.Mirror(context, q.Order, q.Pointer, q.Manual.Select(m => (m.Key, m.TrackId)).ToList(), s.Current?.TrackId, SessionModes.Parse(s.Mode), s.StopAfterCurrent);
+        if (here) FollowHere(s); else ShowElsewhere(s);
+        PlayerChanged?.Invoke();
+    }
+
+    private void ShowElsewhere(PlaybackSession s)
+    {
+        if (_engineKey is not null || Engine.CurrentId is not null) Engine.Stop(); // the device playback left stops at once
+        _engineKey = null; _advancedTo = null;
+        State = s.Current is null ? PlayerState.Stopped : s.Playing ? PlayerState.Playing : PlayerState.Paused;
+        Error = null;
+        Position = s.PositionAt(Session!.ServerNow) / 1000.0;
+        PositionChanged?.Invoke(Position);
+    }
+
+    /// <summary>The active device's engine made to match the session: the current entry loaded, the position (when more than
+    /// 1.5 s off), playing or paused, the next song preloaded.</summary>
+    private void FollowHere(PlaybackSession s)
+    {
+        if (s.Current is not { } cur)
+        {
+            if (_engineKey is not null) Engine.Stop();
+            _engineKey = null; _advancedTo = null; Position = 0;
+            SetState(PlayerState.Stopped);
+            return;
+        }
+        double want = s.PositionAt(Session!.ServerNow) / 1000.0;
+        if (cur.Key != _engineKey)
+        {
+            if (_advancedTo is not null && _advancedTo == cur.TrackId && Engine.CurrentId == cur.TrackId)
+            {
+                // the engine is there already (it went on by itself): only the entry is new
+                _engineKey = cur.Key; _advancedTo = null; _loadedSaid = false;
+                if (Engine.State == EngineState.Playing) SayHere("playing");
+            }
+            else
+            {
+                _engineKey = cur.Key; _advancedTo = null; _loadedSaid = false;
+                Load(cur.TrackId, autoplay: s.Playing, at: want);
+                if (State == PlayerState.Error) SayHere("failed"); // not in this library
+                return;
+            }
+        }
+        else if (_advancedTo is not null) return; // the session has not yet followed the engine to the next song
+        switch (Engine.State)
+        {
+            case EngineState.Error: return; // reported: the session moves on
+            case EngineState.Stopped:
+                // the song ended here: played again from the session's position when the session plays on (repeat one,
+                // play after the end); near its end the session has not yet heard of it
+                if (s.Playing && (Duration <= 0 || want < Duration - 2)) { Load(cur.TrackId, autoplay: true, at: want); return; }
+                if (!s.Playing) { Position = want; SetState(PlayerState.Paused); PositionChanged?.Invoke(want); }
+                return;
+        }
+        if (Engine.State != EngineState.Loading && Math.Abs(Engine.Position - want) > 1.5)
+        {
+            Engine.Seek(want);
+            Position = want;
+            PositionChanged?.Invoke(want);
+            _sayPositionAt = Environment.TickCount64 + 500;
+        }
+        if (s.Playing && Engine.State == EngineState.Paused) { Engine.Play(); SetState(PlayerState.Loading); }
+        else if (!s.Playing && Engine.State is EngineState.Playing or EngineState.Loading) { Engine.Pause(); SetState(PlayerState.Paused); }
+        RefreshPreload();
+    }
+
+    /// <summary>What the engine really did, for the session (the active device only): `loaded` first for a new entry.</summary>
+    private void SayHere(string evt)
+    {
+        if (Session is not { } s || !s.IsActiveHere || _engineKey is not { } key) return;
+        if (!_loadedSaid && evt != "failed")
+        {
+            _loadedSaid = true;
+            var t = Library.Track(Engine.CurrentId ?? Queue.Current);
+            s.Report("loaded", key, Engine.Position, Engine.Duration ?? t?.Duration,
+                t is null ? null : new SessionNow(t.Title, t.Artist, t.Album, t.AlbumId, Library.Album(t.AlbumId)?.CoverArt ?? t.CoverArt));
+        }
+        s.Report(evt, key, Engine.Position);
+        _saidAt = Environment.TickCount64;
     }
 
     // ---------------------------------------------------------------- likes and playlists

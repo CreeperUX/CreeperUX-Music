@@ -82,7 +82,8 @@ dotnet test tests/Sonus.Core.Tests; node tools/e2e/acceptance.mjs --arch=ARM64; 
 | 验收第 3 轮：DSD 请服务器转成 MP3 | `/__test/log` 的 streams | 代理；服务器没有 DSD 歌曲时跳过 |
 | 验收第 8 轮：服务器断开与恢复 | `/__test/offline` | 代理 |
 | 验收第 13 轮：在浏览器中登录（等待中的请求、允许、拒绝、发出的密钥） | `/__test/device` | 服务器自己的路由，就是允许页调用的那些：`/auth/login` 拿到网页登录，`GET /auth/device/{code}`，`POST /auth/device/{code}/approve`、`/deny`，`GET /auth/app-passwords`（应用密钥就是其中一个应用专用密码）。只比较这一轮新出现的密钥。 |
-| 验收第 13 轮：Connect 用应用密钥连上服务器 | `/__test/devices` | 代理记录的 Connect WebSocket：用 `apiKey` 登录、服务器回了 101、还开着 |
+| 验收第 13 轮：Connect 用应用密钥连上服务器 | `/__test/devices`（第 1 版）和 `/__test/connect2`（第 2 版） | 代理记录的 Connect WebSocket：用 `apiKey` 登录、服务器回了 101、还开着 |
+| 验收第 6b 轮（Connect 第 2 版）：断网超过 10 秒后用 resume 接着放 | `/__test/connect2/drop` | 没有：这一项跳过 |
 | 网页版：播过一半只计一次播放 | `/__test/log` 的 scrobbles | 代理 |
 | 网页版：下一首在这首放完前就请求 | `/__test/log` 的 streams | 代理 |
 | 网页版：DSD 请服务器转成 Opus | `/__test/log` 的 streams | 代理；没有 DSD 歌曲时跳过 |

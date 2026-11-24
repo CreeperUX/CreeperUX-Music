@@ -63,6 +63,20 @@ public sealed class PlayQueue(Func<string, Track?> lookup, Random? random = null
         return current;
     }
 
+    /// <summary>
+    /// Sonus Connect version 2: the queue as the server holds it (the server runs this same logic; the app shows its
+    /// result): the context in playback order, the pointer, the hand-queued songs with the server's keys, the current
+    /// song and the order. Changed is raised only when something differs.
+    /// </summary>
+    public void Mirror(PlayContext? context, IReadOnlyList<string> order, int pointer, IReadOnlyList<(string Key, string TrackId)> manual, string? current, PlaybackOrder playbackOrder, bool stopAfterCurrent)
+    {
+        if (Context == context && _pointer == pointer && Current == current && Order == playbackOrder && StopAfterCurrent == stopAfterCurrent
+            && _context.SequenceEqual(order) && _manual.SequenceEqual(manual)) return;
+        _context = [.. order]; _source = [.. order]; _pointer = pointer; _manual = [.. manual];
+        Context = context; Current = current; Order = playbackOrder; StopAfterCurrent = stopAfterCurrent;
+        Changed?.Invoke(this, EventArgs.Empty);
+    }
+
     /// <summary>The song that follows when the current one ends — what <see cref="Next"/>(ended: true) will return — without
     /// moving there (to load it early), or null when that is not a different song known now (stop after current, repeat one,
     /// random).</summary>

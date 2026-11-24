@@ -13,11 +13,14 @@ namespace Sonus.Controls;
 /// <summary>The bar along the bottom: the song (cover, title, artist, like), the transport (shuffle, previous, play, next,
 /// repeat) with the progress, and lyrics / queue / devices / output / volume. With Sonus Connect it can show and
 /// control another of the user's devices instead of this one (ConnectService.Target): the song, the position and the
-/// buttons are then that device's, and a line in the accent colour says which device plays.</summary>
+/// buttons are then that device's, and a line in the accent colour says which device plays. With version 2 (SessionService)
+/// the bar always shows the user's one session (MusicService follows it): the line says where it plays ("正在「手机」上播放",
+/// or "上次在「书房电脑」播放" when nothing plays), the devices button moves playback, and the volume is that device's.</summary>
 public sealed class PlaybackBar : UserControl
 {
     private readonly MusicService _music;
     private readonly ConnectService _connect;
+    private readonly SessionService? _session;
     private readonly IShell _shell;
     private readonly Artwork _art = new(56, false, Glyphs.Music, 4);
     private readonly HyperlinkButton _title, _artist;
@@ -40,6 +43,8 @@ public sealed class PlaybackBar : UserControl
     private bool _gliding;
 
     private ConnectDevice? Remote => _connect.Target;
+    /// <summary>Version 2: the device that plays the session when it is not this one (the volume is that device's).</summary>
+    private SessionDevice? VolumeTarget => _session?.ActiveElsewhere;
     /// <summary>The song shown: this device's, or the controlled device's when this library has it.</summary>
     private Track? Shown => Remote is { } r ? _music.Library.Track(r.State?.TrackId) : _music.Current;
 
@@ -84,9 +89,9 @@ public sealed class PlaybackBar : UserControl
         _ = _connect.SendAsync(with is null ? command : with(command));
     }
 
-    public PlaybackBar(MusicService music, ConnectService connect, IShell shell)
+    public PlaybackBar(MusicService music, ConnectService connect, SessionService? session, IShell shell)
     {
-        _music = music; _connect = connect; _shell = shell;
+        _music = music; _connect = connect; _session = session; _shell = shell;
         Height = 88; // the transport (40) and the progress row (32) between 8 px paddings
         // left: the song
         _title = Ui.Link("", () => { if (Shown is { } t) shell.Navigate($"album:{t.AlbumId}"); }, 14, Ui.Brush("TextPrimaryBrush"), bold: true);
@@ -151,19 +156,24 @@ public sealed class PlaybackBar : UserControl
         _queue.Click += (_, _) => QueueToggled?.Invoke(_queue.IsChecked == true);
         _devices = Ui.IconButton(Glyphs.Devices, "在其他设备上播放", null, 32, 15);
         _devices.Flyout = DevicesFlyout();
-        var devices = new Grid { Visibility = connect.IsAvailable ? Visibility.Visible : Visibility.Collapsed };
+        var devices = new Grid { Visibility = connect.IsAvailable || session is not null ? Visibility.Visible : Visibility.Collapsed };
         devices.Children.Add(_devices); devices.Children.Add(_devicesDot);
         var output = Ui.IconButton(Glyphs.Speaker, "输出设备", null, 32, 15);
         output.Flyout = OutputMenu();
-        _mute = Ui.IconButton(Glyphs.Volume, "静音", (_, _) => music.SetMuted(!music.Muted), 32, 15);
+        _mute = Ui.IconButton(Glyphs.Volume, "静音", (_, _) => { if (VolumeTarget is { } d) _session!.SetVolume(d.Id, null, !d.Muted); else music.SetMuted(!music.Muted); }, 32, 15);
         AutomationProperties.SetName(_volume, "音量");
         _volume.ValueChanged += (_, e) =>
         {
             if (_syncing) return;
-            if (Remote is null) music.SetVolume(e.NewValue / 100);
+            if (Remote is null && VolumeTarget is null) music.SetVolume(e.NewValue / 100);
             else { _volumeSend.Stop(); _volumeSend.Start(); } // dragging: the latest value, a few times a second
         };
-        _volumeSend.Tick += (_, _) => { _volumeSend.Stop(); if (Remote is not null) Send(ConnectCommand.Volume, c => c with { Level = _volume.Value / 100 }); };
+        _volumeSend.Tick += (_, _) =>
+        {
+            _volumeSend.Stop();
+            if (Remote is not null) Send(ConnectCommand.Volume, c => c with { Level = _volume.Value / 100 });
+            else if (VolumeTarget is { } d) _session!.SetVolume(d.Id, _volume.Value / 100); // rule 8: the device that plays
+        };
         // shuffle, repeat and mute are this device's own: while the bar controls another they are off, dimmed, with no plate
         var none = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
         foreach (var t in new[] { _shuffle, _repeat }) { t.Resources["ToggleButtonBackgroundDisabled"] = none; t.Resources["ToggleButtonBackgroundCheckedDisabled"] = none; }
@@ -193,6 +203,7 @@ public sealed class PlaybackBar : UserControl
             if (!_seeking && (!_gliding || Math.Abs(p - _progress.Value) > 1)) ShowPosition(p); // paused, or a jump: at once
         };
         connect.Changed += Sync;
+        if (session is not null) session.Changed += Sync;
         Loaded += (_, _) => Glide(Remote?.State?.Playing ?? _music.State == PlayerState.Playing);
         Unloaded += (_, _) => Glide(false);
         Sync();
@@ -255,12 +266,11 @@ public sealed class PlaybackBar : UserControl
             }
             var m = _music;
             string hereStatus = m.Current is { } t ? $"{(m.IsActive ? "正在播放" : "已暂停")} · {t.Title}" : "空闲";
-            list.Children.Add(Row(null, "这台电脑", Glyphs.Devices, hereStatus, m.IsActive, Remote is null));
+            list.Children.Add(Row("这台电脑", Glyphs.Devices, hereStatus, m.IsActive, Remote is null, () => _ = _connect.SelectAsync(null)));
             foreach (var d in _connect.Others)
             {
                 string status = d.State is { TrackId: not null } s ? $"{(s.Playing ? "正在播放" : "已暂停")} · {s.Title ?? m.Library.Track(s.TrackId)?.Title}" : "空闲";
-                string glyph = d.Kind switch { "phone" => Glyphs.Headphones, "speaker" => Glyphs.Speaker, _ => Glyphs.Devices };
-                list.Children.Add(Row(d, d.Name, glyph, status, d.State?.Playing == true, Remote?.Id == d.Id));
+                list.Children.Add(Row(d.Name, GlyphOf(d.Kind), status, d.State?.Playing == true, Remote?.Id == d.Id, () => _ = _connect.SelectAsync(d)));
             }
             if (_connect.Others.Count == 0)
             {
@@ -269,7 +279,7 @@ public sealed class PlaybackBar : UserControl
                 list.Children.Add(note);
             }
         }
-        Button Row(ConnectDevice? device, string name, string glyph, string status, bool playing, bool current)
+        Button Row(string name, string glyph, string status, bool playing, bool current, Action click)
         {
             var icon = Ui.Icon(glyph, 18, current ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextSecondaryBrush"));
             var title = Ui.Text(name, size: 14, foreground: current ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextPrimaryBrush"), bold: current);
@@ -292,13 +302,66 @@ public sealed class PlaybackBar : UserControl
             b.Resources["ButtonBackgroundPressed"] = Ui.Brush("HoverBrush");
             AutomationProperties.SetName(b, name);
             AutomationProperties.SetHelpText(b, status);
-            b.Click += async (_, _) => { flyout.Hide(); await _connect.SelectAsync(device); };
+            b.Click += (_, _) => { flyout.Hide(); click(); };
             return b;
         }
-        flyout.Opening += (_, _) => Fill();
-        _connect.Changed += () => { if (flyout.IsOpen) Fill(); };
+        // version 2: the session's devices; picking one moves playback there (a transfer), and each one's volume is here
+        string shown = "";
+        void FillSession(SessionService session)
+        {
+            var now = session.Session;
+            shown = $"{session.IsConnected}|{now.ActiveDevice}|{now.Playing}|{now.Current?.TrackId}|{string.Join(',', session.Devices.Select(d => d.Id + d.Name))}";
+            list.Children.Clear();
+            var heading = Ui.Text("在哪台设备上播放", size: 15, foreground: Ui.Brush("TextPrimaryBrush"), bold: true);
+            heading.Margin = new Thickness(8, 4, 8, 8);
+            list.Children.Add(heading);
+            if (!session.IsConnected)
+            {
+                var note = Ui.Note(Glyphs.Info, "正在连接服务器上的 Sonus Connect…");
+                note.Margin = new Thickness(8, 0, 8, 8);
+                list.Children.Add(note);
+                return;
+            }
+            string? title = _music.Current?.Title ?? now.Now?.Title;
+            string Status(string id, bool canPlay) => now.ActiveDevice == id ? $"{(now.Playing ? "正在播放" : "已暂停")}{(title is null ? "" : " · " + title)}" : canPlay ? "空闲" : "只能遥控";
+            FrameworkElement Device(string id, string name, string glyph, bool canPlay, double volume, bool muted)
+            {
+                bool active = now.ActiveDevice == id;
+                var row = Row(name, glyph, Status(id, canPlay), active && now.Playing, active, () => { if (!active && canPlay) session.Transfer(id); });
+                row.IsEnabled = canPlay || active;
+                // rule 8: any device's volume, from here
+                var level = new Slider { Minimum = 0, Maximum = 100, StepFrequency = 1, Value = muted ? 0 : volume * 100, Margin = new Thickness(44, -6, 12, 2), IsThumbToolTipEnabled = false };
+                AutomationProperties.SetName(level, $"「{name}」的音量");
+                var send = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(120) };
+                send.Tick += (_, _) => { send.Stop(); session.SetVolume(id, level.Value / 100, level.Value > 0 && muted ? false : null); };
+                level.ValueChanged += (_, _) => { send.Stop(); send.Start(); };
+                return Ui.Column(0, row, level);
+            }
+            list.Children.Add(Device(session.Id, "这台电脑", Glyphs.Devices, true, _music.Volume, _music.Muted));
+            foreach (var d in session.Devices.Where(d => d.Id != session.Id)) list.Children.Add(Device(d.Id, d.Name, GlyphOf(d.Kind), d.CanPlay, d.Volume, d.Muted));
+            if (session.Devices.All(d => d.Id == session.Id))
+            {
+                var note = Ui.Note(Glyphs.Info, "没有其他设备在线。在另一台电脑或手机上打开 Sonus，登录同一个账号，就会出现在这里。");
+                note.Margin = new Thickness(8, 4, 8, 8);
+                list.Children.Add(note);
+            }
+        }
+        flyout.Opening += (_, _) => { if (_session is { } s) FillSession(s); else Fill(); };
+        _connect.Changed += () => { if (flyout.IsOpen && _session is null) Fill(); };
+        if (_session is { } v2)
+        {
+            // drawn again when what it lists changes (not for a volume: a slider being dragged stays)
+            v2.Changed += () =>
+            {
+                if (!flyout.IsOpen) return;
+                var now = v2.Session;
+                if (shown != $"{v2.IsConnected}|{now.ActiveDevice}|{now.Playing}|{now.Current?.TrackId}|{string.Join(',', v2.Devices.Select(d => d.Id + d.Name))}") FillSession(v2);
+            };
+        }
         return flyout;
     }
+
+    private static string GlyphOf(string kind) => kind switch { "phone" or "tablet" => Glyphs.Headphones, "speaker" => Glyphs.Speaker, _ => Glyphs.Devices };
 
     // ---------------------------------------------------------------- showing it
     private void Sync()
@@ -313,7 +376,11 @@ public sealed class PlaybackBar : UserControl
         _error.Text = m.State == PlayerState.Error ? m.Error ?? "" : "";
         _error.Visibility = m.State == PlayerState.Error ? Visibility.Visible : Visibility.Collapsed;
         _artist.Visibility = m.State == PlayerState.Error || t is null ? Visibility.Collapsed : Visibility.Visible;
-        _where.Visibility = Visibility.Collapsed;
+        if (_session is not null && t is null && _session.Session.Now is { } shown) ShowSong(null, shown.CoverArt is { } art ? m.Client.CoverUrl(art, 128) : null, shown.Title, shown.Artist); // a song this library lacks
+        // version 2: where the session plays, when not here
+        _where.Text = m.Where ?? "";
+        _where.Visibility = m.Where is null ? Visibility.Collapsed : Visibility.Visible;
+        AutomationProperties.SetName(_where, _where.Text);
         var order = m.Queue.Order;
         _shuffle.IsChecked = order is PlaybackOrder.ShuffleTracks or PlaybackOrder.ShuffleAlbums or PlaybackOrder.ShuffleFolders or PlaybackOrder.Random;
         _repeat.IsChecked = order is PlaybackOrder.RepeatPlaylist or PlaybackOrder.RepeatTrack;
@@ -329,9 +396,10 @@ public sealed class PlaybackBar : UserControl
         _length.Text = Formats.Duration(d);
         if (!_seeking && (!_gliding || Math.Abs(m.Position - _progress.Value) > 1)) ShowPosition(m.Position);
         Glide(m.State == PlayerState.Playing);
-        _volume.Value = m.Volume * 100;
-        Ui.SetIcon(_mute, m.Muted || m.Volume == 0 ? Glyphs.Mute : Glyphs.Volume);
-        AutomationProperties.SetName(_mute, m.Muted ? "取消静音" : "静音");
+        var (volume, muted) = VolumeTarget is { } target ? (target.Volume, target.Muted) : (m.Volume, m.Muted);
+        if (!_volumeSend.IsEnabled) _volume.Value = volume * 100; // not while the user's own change is on its way
+        Ui.SetIcon(_mute, muted || volume == 0 ? Glyphs.Mute : Glyphs.Volume);
+        AutomationProperties.SetName(_mute, muted ? "取消静音" : "静音");
         ShowDevicesButton();
         _syncing = false;
     }
@@ -391,6 +459,16 @@ public sealed class PlaybackBar : UserControl
     /// <summary>The devices button: in the accent colour while controlling another device, with a dot while another plays.</summary>
     private void ShowDevicesButton()
     {
+        if (_session is { } session)
+        {
+            var elsewhere = session.ActiveElsewhere;
+            _devices.Foreground = elsewhere is not null ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextSecondaryBrush");
+            _devicesDot.Visibility = elsewhere is not null && session.Session.Playing ? Visibility.Visible : Visibility.Collapsed;
+            string label = elsewhere is not null ? $"正在「{elsewhere.Name}」上播放，选择设备" : "在其他设备上播放";
+            AutomationProperties.SetName(_devices, label);
+            ToolTipService.SetToolTip(_devices, label);
+            return;
+        }
         bool remote = Remote is not null;
         _devices.Foreground = remote ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextSecondaryBrush");
         _devicesDot.Visibility = remote || _connect.OtherPlaying ? Visibility.Visible : Visibility.Collapsed;

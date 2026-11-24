@@ -202,6 +202,15 @@ internal static class E2EChannel
                 available = c.IsAvailable, connected = c.IsConnected, id = c.ThisId, target = c.Target?.Name,
                 others = c.Others.Select(d => new { d.Id, d.Name, playing = d.State?.Playing, track = d.State?.TrackId }),
             } : null,
+            // Sonus Connect version 2: the user's session as this device last heard it
+            session = W?.Session is { } v2 ? new
+            {
+                connected = v2.IsConnected, id = v2.Id, here = v2.IsActiveHere, rev = v2.Session.Rev,
+                active = v2.Session.ActiveDevice is { } a ? v2.NameOf(a) : null, last = v2.Session.LastDevice?.Name, where = m?.Where,
+                track = v2.Session.Current?.TrackId, key = v2.Session.Current?.Key, playing = v2.Session.Playing, mode = v2.Session.Mode,
+                position = v2.Session.PositionAt(v2.ServerNow) / 1000.0,
+                devices = v2.Devices.Select(d => new { d.Id, d.Name, d.Volume, d.Muted }),
+            } : null,
             toasts = W?.Content is FrameworkElement root ? Descend(root).OfType<Border>().Where(b => AutomationProperties.GetLiveSetting(b) == AutomationLiveSetting.Polite).Select(AutomationProperties.GetName) : null,
         });
     }

@@ -1,7 +1,10 @@
 // Acceptance of the Windows app, silent and isolated (tools/e2e/e2e.mjs): builds it, starts the demo server and test
 // instances, and goes through the app in rounds: sign-in, every page, playback, playlists, search, continuing on a second
 // device, controlling another device, narrow windows, losing the server, the system media controls, a restart and signing
-// out, updates, taking over what the former name (CreeperUX Music) left, and signing in through the browser. After each round the
+// out, updates, taking over what the former name (CreeperUX Music) left, and signing in through the browser. Sonus Connect:
+// with a server that offers version 2 (the demo server's default) round 6b is one playback session shared by two devices
+// and round 6 (the "接着上次听" toast, which version 2 replaces) does not apply; with version 1 alone (SONUS_DEMO_CONNECT=1
+// for the demo server; the production server until the Rust server has version 2) rounds 6 and 6b are version 1's. After each round the
 // test window must still be hidden and never have been the foreground window. Results: .work/acceptance/report.md;
 // screenshots: .work/shots/acc-*.png (look at them).
 // Any server: SONUS_TEST_SERVER, SONUS_TEST_CREDENTIALS and SONUS_TEST_MANIFEST (target.mjs, README.md). Against the demo
@@ -11,7 +14,7 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { build, TestApp, sleep, work, exeFor, credentialKept, forgetCredential, mediaSessions, formerCredentialKept, forgetFormerCredential, writeFormerCredential, writeCredential } from './e2e.mjs';
+import { build, TestApp, sleep, work, exeFor, credentialKept, forgetCredential, mediaSessions, formerCredentialKept, forgetFormerCredential, writeFormerCredential, writeCredential, testCredential, formerCredential } from './e2e.mjs';
 import { startTarget } from './target.mjs';
 import { startFakeGitHub } from './fake-github.mjs';
 
@@ -57,10 +60,13 @@ forgetAll();
 const server = await startTarget();
 // what the checks take from the library (the demo catalogue's albums, songs and playlists, or another server's)
 const cat = await server.catalogue();
+const api = (method, params) => server.api(method, params);
+// Sonus Connect: version 2 (one session on the server) when the server offers it, else version 1, else none
+const connectVersions = await api('getOpenSubsonicExtensions').then(r => r.openSubsonicExtensions?.find(e => e.name === 'sonusConnect')?.versions ?? []).catch(() => []);
+const connectV2 = connectVersions.includes(2), connectV1 = !connectV2 && connectVersions.includes(1);
 const github = await startFakeGitHub();
 const appEnv = { SONUS_GITHUB_API: github.url, SONUS_DEVICE_NAME: '第一台' };
 const md5 = s => createHash('md5').update(s).digest('hex');
-const api = (method, params) => server.api(method, params);
 // the demo server's sign-in page offers its account (--demo); any other server is signed in to through the form
 const demoUrl = server.demo ? server.url : null;
 async function signIn(a) {
@@ -68,7 +74,7 @@ async function signIn(a) {
   await a.send(`set 服务器地址=${server.url}`); await a.send(`set 用户名=${server.user.username}`); await a.send(`set 密码=${server.user.password}`);
   await a.invoke('登录');
 }
-log(`架构：${arch}${exe === exeFor(arch) ? '' : `（${exe}）`}；服务器：${server.describe}`);
+log(`架构：${arch}${exe === exeFor(arch) ? '' : `（${exe}）`}；服务器：${server.describe}；Sonus Connect：${connectV2 ? '第 2 版' : connectV1 ? '第 1 版' : '无'}`);
 let app = await new TestApp('main', { demo: demoUrl, exe, env: appEnv }).start();
 const state = () => app.state();
 const until = (fn, what, ms) => app.until(fn, what, ms);
@@ -114,7 +120,7 @@ try {
       assert(s.route === 'home' && s.title === '首页 · Sonus', s.title);
     });
     await check('登录信息在 Windows 凭据管理器里（测试专用条目），设置文件里没有令牌', async () => {
-      assert(credentialKept(), '凭据管理器里没有 Sonus-test:server');
+      assert(credentialKept(), `凭据管理器里没有 ${testCredential('server')}`);
       for (const f of readdirSync(app.data)) if (f.endsWith('.json')) assert(!/token|salt/i.test(readFileSync(join(app.data, f), 'utf8')), `${f} 里有令牌`);
     });
     await check('首页：问候、快捷入口、各个卡片架', async () => {
@@ -353,14 +359,14 @@ try {
       await until(async () => (await state()).engine === 'Playing', 'plays');
     });
     else skip('DSD 歌曲请服务器转成 MP3（Windows 不能直接解 DSD）', '服务器上没有 DSD（.dsf）歌曲');
-    if (cat.missing) await check('服务器给不出文件的歌：显示错误和“重试”，不是静默', async () => {
+    if (cat.missing) await check('服务器给不出文件的歌：像 Spotify 一样跳到下一首，并说哪首无法播放', async () => {
       await app.send(`do play library all ${cat.missing}`);
-      await until(async () => (await state()).state === 'Error', 'error state', 10000);
-      assert(await hasName('重试'), '播放按钮没有变成“重试”');
-      assert((await state()).error.includes('无法播放'), (await state()).error);
+      await until(async () => { const s = await state(); return s.track && s.track !== cat.missing && s.engine === 'Playing'; }, 'skipped to the next song', 10000);
+      const toasts = (await state()).toasts ?? [];
+      assert(toasts.some(t => t.startsWith('无法播放“') && t.includes('已跳到下一首')), JSON.stringify(toasts));
       await shot('play-error');
     });
-    else skip('服务器给不出文件的歌：显示错误和“重试”，不是静默', '清单里没有文件已丢失的歌（track.missingFile）');
+    else skip('服务器给不出文件的歌：像 Spotify 一样跳到下一首，并说哪首无法播放', '清单里没有文件已丢失的歌（track.missingFile）');
     await check('回放增益：按音轨降低音量', async () => {
       await app.send(`do play album ${cat.playable.id} 0`);
       await until(async () => (await state()).engine === 'Playing', 'playing');
@@ -471,7 +477,8 @@ try {
   // ---------------------------------------------------------------- 6. a second device continues
   if (want('devices')) {
     round('devices', '第 6 轮：在另一台设备上接着听');
-    await check('第一台暂停后，第二台登录：停在同一首歌的同一位置，并提示“接着播放”', async () => {
+    if (connectV2) skip('第一台暂停后，第二台登录：停在同一首歌的同一位置，并提示“接着播放”', '服务器提供 Sonus Connect 第 2 版：会话在服务器上，每台设备一打开就显示它，没有“接着播放”（规则 6；见第 6b 轮）');
+    else await check('第一台暂停后，第二台登录：停在同一首歌的同一位置，并提示“接着播放”', async () => {
       // a song with synced lyrics, so the second device's lyrics card has a line to light (the demo's: al5)
       const at = cat.lyrics ?? { albumId: cat.playable.id, index: 0 };
       await app.send(`do play album ${at.albumId} ${at.index}`);
@@ -501,59 +508,189 @@ try {
     quiet(app);
   }
 
-  // ---------------------------------------------------------------- 6b. Sonus Connect: control and move playback between devices
-  if (want('connect')) {
-    round('connect', '第 6b 轮：跨设备控制（Sonus Connect）');
-    const b = await new TestApp('remote', { demo: demoUrl, exe, env: { ...appEnv, SONUS_DEVICE_NAME: '第二台' } }).start();
+  // ---------------------------------------------------------------- 6b. Sonus Connect version 2: one playback session (docs/protocol/connect.md)
+  if (want('connect') && connectV2) {
+    round('connect', '第 6b 轮：一个播放会话（Sonus Connect 第 2 版）');
+    const session = async a => (await a.state()).session;
+    const noContinueToast = async a => { const s = await a.state(); assert(!(s.toasts ?? []).some(t => t.includes('接着')), `${a.name}：${JSON.stringify(s.toasts)}`); };
+    let b = await new TestApp('remote', { demo: demoUrl, exe, env: { ...appEnv, SONUS_DEVICE_NAME: '第二台' } }).start();
     try {
-      await check('两台设备都连上，各自的设备列表里有对方', async () => {
-        await b.until(async () => (await b.send('ready')) === 'yes', 'B signed in', 30000);
-        await until(async () => (await state()).connect?.others?.some(d => d.Name === '第二台'), 'A sees B', 10000);
-        await b.until(async () => (await b.state()).connect?.others?.some(d => d.Name === '第一台'), 'B sees A', 10000);
+      let playing;
+      await check('第二台登录（同一个测试账号）：两台都在设备列表里，设备 id 不同；没有“接着上次听”（规则 6）', async () => {
+        await b.until(async () => (await b.send('ready')) === 'yes', 'B signed in (the run\'s test credential)', 30000);
+        await b.until(async () => (await session(b))?.devices?.some(d => d.Name === '第一台'), 'B sees A', 10000);
+        await until(async () => (await session(app))?.devices?.some(d => d.Name === '第二台'), 'A sees B', 10000);
+        assert((await session(b)).id !== (await session(app)).id, '两台的设备 id 一样');
+        await noContinueToast(app); await noContinueToast(b);
       });
-      let a;
-      await check('第一台放歌时，第二台看到它正在播放；选中它，播放条显示那首歌，第一台不被打断', async () => {
+      await check('第一台放歌：它是出声的设备；第二台显示同一首歌和“正在「第一台」上播放”，进度在走，自己不出声', async () => {
         await app.send(`do play album ${cat.playable.id} 0`);
-        await until(async () => (await state()).engine === 'Playing', 'A playing');
-        a = await state();
-        await b.until(async () => (await b.state()).connect.others.some(d => d.Name === '第一台' && d.playing && d.track === a.track), 'B sees A playing', 10000);
+        await until(async () => (await state()).engine === 'Playing', 'A plays', 10000);
+        playing = await state();
+        assert(playing.session.here === true, JSON.stringify(playing.session));
+        await b.until(async () => { const s = await b.state(); return s.track === playing.track && s.state === 'Playing'; }, 'B shows A\'s song playing', 8000);
+        const s = await b.state();
+        assert(s.engine === 'Stopped' && s.engineTrack === null, `第二台在出声：${s.engine} ${s.engineTrack}`);
+        assert(s.session.active === '第一台', JSON.stringify(s.session));
+        await b.until(async () => (await b.texts()).includes('正在「第一台」上播放'), 'the line in B\'s bar', 5000);
+        assert((await b.texts()).includes(playing.trackTitle), '第二台的播放条没有那首歌');
         await b.send('nav settings'); // a page without "播放" buttons of its own
-        await b.invoke('在其他设备上播放');
-        await b.until(async () => (await b.names()).some(n => n.startsWith('第一台 [')), 'the device list', 5000);
-        await sleep(700); // the flyout fades in
-        b.printWindow('acc-connect-devices'); // a Flyout is not in the app's own (RenderTargetBitmap) shots
-        await b.invoke('第一台');
-        await b.until(async () => (await b.state()).connect.target === '第一台', 'B controls A');
-        await b.until(async () => (await b.texts()).includes('正在「第一台」上播放'), 'the line in the bar');
-        assert((await b.texts()).includes(a.trackTitle), '播放条没有显示第一台的歌');
-        assert((await state()).engine === 'Playing', '只是选中，第一台不该被打断');
+        await sleep(1500);
+        const later = await b.state();
+        assert(later.position > s.position, `第二台的进度没有走：${s.position} → ${later.position}`);
         await b.shot('acc-connect-remote');
       });
-      await check('在第二台按暂停，第一台暂停；再按播放，第一台继续', async () => {
+      await check('第二台按“下一首”：第一台换到下一首，第二台仍不出声', async () => {
+        await b.invoke('下一首');
+        await until(async () => { const s = await state(); return s.engineTrack && s.engineTrack !== playing.track && s.engine === 'Playing'; }, 'A moved on', 10000);
+        const s = await state();
+        await b.until(async () => (await b.state()).track === s.engineTrack, 'B shows it', 5000);
+        assert((await b.state()).engine === 'Stopped', '第二台在出声');
+        playing = s;
+      });
+      await check('第二台加歌到队列：第一台的队列里有它（只有一份队列）', async () => {
+        const song = cat.songIds[0];
+        await b.send(`do queue ${song}`);
+        await until(async () => (await state()).manual === 1, 'A\'s queue has it', 5000);
+        assert((await state()).queue[0] === song, JSON.stringify((await state()).queue));
+        await b.until(async () => (await b.state()).manual === 1, 'B\'s too', 5000);
+      });
+      await check('第二台按暂停，第一台暂停；再按播放，第一台接着放', async () => {
         await b.invoke('暂停');
-        await until(async () => (await state()).state === 'Paused', 'A paused', 5000);
+        await until(async () => (await state()).engine === 'Paused', 'A paused', 5000);
         // the bar's button, not the settings page's "播放" heading (a TextBlock), which is there all along
-        await b.until(async () => (await b.names()).includes('播放 [Button]'), 'B shows A paused', 5000);
+        await b.until(async () => (await b.names()).includes('播放 [Button]'), 'B shows it paused', 5000);
         await b.invoke('播放');
         await until(async () => (await state()).engine === 'Playing', 'A plays again', 8000);
       });
-      await check('选“这台电脑”：播放从第一台转过来，同一首歌、同一位置接着放，第一台停下', async () => {
-        await sleep(1500);
-        await b.invoke('正在「第一台」上播放，选择设备'); // the devices button, named for what it controls
+      await check('第二台的设备列表：两台设备，各有音量条；调第一台的音量，第一台跟着变（规则 8）', async () => {
+        await b.invoke('正在「第一台」上播放，选择设备'); // the devices button, named for where it plays
         await b.until(async () => (await b.names()).some(n => n.startsWith('这台电脑 [')), 'the device list', 5000);
+        const n = await b.names();
+        assert(n.some(x => x.startsWith('第一台 [')) && n.some(x => x.startsWith('「第一台」的音量 [')) && n.some(x => x.startsWith('「这台电脑」的音量 [')), n.filter(x => x.includes('台')).join(' | '));
+        await sleep(700); // the flyout fades in
+        b.printWindow('acc-connect-devices'); // a Flyout is not in the app's own (RenderTargetBitmap) shots
+        const r = await b.send('set 「第一台」的音量=30');
+        assert(r.startsWith('set'), r);
+        await until(async () => Math.abs((await session(app)).devices.find(d => d.Name === '第一台')?.Volume - 0.3) < 0.011, 'A\'s volume is 0.3', 5000);
+      });
+      await check('选“这台电脑”：播放转到第二台，同一首、同一位置；第一台停下，显示“正在「第二台」上播放”（规则 4）', async () => {
         const before = await state();
         await b.invoke('这台电脑');
-        await until(async () => (await state()).state === 'Paused', 'A stopped', 8000);
-        await b.until(async () => { const s = await b.state(); return s.engine === 'Playing' && s.track === before.track; }, 'B plays A\'s song', 10000);
+        await b.until(async () => { const s = await b.state(); return s.engine === 'Playing' && s.engineTrack === before.engineTrack; }, 'B plays A\'s song', 10000);
+        await until(async () => (await state()).engine === 'Stopped', 'A stopped', 5000);
         const s = await b.state();
-        assert(Math.abs(s.enginePosition - before.position) < 5, `位置 ${s.enginePosition} 与第一台的 ${before.position} 相差太多`);
-        assert(s.connect.target === null, '第二台应回到“这台电脑”');
-        assert(s.toasts.some(t => t.includes('已从「第一台」转到这台电脑播放')), JSON.stringify(s.toasts));
-        await b.shot('acc-connect-moved');
-        await b.send('do pause');
-        const q = b.quiet(); assert(q.startsWith('QUIET'), `第二台：${q}`);
+        assert(s.session.here === true, JSON.stringify(s.session));
+        assert(Math.abs(s.enginePosition - before.enginePosition) < 5, `位置 ${s.enginePosition}，第一台是 ${before.enginePosition}`);
+        await until(async () => (await app.texts()).includes('正在「第二台」上播放'), 'the line in A\'s bar', 5000);
+        await shot('connect-moved');
       });
-    } finally { await b.stop(); }
+      await check('第一台（现在是遥控器）按暂停：第二台暂停；再播放', async () => {
+        await app.send('nav settings');
+        await app.invoke('暂停');
+        await b.until(async () => (await b.state()).engine === 'Paused', 'B paused', 5000);
+        await app.invoke('播放');
+        await b.until(async () => (await b.state()).engine === 'Playing', 'B plays', 8000);
+      });
+      // a network loss: the demo server cuts one device's connection (its test hook); another server has no such hook
+      if (server.demo) await check('第二台断网超过 10 秒：一直在放；服务器上会话停在原处，回来后用 resume 接着当出声的设备', async () => {
+        const id = (await session(b)).id;
+        const r = await (await fetch(`${server.url}/__test/connect2/drop?u=${server.user.username}&device=${id}&hold=12000`)).json(); // past the 10 s grace period
+        assert(r.dropped, JSON.stringify(r));
+        await b.until(async () => (await session(b)).connected === false, 'B noticed', 5000);
+        await until(async () => (await session(app)).active === null, 'the session stopped after the grace period', 15000);
+        assert((await b.state()).engine === 'Playing', '第二台断网后停了');
+        await until(async () => (await app.texts()).includes('上次在「第二台」播放'), 'A says where it played last', 5000);
+        await b.until(async () => (await session(b)).connected === true, 'B reconnected', 30000);
+        await until(async () => (await session(app)).active === '第二台', 'B is the active device again (resume)', 8000);
+        const s = await b.state();
+        assert(s.engine === 'Playing' && s.session.here, JSON.stringify({ engine: s.engine, here: s.session.here }));
+      });
+      else skip('第二台断网超过 10 秒：一直在放，回来后用 resume 接着当出声的设备', '只有演示服务器能单独切断一台设备的连接');
+      await check('第二台暂停后关掉：会话留在服务器上，第一台显示“上次在「第二台」播放”（规则 6、7）', async () => {
+        await b.invoke('暂停');
+        await b.until(async () => (await b.state()).engine === 'Paused', 'B paused', 5000);
+        const at = (await session(b)).position;
+        const q = b.quiet(); assert(q.startsWith('QUIET'), `第二台：${q}`);
+        await b.stop(); b = null;
+        await until(async () => (await session(app)).active === null, 'no active device (B said goodbye)', 5000);
+        const s = await state();
+        assert(s.session.track, '会话没了');
+        assert(Math.abs(s.session.position - at) < 2, `位置 ${s.session.position}，暂停时是 ${at}`);
+        await until(async () => (await app.texts()).includes('上次在「第二台」播放'), 'the line', 5000);
+        assert(s.engine === 'Stopped', '第一台在出声');
+        await shot('connect-none');
+      });
+      await check('第一台按播放：它成为出声的设备，从原处接着放', async () => {
+        const at = (await session(app)).position;
+        await app.invoke('播放');
+        await until(async () => (await state()).engine === 'Playing', 'A plays', 10000);
+        const s = await state();
+        assert(s.session.here === true && s.session.active === '这台电脑', JSON.stringify(s.session)); // the app names itself so
+        assert(Math.abs(s.enginePosition - at) < 4, `位置 ${s.enginePosition}，会话停在 ${at}`);
+        await noContinueToast(app);
+        await app.send('do pause');
+      });
+    } finally { if (b) await b.stop(); }
+    quiet(app);
+  }
+
+  // ---------------------------------------------------------------- 6b. Sonus Connect version 1: control and move playback between devices
+  if (want('connect') && !connectV2) {
+    round('connect', '第 6b 轮：跨设备控制（Sonus Connect 第 1 版）');
+    if (!connectV1) skip('两台设备互相看见、遥控、转移播放', '服务器没有 Sonus Connect');
+    else {
+      const b = await new TestApp('remote', { demo: demoUrl, exe, env: { ...appEnv, SONUS_DEVICE_NAME: '第二台' } }).start();
+      try {
+        await check('两台设备都连上，各自的设备列表里有对方', async () => {
+          await b.until(async () => (await b.send('ready')) === 'yes', 'B signed in', 30000);
+          await until(async () => (await state()).connect?.others?.some(d => d.Name === '第二台'), 'A sees B', 10000);
+          await b.until(async () => (await b.state()).connect?.others?.some(d => d.Name === '第一台'), 'B sees A', 10000);
+        });
+        let a;
+        await check('第一台放歌时，第二台看到它正在播放；选中它，播放条显示那首歌，第一台不被打断', async () => {
+          await app.send(`do play album ${cat.playable.id} 0`);
+          await until(async () => (await state()).engine === 'Playing', 'A playing');
+          a = await state();
+          await b.until(async () => (await b.state()).connect.others.some(d => d.Name === '第一台' && d.playing && d.track === a.track), 'B sees A playing', 10000);
+          await b.send('nav settings'); // a page without "播放" buttons of its own
+          await b.invoke('在其他设备上播放');
+          await b.until(async () => (await b.names()).some(n => n.startsWith('第一台 [')), 'the device list', 5000);
+          await sleep(700); // the flyout fades in
+          b.printWindow('acc-connect-devices'); // a Flyout is not in the app's own (RenderTargetBitmap) shots
+          await b.invoke('第一台');
+          await b.until(async () => (await b.state()).connect.target === '第一台', 'B controls A');
+          await b.until(async () => (await b.texts()).includes('正在「第一台」上播放'), 'the line in the bar');
+          assert((await b.texts()).includes(a.trackTitle), '播放条没有显示第一台的歌');
+          assert((await state()).engine === 'Playing', '只是选中，第一台不该被打断');
+          await b.shot('acc-connect-remote');
+        });
+        await check('在第二台按暂停，第一台暂停；再按播放，第一台继续', async () => {
+          await b.invoke('暂停');
+          await until(async () => (await state()).state === 'Paused', 'A paused', 5000);
+          // the bar's button, not the settings page's "播放" heading (a TextBlock), which is there all along
+          await b.until(async () => (await b.names()).includes('播放 [Button]'), 'B shows A paused', 5000);
+          await b.invoke('播放');
+          await until(async () => (await state()).engine === 'Playing', 'A plays again', 8000);
+        });
+        await check('选“这台电脑”：播放从第一台转过来，同一首歌、同一位置接着放，第一台停下', async () => {
+          await sleep(1500);
+          await b.invoke('正在「第一台」上播放，选择设备'); // the devices button, named for what it controls
+          await b.until(async () => (await b.names()).some(n => n.startsWith('这台电脑 [')), 'the device list', 5000);
+          const before = await state();
+          await b.invoke('这台电脑');
+          await until(async () => (await state()).state === 'Paused', 'A stopped', 8000);
+          await b.until(async () => { const s = await b.state(); return s.engine === 'Playing' && s.track === before.track; }, 'B plays A\'s song', 10000);
+          const s = await b.state();
+          assert(Math.abs(s.enginePosition - before.position) < 5, `位置 ${s.enginePosition} 与第一台的 ${before.position} 相差太多`);
+          assert(s.connect.target === null, '第二台应回到“这台电脑”');
+          assert(s.toasts.some(t => t.includes('已从「第一台」转到这台电脑播放')), JSON.stringify(s.toasts));
+          await b.shot('acc-connect-moved');
+          await b.send('do pause');
+          const q = b.quiet(); assert(q.startsWith('QUIET'), `第二台：${q}`);
+        });
+      } finally { await b.stop(); }
+    }
     quiet(app);
   }
 
@@ -702,11 +839,11 @@ try {
       assert(formerCredentialKept('server') && formerCredentialKept('github') && credentialKept('github'), '没写进测试条目');
       app = await new TestApp('former', { demo: demoUrl, exe, env: appEnv }).start();
       await until(async () => (await app.send('ready')) === 'yes', 'signed in with the former sign-in', 30000);
-      assert(credentialKept(), '新名字（Sonus-test）下没有登录');
-      assert(!credentialKept('github'), 'Sonus-test:github 还在（更新已经不用令牌）');
-      assert(!formerCredentialKept('server') && !formerCredentialKept('github'), '旧名字（CreeperUXMusic-test）的条目还在');
+      assert(credentialKept(), `新名字（${testCredential('server')}）下没有登录`);
+      assert(!credentialKept('github'), `${testCredential('github')} 还在（更新已经不用令牌）`);
+      assert(!formerCredentialKept('server') && !formerCredentialKept('github'), `旧名字（${formerCredential('server')}）的条目还在`);
       const logText = readFileSync(join(app.data, 'app.log'), 'utf8');
-      assert(logText.includes('[former name] CreeperUXMusic-test:server → Sonus-test:server') && logText.includes('[credentials] Sonus-test:github deleted') && !logText.includes('gh-token') && !logText.includes(md5(password + salt)), '日志里没有迁移记录，或写进了密钥');
+      assert(logText.includes(`[former name] ${formerCredential('server')} → ${testCredential('server')}`) && logText.includes(`[credentials] ${testCredential('github')} deleted`) && !logText.includes('gh-token') && !logText.includes(md5(password + salt)), '日志里没有迁移记录，或写进了密钥');
       assert((await state()).title === '首页 · Sonus', (await state()).title);
     });
     await check('没有令牌照样能检查更新', async () => {

@@ -43,6 +43,7 @@ const zh = {
     finishing: '正在为这个浏览器创建登录…',
   },
   previous: '上一首', next: '下一首', repeat: '循环播放', repeatAll: '列表循环', repeatOne: '单曲循环',
+  openLibrary: '在主视图中打开音乐库',
   nav: '主导航', openNow: '打开正在播放', account: '账号与安全', libraryAll: '全部歌曲', nothingPlaying: '还没有播放任何歌曲', nothingPlayingMsg: '点任意歌曲开始播放。', devices: '设备', thisBrowser: '这个浏览器',
   acc: {
     intro: '两步验证、应用专用密码，以及允许其他应用登录。', unsupported: '这个服务器没有 Sonus 的账号安全功能（两步验证、应用专用密码）。',
@@ -111,6 +112,7 @@ const en = {
     finishing: 'Creating a sign-in for this browser…',
   },
   previous: 'Previous', next: 'Next', repeat: 'Repeat', repeatAll: 'Repeat all', repeatOne: 'Repeat one',
+  openLibrary: 'Open Your Library in the main view',
   nav: 'Main navigation', openNow: 'Open Now playing', account: 'Account and security', libraryAll: 'All songs', nothingPlaying: 'Nothing is playing yet', nothingPlayingMsg: 'Choose any song to start.', devices: 'Devices', thisBrowser: 'This browser',
   acc: {
     intro: 'Two-step verification, app passwords, and allowing other apps to sign in.', unsupported: 'This server does not have Sonus account security (two-step verification, app passwords).',

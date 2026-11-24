@@ -88,7 +88,9 @@ body:has(.cm[data-theme="light"]) { background: #dad4ca; }
 .cm-lib .ui-mcard[data-layout="row"] .ui-mcard-art { width: 3rem; }
 .cm-lib .ui-mcard-title { font-weight: 500; }
 .cm-lib-more { margin: 8px; color: var(--cx-muted); font-size: var(--cx-fs-sm); }
-.cm-lib[data-rail] .cm-lib-more { display: none; }
+.cm-lib[data-rail] .cm-lib-more, .cm-lib[data-rail] .cm-lib-open { display: none; }
+.cm-lib-open { border-radius: 50%; }
+.cm-lib-open .ui-icon { width: 1.125rem; height: 1.125rem; }
 .cm-pin { display: inline-flex; vertical-align: -2px; margin-inline-end: 5px; color: var(--cx-accent-text); }
 .cm-pin .ui-icon { width: .875rem; height: .875rem; fill: currentColor; fill-opacity: .3; }
 /* the rail: covers only (names stay as accessible names, visually hidden) */

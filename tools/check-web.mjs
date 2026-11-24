@@ -439,6 +439,24 @@ for (const [engine, launch] of engines) {
       } finally { await cx.close(); other?.stop(); }
     });
 
+    // ---------------------------------------------------------------- a deployment that fixes the server (web/config.js)
+    if (site !== server) skip('config.js with server "same-origin": the sign-in page does not ask for the address', 'the page is not served by the music server in this run');
+    else await check('config.js with server "same-origin": the sign-in page does not ask for the address, and signs in to the server that serves it', async () => {
+      const cx = await browser.newContext({ viewport: { width: 1280, height: 800 } }), p = await cx.newPage();
+      watch(p);
+      await p.route(u => u.pathname === '/config.js', route => route.fulfill({ contentType: 'text/javascript', body: 'window.SONUS_CONFIG = { server: "same-origin", base: "" };' }));
+      await p.goto(`${site}/?theme=dark#/`);
+      await p.locator('.cm-login').waitFor();
+      assert(!(await p.getByLabel('服务器地址').count()), 'the address is asked for');
+      const v = await axe(p); assert(!v.length, v.join(' | '));
+      await p.getByLabel('用户名').fill(account.user);
+      await p.getByLabel('密码', { exact: true }).fill(account.password);
+      await p.getByRole('button', { name: '登录', exact: true }).click();
+      await p.waitForFunction(() => window.__ready === true, null, { timeout: 60000 });
+      assert((await app(() => __app.adapter.account().server, undefined, p)) === server, 'signed in to another server');
+      await cx.close();
+    });
+
     // ---------------------------------------------------------------- signing in through the browser, two-step verification, the account pages
     if (!demo) skip('the browser sign-in, two-step verification and the account pages', 'they need the demo server\'s sign-in hook and a stand-in for /auth');
     else {

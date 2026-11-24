@@ -48,8 +48,8 @@ The gateway reads Navidrome's settings as Navidrome reads them, so a container k
 | Setting | Default | |
 |---|---|---|
 | `Address`, `Port` (`ND_ADDRESS`, `ND_PORT`) | `0.0.0.0`, `4533` | where clients connect: the gateway takes Navidrome's place |
-| `ExtAuth.TrustedSources` (`ND_EXTAUTH_TRUSTEDSOURCES`) | none | the proxies in front whose forwarding headers are believed, as Navidrome reads them (CIDR entries only, `src/trust.rs`) |
-| `ExtAuth.UserHeader` (`ND_EXTAUTH_USERHEADER`) | `Remote-User` | the signed-in user, believed from those proxies only; empty turns it off |
+| `ExtAuth.TrustedSources` (`ND_EXTAUTH_TRUSTEDSOURCES`) | none | the proxies in front whose `X-Forwarded-For` is believed (CIDR entries only, `src/trust.rs`). Set it behind a reverse proxy, or every client has the proxy's address and shares its sign-in limits. `True-Client-IP` and `X-Real-IP` are not believed (Navidrome believes them first): the proxy must send `X-Forwarded-For` |
+| `ExtAuth.UserHeader` (`ND_EXTAUTH_USERHEADER`) | none (Navidrome: `Remote-User`) | a header in which those proxies name the signed-in user, who then needs no password. Only for a proxy that authenticates users itself and overwrites this header on every request; unset, empty or `none`: no header signs anyone in |
 | `DataFolder`, `DbPath` (`ND_DATAFOLDER`, `ND_DBPATH`) | `.`, `navidrome.db` in the data folder | Navidrome's database, which the server opens too (`DbPath`: a path, optionally after `file:` and before `?options`) |
 | `PasswordEncryptionKey` (`ND_PASSWORDENCRYPTIONKEY`) | Navidrome's built-in key | what stored passwords and app passwords are encrypted with; never logged |
 | `AuthRequestLimit`, `AuthWindowLength` | `5`, `20s` | failed Subsonic sign-ins allowed per address and user in a window, and requests to the sign-in routes under `/auth` per address; `0` turns both limits off |

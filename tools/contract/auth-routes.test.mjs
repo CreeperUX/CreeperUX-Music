@@ -114,10 +114,13 @@ test('optional: each user turns two-step verification on and off; off: neither a
     log.push(['now a code is asked for', (await post(base, '/login', creds(listener))).json]);
     const sub = params => new Subsonic(base, {}, { client: 'sonus-auth-test' }).call('ping', params).then(r => r.body.error?.code ?? 0);
     log.push(['and the account password no longer signs the Subsonic API', await sub({ u: listener.username, p: listener.password })]);
-    log.push(['replacing the authenticator takes a code', (await post(base, '/2fa/setup', { code: '000000' }, session)).json]);
-    log.push(['turning it off takes a code', (await post(base, '/2fa/disable', { code: '000000' }, session)).status]);
-    log.push(['with a recovery code', (await post(base, '/2fa/disable', { code: done.json.recoveryCodes[0] }, session)).status]);
-    log.push(['off again', (await get(base, '/2fa', session)).json, await sub({ u: listener.username, p: listener.password })]);
+    // the session to go on with is the one the confirmation answered: the Rust server ends those from before
+    // (docs/security-review-2026-11-24.md, F6), where Navidrome let them go on
+    const after = done.json.token;
+    log.push(['replacing the authenticator takes a code', (await post(base, '/2fa/setup', { code: '000000' }, after)).json]);
+    log.push(['turning it off takes a code', (await post(base, '/2fa/disable', { code: '000000' }, after)).status]);
+    log.push(['with a recovery code', (await post(base, '/2fa/disable', { code: done.json.recoveryCodes[0] }, after)).status]);
+    log.push(['off again', (await get(base, '/2fa', after)).json, await sub({ u: listener.username, p: listener.password })]);
     // a user who has it set up is asked for a code, as when it is required
     log.push(['the two-step user', (await post(base, '/login', creds(secure))).json]);
     return log;

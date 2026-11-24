@@ -1,7 +1,11 @@
-//! Which forwarding headers to believe, and so who the client is. This reproduces Navidrome's own rules (its
-//! `realIPMiddleware`, chi's `ClientIPFrom*` middlewares, and `UsernameFromExtAuthHeader`), so putting the gateway in
-//! front changes nothing: the gateway decides with the trusted list the container already has, then hands Navidrome
-//! one clean `X-Real-IP` and trusts nothing else.
+//! Which forwarding headers to believe, and so who the client is. The trusted list is read as Navidrome reads it
+//! (its `realIPMiddleware`, chi's `ClientIPFromXFFTrustedProxies`, and `UsernameFromExtAuthHeader`); the gateway
+//! decides with it, then hands Navidrome one clean `X-Real-IP` and trusts nothing else.
+//!
+//! Stricter than Navidrome in one thing: from a trusted proxy only `X-Forwarded-For` is believed. Navidrome takes
+//! `True-Client-IP` and `X-Real-IP` first, and a proxy set up the usual way (it appends to `X-Forwarded-For`) passes
+//! those two on from the client, who would then choose its own address and with it step around every limit kept by
+//! address (docs/security-review-2026-11-24.md, F2).
 
 use std::net::{IpAddr, Ipv6Addr};
 
@@ -49,21 +53,14 @@ impl TrustList {
     }
 }
 
-/// The client's address. From a trusted peer, as Navidrome reads it: `True-Client-IP`, else `X-Real-IP` (the last of
-/// each, when sent more than once), else the rightmost `X-Forwarded-For` hop that isn't itself trusted, else the peer.
-/// A header whose value is not an address is skipped. From anyone else, the peer, whatever the headers claim.
+/// The client's address. From a trusted peer: the rightmost `X-Forwarded-For` hop that isn't itself trusted, else
+/// the peer. From anyone else, the peer, whatever the headers claim.
 pub fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &TrustList) -> IpAddr {
     let peer = peer.to_canonical();
     if !trusted.contains(peer) {
         return peer;
     }
-    header_ip(headers, "true-client-ip").or_else(|| header_ip(headers, "x-real-ip")).or_else(|| forwarded_for(headers, trusted)).unwrap_or(peer)
-}
-
-fn header_ip(headers: &HeaderMap, name: &str) -> Option<IpAddr> {
-    let value = headers.get_all(name).iter().next_back()?.to_str().ok()?;
-    // Go's header parsing trims the value before chi reads it
-    parse_ip(value.trim_matches([' ', '\t']))
+    forwarded_for(headers, trusted).unwrap_or(peer)
 }
 
 /// Walks `X-Forwarded-For` from the right (the hops nearest this server first): trusted hops are skipped, the first
@@ -142,35 +139,24 @@ mod tests {
     }
 
     #[test]
-    fn a_trusted_peer_is_believed_in_navidromes_order() {
+    fn from_a_trusted_peer_only_forwarded_for_is_believed() {
         let list = TrustList::parse("10.0.0.0/8");
         let peer = ip("10.0.0.2");
+        // what the client sent and the proxy passed on, beside what the proxy appended
         let all = headers(&[("x-forwarded-for", "203.0.113.1"), ("x-real-ip", "203.0.113.2"), ("true-client-ip", "203.0.113.3")]);
-        assert_eq!(client_ip(peer, &all, &list), ip("203.0.113.3"));
-        let two = headers(&[("x-forwarded-for", "203.0.113.1"), ("x-real-ip", "203.0.113.2")]);
-        assert_eq!(client_ip(peer, &two, &list), ip("203.0.113.2"));
-        let xff = headers(&[("x-forwarded-for", "203.0.113.1")]);
-        assert_eq!(client_ip(peer, &xff, &list), ip("203.0.113.1"));
+        assert_eq!(client_ip(peer, &all, &list), ip("203.0.113.1"));
+        let chosen = headers(&[("x-real-ip", "203.0.113.2"), ("true-client-ip", "203.0.113.3")]);
+        assert_eq!(client_ip(peer, &chosen, &list), peer, "no X-Forwarded-For: the proxy itself, never a header the client may have sent");
         assert_eq!(client_ip(peer, &HeaderMap::new(), &list), peer);
     }
 
     #[test]
-    fn a_header_sent_twice_counts_by_its_last_value() {
-        // a proxy that adds its own X-Real-IP after the client's: the client's is not the one believed
-        let list = TrustList::parse("10.0.0.0/8");
-        let added = headers(&[("x-real-ip", "6.6.6.6"), ("x-real-ip", "203.0.113.2")]);
-        assert_eq!(client_ip(ip("10.0.0.2"), &added, &list), ip("203.0.113.2"));
-    }
-
-    #[test]
-    fn what_is_not_an_address_is_skipped() {
+    fn addresses_are_read_as_chi_reads_them() {
         let list = TrustList::parse("10.0.0.0/8");
         let peer = ip("10.0.0.2");
-        let bad = headers(&[("true-client-ip", "203.0.113.3:443"), ("x-real-ip", "[2001:db8::1]"), ("x-forwarded-for", "203.0.113.1")]);
-        assert_eq!(client_ip(peer, &bad, &list), ip("203.0.113.1"), "with a port or brackets, Navidrome does not take it either");
-        let zoned = headers(&[("x-real-ip", "fe80::1%eth0")]);
+        let zoned = headers(&[("x-forwarded-for", "fe80::1%eth0")]);
         assert_eq!(client_ip(peer, &zoned, &list), ip("fe80::1"));
-        let mapped = headers(&[("x-real-ip", "::ffff:203.0.113.9")]);
+        let mapped = headers(&[("x-forwarded-for", "::ffff:203.0.113.9")]);
         assert_eq!(client_ip(peer, &mapped, &list), ip("203.0.113.9"));
         assert_eq!(parse_ip("fe80::1%"), None);
         assert_eq!(parse_ip("10.0.0.1%eth0"), None);

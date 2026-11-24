@@ -391,6 +391,11 @@ async fn off_or_optional_and_not_set_up_signs_in_as_navidrome_does() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let recovery = body["recoveryCodes"][0].as_str().unwrap().to_string();
     assert_eq!(optional.sign_in("alice", "sesame", "").await.2["twoFactor"], "code");
+    // the sessions from before it was on have ended (one may be someone else's, opened with the password alone);
+    // the one that turned it on goes on with the token it was answered
+    assert_eq!(optional.get("/2fa", &session).await.0, StatusCode::UNAUTHORIZED);
+    let session = body["token"].as_str().unwrap().to_string();
+    assert_eq!(optional.get("/2fa", &session).await.2["enabled"], true);
     // replacing the authenticator takes a code from the one in use
     let (status, _, body) = optional.post("/2fa/setup", json!({ "code": "000000" }), &session).await;
     assert_eq!((status, &body["twoFactor"]), (StatusCode::UNAUTHORIZED, &json!("code")));
@@ -483,6 +488,10 @@ async fn an_admin_resets_someones_two_step_verification_and_their_app_passwords_
     // they set it up again at their next sign-in; their app passwords are still there
     assert_eq!(w.sign_in("alice", "sesame", "").await.2["twoFactor"], "setup");
     assert_eq!(w.get("/app-passwords", &alice).await.2.as_array().unwrap().len(), 1);
+    // and setting it up again ends the sessions from before
+    let (_, again, _) = w.set_up("alice", "sesame").await;
+    assert_eq!(w.get("/app-passwords", &alice).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(w.get("/app-passwords", &again).await.2.as_array().unwrap().len(), 1);
 }
 
 // ---------------------------------------------------------------- the browser sign-in for apps

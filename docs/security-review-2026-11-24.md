@@ -8,8 +8,23 @@ configuration was not looked at.
 **Result.** No way was found for an outsider to sign in, or to read another user's data, on a server reached
 directly. Six weaknesses were proven, the worst of them only when the server is told it sits behind a reverse proxy,
 which is how it will be deployed. Each has a failing test in `tools/contract/security/findings.test.mjs`
-(`node --test tools/contract/security/findings.test.mjs`: 6 fail today; a fix is done when its test passes). Nothing
-was fixed here.
+(`node --test tools/contract/security/findings.test.mjs`: all 6 failed on `6094387`).
+
+**Fixed since**, at the owner's request, in the commit after this report on the same branch; all 6 tests pass, with
+the server's own tests, the contract suite through the gateway (129) and the differential runner (169 the same).
+The findings below describe the code as reviewed.
+
+| | Fix | Left open |
+|---|---|---|
+| F1 | No header signs anyone in unless `ExtAuth.UserHeader` names one (Navidrome's default `Remote-User` is gone; empty and `none` mean none). `Remote-User` from a client is never passed on to Navidrome | A deployment that does name a header still depends on its proxy overwriting it |
+| F2 | From a trusted proxy only `X-Forwarded-For` is believed, never `True-Client-IP` or `X-Real-IP` | A proxy that sends only `X-Real-IP` leaves every client with the proxy's address: it must send `X-Forwarded-For` |
+| F3 | 10 wrong verification codes for an account in an hour, from anywhere, and no code is looked at for the rest of the hour (429). Kept in memory: a restart forgets | Password guessing is still limited by address only; someone who has the password can keep the owner's second step refused. Nobody is told |
+| F4 | 5 waiting sign-ins per address (the address's oldest gives way), 2000 in all (the oldest unapproved gives way): a new sign-in always gets a place | With several hundred addresses the list can still be turned over faster than a user approves |
+| F5 | A form post's body has 30 s to arrive, a request under `/auth` 10 s | Still up to 10 MiB per connection for those 30 s; no cap on connections per address; bodies streamed on to Navidrome are not timed |
+| F6 | Turning two-step verification on ends the account's sessions; the one that did it goes on with the token the confirmation answers. Turning it off or an admin's reset ends none (those sessions were opened with a code) | Making an app password still asks for no code; the old web UI's handling of the new token after confirming was not checked in a browser |
+
+Two behaviours differ from the frozen Navidrome on purpose (F1's default, F6's ended sessions); the differential
+test that assumed the second was changed to go on with the new token.
 
 ## Findings
 

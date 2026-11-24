@@ -1,6 +1,6 @@
 // The security review's proven findings (docs/security-review-2026-11-24.md), one test each, written as the
-// behaviour the server should have. Every test here FAILS on the code under review; a fix is done when its test
-// passes. Not part of the suites CI runs.
+// behaviour the server should have. All six failed on the code under review (6094387) and pass since the fixes
+// that came with the report: they stay as regression tests.
 //
 //   node tools/fixtures/build.mjs
 //   node --test tools/contract/security/findings.test.mjs
@@ -78,6 +78,7 @@ test('F5. a request whose body never arrives is given up on', { timeout: 300_000
   t.after(() => socket.destroy());
   let closed = false;
   socket.on('close', () => { closed = true; }).on('error', () => {});
+  socket.resume(); // the answer is read (and dropped), or the end of the connection is never seen
   socket.write(`POST /rest/ping?${COMMON} HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 10485760\r\n\r\nx=`);
   socket.write(Buffer.alloc(1 << 20, 0x61));
   await sleep(45_000);

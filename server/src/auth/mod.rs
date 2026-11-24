@@ -16,9 +16,10 @@ pub mod ratelimit;
 pub mod store;
 pub mod totp;
 
+use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use chrono::Utc;
@@ -45,6 +46,28 @@ use store::User;
 /// Navidrome's `MaxLoginBodySize`: what a request under `/auth` may send.
 pub const MAX_BODY_BYTES: usize = 8 << 10;
 
+/// Wrong verification codes an account may be sent in `WRONG_CODES_WINDOW`, wherever they come from: the limit by
+/// address stops nobody with many addresses, and with the password known a code is one of a million. After these,
+/// no code is looked at until the window ends (the right one neither, or the guessing would go on).
+const MAX_WRONG_CODES: u32 = 10;
+const WRONG_CODES_WINDOW: Duration = Duration::from_secs(3600);
+const TOO_MANY_CODES: &str = "Too many wrong verification codes; try again later";
+
+struct WrongCodes {
+    since: Instant,
+    count: u32,
+}
+
+enum Code {
+    Right,
+    Wrong,
+    /// Not looked at: too many wrong ones.
+    Refused,
+}
+
+/// How long a request's body may take to arrive: it is a few hundred bytes.
+const BODY_WITHIN: Duration = Duration::from_secs(10);
+
 /// The audience of a setup token: no API takes it, only the two setup routes.
 const AUDIENCE_SETUP: &str = "sonus-2fa-setup";
 const SETUP_TOKEN_SECONDS: i64 = 15 * 60;
@@ -57,6 +80,7 @@ pub struct Auth {
     session_timeout: Duration,
     limiter: Option<RateLimiter>,
     devices: DeviceLogins,
+    wrong_codes: Mutex<HashMap<String, WrongCodes>>,
     base_path: String,
     frame_options: HeaderValue,
     enable_gravatar: bool,
@@ -293,6 +317,7 @@ impl Auth {
             session_timeout: setup.session_timeout,
             limiter: RateLimiter::new(setup.limit, setup.window),
             devices: DeviceLogins::default(),
+            wrong_codes: Mutex::default(),
             base_path: setup.base_path.trim_end_matches('/').to_string(),
             frame_options: HeaderValue::from_str(&setup.frame_options).unwrap_or(HeaderValue::from_static("DENY")),
             enable_gravatar: setup.enable_gravatar,
@@ -308,7 +333,9 @@ impl Auth {
             Err(Miss::MethodNotAllowed(allowed)) => return self.plain(StatusCode::METHOD_NOT_ALLOWED, "", request.headers, Some(&allowed)),
         };
         // Navidrome reads at most 8 KB of a request here: more, and its JSON decoding fails
-        let body = Limited::new(body, MAX_BODY_BYTES).collect().await.ok().map(|read| read.to_bytes());
+        // nor does it wait for one that does not come
+        let read = tokio::time::timeout(BODY_WITHIN, Limited::new(body, MAX_BODY_BYTES).collect()).await;
+        let body = read.ok().and_then(|read| read.ok()).map(|read| read.to_bytes());
         let query = request.query.and_then(|q| Params::parse(q.as_bytes(), None)).map(|p| String::from_utf8_lossy(p.get("jwt")).into_owned());
         let sent = Sent {
             bearer: bearer(request.headers),
@@ -511,12 +538,13 @@ impl Auth {
             if code.is_empty() {
                 return Some(two_factor("code", "Verification code required"));
             }
-            return match self.code_checks_out(user, code) {
-                true => None,
-                false => {
+            return match self.check_code(user, code) {
+                Code::Right => None,
+                Code::Wrong => {
                     warn!(username = %user.user_name, "web sign-in refused: wrong verification code");
                     Some(two_factor("code", INVALID_CODE))
                 }
+                Code::Refused => Some(fail(StatusCode::TOO_MANY_REQUESTS, TOO_MANY_CODES)),
             };
         }
         if self.policy == TwoFactor::Required {
@@ -531,14 +559,36 @@ impl Auth {
         None
     }
 
-    fn code_checks_out(&self, user: &User, code: &str) -> bool {
-        match store::verify(&self.db, &self.keys, &user.id, code, Utc::now()) {
+    /// Checks a code for the user's two-step verification, counting the wrong ones per account.
+    fn check_code(&self, user: &User, code: &str) -> Code {
+        let refused = |codes: &mut HashMap<String, WrongCodes>| {
+            codes.retain(|_, wrong| wrong.since.elapsed() < WRONG_CODES_WINDOW);
+            codes.get(&user.id).is_some_and(|wrong| wrong.count >= MAX_WRONG_CODES)
+        };
+        if refused(&mut self.wrong_codes.lock().expect("the wrong codes' lock")) {
+            return Code::Refused;
+        }
+        let right = match store::verify(&self.db, &self.keys, &user.id, code, Utc::now()) {
             Ok(right) => right,
             Err(e) => {
                 error!(user = %user.user_name, error = %e, "two-step verification: could not check the code");
-                false
+                return Code::Wrong;
             }
+        };
+        let mut codes = self.wrong_codes.lock().expect("the wrong codes' lock");
+        // looked at again: codes sent at once are all past the first look before any is counted
+        if refused(&mut codes) {
+            return Code::Refused;
         }
+        if right {
+            return Code::Right;
+        }
+        let wrong = codes.entry(user.id.clone()).or_insert(WrongCodes { since: Instant::now(), count: 0 });
+        wrong.count += 1;
+        if wrong.count == MAX_WRONG_CODES {
+            warn!(username = %user.user_name, "two-step verification: too many wrong codes for this account, none is taken for an hour");
+        }
+        Code::Wrong
     }
 
     fn create_admin(&self, sent: &Sent) -> Reply {
@@ -575,8 +625,12 @@ impl Auth {
         let Some(user) = self.user_for_setup(&token) else { return fail(StatusCode::UNAUTHORIZED, NOT_AUTHENTICATED) };
         match self.two_factor_enabled(&user) {
             Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-            Ok(true) if !self.code_checks_out(&user, &code) => return two_factor("code", INVALID_CODE),
-            Ok(_) => {}
+            Ok(true) => match self.check_code(&user, &code) {
+                Code::Right => {}
+                Code::Wrong => return two_factor("code", INVALID_CODE),
+                Code::Refused => return fail(StatusCode::TOO_MANY_REQUESTS, TOO_MANY_CODES),
+            },
+            Ok(false) => {}
         }
         let (secret, uri) = match store::begin_setup(&self.db, &self.keys, &user.id, &user.user_name) {
             Ok(begun) => begun,
@@ -607,6 +661,11 @@ impl Auth {
             }
         };
         info!(username = %user.user_name, "two-step verification set up");
+        // the account's sessions from before have ended with it (store::end_sessions): this one gets a new token
+        let user = match store::find_user(&self.db, &self.keys, &user.user_name) {
+            Ok(Some(found)) if found.id == user.id => found,
+            _ => User { token_epoch: user.token_epoch + 1, ..user },
+        };
         let mut payload = self.signed_in_payload(&user);
         payload.insert("recoveryCodes".into(), json!(codes));
         ok(Value::Object(payload))
@@ -638,10 +697,11 @@ impl Auth {
     /// The fork's `withCode`: runs `then` after a code from the user's authenticator (or a recovery code) checks out.
     fn with_code(&self, user: &User, sent: &Sent, then: impl FnOnce(&Auth, &User) -> Reply) -> Reply {
         let Some([_, code]) = sent.fields(["token", "code"]) else { return fail(StatusCode::UNPROCESSABLE_ENTITY, BAD_PAYLOAD) };
-        if !self.code_checks_out(user, &code) {
-            return two_factor("code", INVALID_CODE);
+        match self.check_code(user, &code) {
+            Code::Right => then(self, user),
+            Code::Wrong => two_factor("code", INVALID_CODE),
+            Code::Refused => fail(StatusCode::TOO_MANY_REQUESTS, TOO_MANY_CODES),
         }
-        then(self, user)
     }
 
     fn disable(&self, user: &User, sent: &Sent) -> Reply {
@@ -712,7 +772,7 @@ impl Auth {
 
     fn device_start(&self, sent: &Sent) -> Reply {
         let Some([client, device]) = sent.fields(["client", "device"]) else { return fail(StatusCode::UNPROCESSABLE_ENTITY, BAD_PAYLOAD) };
-        match self.devices.start(&client, &device) {
+        match self.devices.start(&client, &device, &sent.address) {
             Ok(started) => ok(json!({
                 "deviceCode": started.device_code,
                 "userCode": started.user_code,

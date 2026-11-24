@@ -158,6 +158,8 @@ impl Gateway {
             headers.remove(name);
         }
         headers.remove(&settings.upstream_user_header);
+        // Navidrome's default name for it: never passed on from a client, whatever the settings name
+        headers.remove("remote-user");
 
         // What is answered or checked here instead of by Navidrome (routes.rs). A user a trusted proxy names is
         // Navidrome's to look up, as before.

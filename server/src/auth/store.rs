@@ -224,6 +224,7 @@ pub fn confirm_setup(db: &Db, keys: &Keys, user_id: &str, code: &str, now: DateT
             "UPDATE sonus_two_factor SET secret = pending_secret, pending_secret = '', confirmed_at = ?1, last_step = ?2 WHERE user_id = ?3",
             (&at, step, &id),
         )?;
+        end_sessions(tx, &id)?;
         replace_recovery_codes(tx, &id, &hashes)
     })?;
     Ok(codes)
@@ -257,6 +258,14 @@ pub fn new_recovery_codes(db: &Db, user_id: &str) -> Result<Vec<String>, StoreEr
     let (id, hashes) = (user_id.to_string(), codes.iter().map(|c| recovery_hash(c)).collect::<Vec<_>>());
     db.write_blocking(move |tx| replace_recovery_codes(tx, &id, &hashes))?;
     Ok(codes)
+}
+
+/// Ends the user's sessions, as a new password does (Navidrome and this server refuse a token from an earlier
+/// epoch). When two-step verification is turned on: a session opened before, with the password alone, would
+/// otherwise go on, and be renewed for as long as it is used. (Turning it off, or an admin's reset, ends none: those
+/// sessions were opened with a code, and after a reset the next set-up ends them.)
+fn end_sessions(tx: &rusqlite::Transaction<'_>, user_id: &str) -> rusqlite::Result<()> {
+    tx.execute("UPDATE user SET token_epoch = token_epoch + 1 WHERE id = ?1", [user_id]).map(|_| ())
 }
 
 /// Removes the user's two-step verification and recovery codes (their app passwords stay). With the policy

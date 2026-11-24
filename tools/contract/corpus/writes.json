@@ -1,0 +1,49 @@
+{
+  "description": "Changes a user makes, each followed by the reads that show it, in order. Each side needs its own copy of the golden database (diff.mjs --go-vs-go and --go-vs-gateway give each its own). Times the server takes from the clock (when something was starred, when a queue or playlist changed) are volatile; plays carry their own time.",
+  "volatile": [
+    "subsonic-response.serverVersion",
+    "subsonic-response.**.starred",
+    "subsonic-response.playQueue.changed",
+    "subsonic-response.playlist.changed",
+    "subsonic-response.playlists.playlist.*.changed"
+  ],
+  "unordered": [
+    "subsonic-response.**.artist.*.roles"
+  ],
+  "requests": [
+    { "name": "star a song, an album and an artist", "method": "star", "params": { "id": "{{track.cjk}}", "albumId": "{{album.twoDiscs}}", "artistId": "{{artist.cjk}}" } },
+    { "name": "getStarred2 after star", "method": "getStarred2" },
+    { "name": "unstar the golden stars", "method": "unstar", "params": { "id": "{{track.flac}}", "albumId": "{{album.compilation}}", "artistId": "{{artist.kenji}}" } },
+    { "name": "getStarred2 after unstar", "method": "getStarred2" },
+    { "name": "getAlbum after unstar", "method": "getAlbum", "params": { "id": "{{album.compilation}}" } },
+
+    { "name": "setRating a song", "method": "setRating", "params": { "id": "{{track.ogg}}", "rating": 3 } },
+    { "name": "setRating an album", "method": "setRating", "params": { "id": "{{album.cjk}}", "rating": 2 } },
+    { "name": "setRating 0 clears", "method": "setRating", "params": { "id": "{{track.mp3}}", "rating": 0 } },
+    { "name": "getSong after ratings", "method": "getSong", "params": { "id": "{{{{$}}}}" }, "for": ["track.ogg", "track.mp3"] },
+    { "name": "getAlbum after rating", "method": "getAlbum", "params": { "id": "{{album.cjk}}" } },
+
+    { "name": "scrobble a play", "method": "scrobble", "params": { "id": "{{track.wav}}", "submission": true, "time": 1767225600000 } },
+    { "name": "scrobble two plays at once", "method": "scrobble", "params": { "id": ["{{track.opus}}", "{{track.m4a}}"], "submission": true, "time": [1767312000000, 1767312200000] } },
+    { "name": "scrobble now playing", "method": "scrobble", "params": { "id": "{{track.korean}}", "submission": false } },
+    { "name": "getSong after plays", "method": "getSong", "params": { "id": "{{{{$}}}}" }, "for": ["track.wav", "track.opus", "track.m4a", "track.korean"] },
+    { "name": "getAlbum after plays", "method": "getAlbum", "params": { "id": "{{album.turkish}}" } },
+    { "name": "getAlbumList2 frequent after plays", "method": "getAlbumList2", "params": { "type": "frequent", "size": 50 } },
+    { "name": "getAlbumList2 recent after plays", "method": "getAlbumList2", "params": { "type": "recent", "size": 50 } },
+
+    { "name": "savePlayQueue", "method": "savePlayQueue", "params": { "id": ["{{track.korean}}", "{{track.japanese}}", "{{track.cjk}}"], "current": "{{track.japanese}}", "position": 2500 } },
+    { "name": "getPlayQueue after save", "method": "getPlayQueue" },
+    { "name": "savePlayQueue as a form post", "method": "savePlayQueue", "post": true, "params": { "id": ["{{track.flac}}"], "current": "{{track.flac}}", "position": 0 } },
+    { "name": "getPlayQueue after the form post", "method": "getPlayQueue" },
+
+    { "name": "updatePlaylist rename, comment, add, remove", "method": "updatePlaylist", "params": { "playlistId": "{{playlist.own}}", "name": "Road Trip (edited)", "comment": "Changed by the diff", "songIdToAdd": ["{{track.turkish}}", "{{track.umlaut}}"], "songIndexToRemove": 0 } },
+    { "name": "getPlaylist after update", "method": "getPlaylist", "params": { "id": "{{playlist.own}}" } },
+    { "name": "updatePlaylist public", "method": "updatePlaylist", "params": { "playlistId": "{{playlist.own}}", "public": true } },
+    { "name": "getPlaylists after update", "method": "getPlaylists" },
+    { "name": "updatePlaylist of another user's", "method": "updatePlaylist", "params": { "playlistId": "{{playlist.otherUser}}", "name": "Not yours" } },
+    { "name": "deletePlaylist of another user's", "method": "deletePlaylist", "params": { "id": "{{playlist.otherUser}}" } },
+    { "name": "deletePlaylist own", "method": "deletePlaylist", "params": { "id": "{{playlist.own}}" } },
+    { "name": "getPlaylist after delete", "method": "getPlaylist", "params": { "id": "{{playlist.own}}" } },
+    { "name": "getPlaylists after delete", "method": "getPlaylists" }
+  ]
+}

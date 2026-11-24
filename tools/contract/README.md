@@ -1,0 +1,139 @@
+# Server contract tests and the differential runner
+
+How the Rust server is proven to answer as the frozen Navidrome does (`docs/server-roadmap.md`, principle 4):
+
+- **The contract suite** (`test/`, `node:test`): black-box checks of what Sonus clients rely on, given a base URL and a
+  manifest. It passes against the frozen Navidrome on the golden database, and through the Rust gateway.
+- **The differential runner** (`diff.mjs`): the same requests against two servers on copies of the same database, the
+  answers normalized and compared field by field.
+
+Both run on `tools/fixtures/` (the fixture library and the golden database). Node 24, no dependencies.
+
+## Quick start
+
+```sh
+node tools/fixtures/build.mjs                 # once: the library, the golden database, its manifest
+node tools/contract/run.mjs                   # the suite against Navidrome on a fresh copy of it
+node tools/contract/diff.mjs --go-vs-gateway  # Navidrome vs the gateway in front of another Navidrome
+```
+
+## Running the suite
+
+| Command | Against |
+|---|---|
+| `node tools/contract/run.mjs` | the frozen Navidrome on a fresh copy of the golden database (started, then stopped and removed) |
+| `node tools/contract/run.mjs --through-gateway` | the same, behind the Rust gateway (`cargo run` in `server/`) |
+| `node tools/contract/run.mjs --base <url> --manifest <file>` | a server that runs already (the Rust server, later) |
+| `node tools/contract/run.mjs --demo` | the demo server (`tools/demo-server`), with `manifests/demo.json` |
+
+Add `--only <name pattern>` or test file names (`run.mjs auth connect`) to run part of it. The files run one at a time:
+some tests change the user's state and put it back (stars, the play queue, playlists they make); plays they scrobble
+stay. Run against a long-lived server, the starting-state tests (`manifest.state`) hold only until something else
+changes that state.
+
+A **manifest** tells the suite who signs in and what to look for: `users` (`primaryUser` signs in with a token), and,
+for the golden database, `ids` by key, `expect`, `counts`, `state`, `covers` (`tools/fixtures/README.md`). Tests that
+need a key or a user the manifest lacks are skipped, so the suite runs against another catalogue (the demo server's)
+and looks its entities up through the API; ids are never written into the tests. A manifest's `knownDifferences` lists
+tests that server is not expected to pass, and why (`manifests/demo.json`: ten things the demo server does not do as
+Navidrome does); `run.mjs` prints them and skips them.
+
+| File | Covers |
+|---|---|
+| `basics` | `ping` (and `ping.view`), `getOpenSubsonicExtensions` without signing in, `getScanStatus`, CORS on `/rest` and the browser sign-in |
+| `auth` | `t`/`s`, `p`, `p=enc:`; wrong password 40, unknown user 40, no `u` 10, `u` alone 40, missing parameters 10 (and 70 for `getAlbum`/`getSong` without an id); `apiKey` with `tokenInfo`, 43 with `u`/`p`/`t`, 44 unknown; the two-step user: account password 40 (all three ways), app password as `p`, `enc:` and token, with or without dashes |
+| `library` | `getAlbumList2` paged (alphabeticalByName, the same in pages of 3) and its other types; `search3` with the empty query paging the whole library (each song once, the same in pages of 4) and with words; `getAlbum` (disc and track order), `getSong`; the fields the clients map (`web/src/api/subsonic.js`, `src/Sonus.Core`) |
+| `fixtures` | the library's hard cases (`tools/fixtures/README.md`): exact text in every format, several artists, compilations, two discs, one album name by two artists, CJK and accents in search, the Turkish I in `sortName`, missing tags, ReplayGain, MusicBrainz ids, the original date, several genres, audio properties |
+| `playlists` | `getPlaylists` (own, another user's public one, a smart playlist), `getPlaylist`, `createPlaylist` (new, and overwrite with `playlistId`), `updatePlaylist` (rename, comment, add, remove several, public), `deletePlaylist`; another user's playlist: read-only, 50 on change |
+| `user-state` | the starting stars, ratings, play counts and queue; `star`/`unstar` (songs, album, artist), `getStarred2`; `scrobble` (a play, its time, now playing); `savePlayQueue`/`getPlayQueue` (songs, current, position, `changedBy`) |
+| `lyrics-and-discovery` | `getLyricsBySongId` (embedded synced with `[offset:+500]`, an `.lrc` with `[offset:-250]`, unsynced with its language, none), `getLyrics`, `getSimilarSongs2`, `getArtistInfo2` |
+| `media` | `getCoverArt` (as is: the folder's and the embedded picture byte for byte; resized), `stream` (whole, `Range` from, to, open-ended, suffix, past the end 416, `format=raw`, unknown id) |
+| `form-post` | the same calls as `application/x-www-form-urlencoded` posts: reads, sign-in errors, API key, app password, a 300-song `savePlayQueue`, playlist changes, stars |
+| `connect` | Connect v1: `welcome`, `devices`, `hello`, `state` (stamped `at`), a command from one connection to another, the `offline` error, a `transfer` (`load` and `stop`), leaving, a wrong password |
+| `device-login` | `/auth/device/start`, `poll` (pending, approved once then expired, denied), approval on the web as the two-step user, `tokenInfo` with the key, `revoke` (204, then 44, then 404), 422 |
+
+### Not covered
+
+- Transcoding (`stream` with `format`/`maxBitRate`): the test machine has no ffmpeg, and its output would differ between
+  ffmpeg versions anyway.
+- What Sonus does not use (roadmap, decision 1): XML, JSONP, `getArtists`/`getIndexes`, sharing, radio, bookmarks,
+  downloads; the native `/api` (only used to build the database).
+- Limits and timers: sign-in rate limits (off in the test settings), Connect's 30 s ping and 75 s timeout, its 32-device
+  cap and close code 4000, a device sign-in's 10-minute expiry and 200-at-a-time cap.
+- Two-step verification's web side beyond what the build does (recovery codes, turning it off, an admin's reset) and
+  the web sign-in itself (`/auth/login`, used by the device-login tests to approve).
+- `getNowPlaying`, `reportPlayback`, `startScan`, `setRating` (the database build uses it; the writes corpus compares it).
+
+## The differential runner
+
+```sh
+node tools/contract/diff.mjs --go-vs-gateway [--corpus <file>]   # A: Navidrome; B: the gateway in front of another Navidrome
+node tools/contract/diff.mjs --go-vs-go [--corpus <file>]        # two Navidromes: what differs between two runs (should be nothing)
+node tools/contract/diff.mjs --a <url> --b <url> --manifest <file> [--corpus <file>]
+```
+
+Each side gets its own copy of the golden database. Options: `--only <text>` (requests whose name contains it),
+`--json <file>` (the whole report). It exits with 1 when anything differs. `node --test tools/contract/diff.test.mjs`
+tests the runner itself.
+
+Results so far (Navidrome 0.64.2-sonus.10): `corpus/read-only.json`, 116 requests, and `corpus/writes.json`, 34, come
+out identical between Navidrome and Navidrome behind the gateway (`main`'s `server/`), and between two Navidromes.
+
+### The corpora
+
+| File | |
+|---|---|
+| `corpus/read-only.json` | every sign-in and its errors, extensions, scan status; album lists (every type but random), `search3` (the empty query whole and paged, words in every script); `getAlbum`, `getSong` for every fixture case; playlists, the play queue, stars; lyrics, similar songs, artist info; cover art (as is, resized), `stream` (every format, ranges, errors); two device sign-in calls |
+| `corpus/writes.json` | stars, ratings, plays, the play queue, changing and deleting a playlist; each followed by the reads that show it |
+
+### Normalizing
+
+- **Key order** never matters: JSON is compared field by field. Other answers are compared by status, `Content-Type`,
+  `Content-Length`, `Content-Range`, `Accept-Ranges`, length and a hash of the bytes.
+- **Volatile** fields are listed in the corpus (`volatile`) and left out: `serverVersion`; in the writes corpus, the
+  times the server takes from its clock (`starred`, a queue's or playlist's `changed`). Plays carry their own `time`.
+- **Unordered** arrays (`unordered`) are compared sorted: an artist's `roles`, which Go lists from a map in random
+  order, and `getSimilarSongs2`'s songs, which Navidrome shuffles (without Last.fm it picks from the artist's own).
+- Requests are the same bytes on both sides: tokens use a fixed salt.
+
+### Adding a case
+
+To the suite: a `test(...)` in the file it belongs to. Look entities up with `id('key')` (skip with `needs('key')`
+when the manifest may not have it) or through the API (`getLibrary()`); put back what the test changes. Check what
+the clients read, as Navidrome answers it; when the demo server cannot do it, add it to `manifests/demo.json`'s
+`knownDifferences` with the reason.
+
+To a corpus: a request (`diff.mjs`'s header has the format):
+
+```json
+{ "name": "getAlbum", "method": "getAlbum", "params": { "id": "{{{{$}}}}" }, "for": ["album.normal", "album.cjk"] }
+{ "name": "stream Range", "method": "stream", "params": { "id": "{{track.flac}}" }, "headers": { "Range": "bytes=0-99" } }
+{ "name": "an app password", "method": "ping", "auth": { "user": "secure", "as": "appPassword" } }
+{ "name": "device poll", "path": "/auth/device/poll", "httpMethod": "POST", "json": { "deviceCode": "x" } }
+```
+
+Run `--go-vs-go` first: a field that differs between two Navidromes is volatile (list it, say why) or the golden
+database is not settled yet (fix the build). Requests that make something with a random id (`createPlaylist`) do not
+fit a corpus yet: each side would get another id.
+
+## What Navidrome does that a rewrite must match
+
+Found while writing these, all checked by the suite or the corpora:
+
+- `public` is left out of playlists when false; another user's playlist is `readonly: true`.
+- `getAlbum` and `getSong` without an id answer 70, not 10; `createPlaylist` without a name answers code 0; `u` without
+  a password or token is 40.
+- A smart playlist is filled when its owner reads it; until then others see it empty (the build has the admin read
+  it once). Read by its owner it changes `changed` and carries `validUntil`.
+- After start-up Navidrome works through `artwork_queue` in the background, and cover art ids change as it goes
+  (`al-<id>` becomes `al-<id>_<hash>`). The build waits for the queue to empty, so every copy answers the same.
+- Artist `roles` come in random order (a Go map); so do `getSimilarSongs2`'s songs.
+- `sortName` lowercases as Go does: `İnce Yol` → `ince yol`, `Işık` → `isık` (Rust's `to_lowercase` gives `i̇nce yol`).
+- A song's and an album's `year` is the original date's when there is one (2015, not 2019).
+- `discTitles` entries carry a cover art id, `dc-<albumId>:<disc>`.
+- `path` is made up from the tags (`Aurora Lane/Northern Lights/01-01 - First Light.flac`,
+  `[Unknown Artist]/[Unknown Album]/untagged.ogg`), not the file's.
+- Lyrics: an embedded Vorbis `LYRICS` tag has language `xxx`, an ID3 `USLT` its own (`eng`); `offset` is reported as
+  written, the line times are not shifted by it. `getLyrics` answers the lines without times.
+- Timestamps carry the server's local offset (`2026-11-24T19:50:32.1743303+01:00`), with as many fractional digits
+  as the clock gives (7 on Windows) and trailing zeros dropped.

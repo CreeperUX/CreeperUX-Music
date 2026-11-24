@@ -119,6 +119,7 @@ class Socket {
     socket.setNoDelay(true);
     socket.on('data', d => { this.heard = Date.now(); this.buffer = Buffer.concat([this.buffer, d]); this.#read(); });
     socket.on('close', () => this.#gone());
+    socket.on('end', () => this.destroy()); // the other end went without a close frame (an upgraded socket stays half open)
     socket.on('error', () => this.#gone());
     // a ping every 30 s; a connection silent for 75 s is gone
     this.ping = setInterval(() => { if (Date.now() - this.heard > 75_000) this.destroy(); else this.#frame(0x9, Buffer.alloc(0)); }, 30_000);

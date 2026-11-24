@@ -70,6 +70,7 @@ public sealed partial class MainWindow : Window, IShell
             e.Cancel = true; _closing = true;
             await _music.SaveQueueNowAsync(); // the position, for another device
             _connect?.Dispose();
+            _session?.Dispose();
             _music.Dispose();
             Close();
         };
@@ -104,14 +105,18 @@ public sealed partial class MainWindow : Window, IShell
     {
         if (_closing) return;
         _closing = true;
-        if (_music is { } m) { await m.SaveQueueNowAsync(); _connect?.Dispose(); m.Dispose(); }
+        if (_music is { } m) { await m.SaveQueueNowAsync(); _connect?.Dispose(); _session?.Dispose(); m.Dispose(); }
         Close();
     }
 
     private ConnectService? _connect;
+    private SessionService? _session;
 
-    /// <summary>Sonus Connect (the user's other devices), while signed in.</summary>
+    /// <summary>Sonus Connect version 1 (the user's other devices), while signed in.</summary>
     public ConnectService? Devices => _connect;
+
+    /// <summary>Sonus Connect version 2 (the user's one playback session), while signed in to a server that offers it.</summary>
+    public SessionService? Session => _session;
 
     /// <summary>The window is the active one; moving keyboard focus while it is not could take the foreground from the user.</summary>
     public bool IsActive { get; private set; }
@@ -218,6 +223,7 @@ public sealed partial class MainWindow : Window, IShell
         // can also revoke it on the server's web page)
         if (_music?.Client.Login is { IsApiKey: true } keyed) _ = DeviceLogin.RevokeAsync(keyed);
         _connect?.Dispose(); _connect = null;
+        _session?.Dispose(); _session = null;
         _music?.Dispose();
         _music = null; Ready = false;
         _view?.Leave(); _view = null;
@@ -244,8 +250,10 @@ public sealed partial class MainWindow : Window, IShell
         _panel.CloseRequested += () => SetPanel(false);
         PanelHost.Child = _panel;
         _connect?.Dispose();
-        _connect = new ConnectService(music, DispatcherQueue, DeviceName);
-        _bar = new PlaybackBar(music, _connect, this);
+        _connect = new ConnectService(music, DispatcherQueue, DeviceName); // version 1, where the server offers only that
+        _session?.Dispose();
+        _session = Core.Connect.SessionClient.Supported(music.Client) ? new SessionService(music, DispatcherQueue, _settings, DeviceName) : null;
+        _bar = new PlaybackBar(music, _connect, _session, this);
         _bar.QueueToggled += open => { SetPanel(true); _panel.Show(open ? "queue" : "now"); };
         BarHost.Child = _bar;
         BarHost.Visibility = Visibility.Visible;
@@ -634,13 +642,21 @@ public sealed partial class MainWindow : Window, IShell
             return true;
         }
         double remoteVolume = remote?.State?.Volume ?? 0.5;
+        // version 2: the volume keys change the volume of the device that plays
+        var playsElsewhere = _session?.ActiveElsewhere;
+        bool Volume(double step)
+        {
+            if (playsElsewhere is null) return false;
+            _session!.SetVolume(playsElsewhere.Id, Math.Clamp(playsElsewhere.Volume + step, 0, 1));
+            return true;
+        }
         switch (e.Key)
         {
             case VirtualKey.Space when !typing && !mods && !alt: if (!Remote(Core.Connect.ConnectCommand.Toggle)) m.TogglePlay(); e.Handled = true; break;
             case VirtualKey.Right when mods: if (!Remote(Core.Connect.ConnectCommand.Next)) m.Next(); e.Handled = true; break;
             case VirtualKey.Left when mods: if (!Remote(Core.Connect.ConnectCommand.Previous)) m.Previous(); e.Handled = true; break;
-            case VirtualKey.Up when mods: if (!Remote(Core.Connect.ConnectCommand.Volume, Math.Min(1, remoteVolume + 0.05))) m.SetVolume(m.Volume + 0.05); e.Handled = true; break;
-            case VirtualKey.Down when mods: if (!Remote(Core.Connect.ConnectCommand.Volume, Math.Max(0, remoteVolume - 0.05))) m.SetVolume(m.Volume - 0.05); e.Handled = true; break;
+            case VirtualKey.Up when mods: if (!Remote(Core.Connect.ConnectCommand.Volume, Math.Min(1, remoteVolume + 0.05)) && !Volume(0.05)) m.SetVolume(m.Volume + 0.05); e.Handled = true; break;
+            case VirtualKey.Down when mods: if (!Remote(Core.Connect.ConnectCommand.Volume, Math.Max(0, remoteVolume - 0.05)) && !Volume(-0.05)) m.SetVolume(m.Volume - 0.05); e.Handled = true; break;
             case VirtualKey.K when mods: case (VirtualKey)191 when !typing:
                 if (IsActive) _search?.Focus(FocusState.Keyboard);
                 e.Handled = true; break;
@@ -661,6 +677,7 @@ public sealed partial class MainWindow : Window, IShell
     /// Later (the window comes to the front, nothing playing): a queue saved since by another device is offered.</summary>
     private async Task OfferContinue(bool atStart)
     {
+        if (_session is not null) return; // version 2: the session stays on the server and every device shows it (rule 6)
         if (_music is not { } m || (!atStart && (m.IsActive || DateTimeOffset.Now - _offeredAt < TimeSpan.FromSeconds(15)))) return;
         _offeredAt = DateTimeOffset.Now;
         RemoteQueue? q;

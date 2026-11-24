@@ -14,6 +14,8 @@ public sealed class NowPlayingPane : UserControl
     private readonly MusicService _music;
     private readonly IShell _shell;
     private readonly TextBlock _heading = Ui.Text("正在播放", size: 15, foreground: Ui.Brush("TextPrimaryBrush"), bold: true);
+    // Sonus Connect version 2: where the session plays, when not on this device
+    private readonly TextBlock _whereLine = Ui.Text("", size: 12, foreground: Ui.Brush("AccentTextBrush"));
     private readonly ContentControl _body = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch, IsTabStop = false };
     private string _mode = "now";
     private string? _shownTrack;
@@ -27,8 +29,10 @@ public sealed class NowPlayingPane : UserControl
         _music = music; _shell = shell;
         // the same head as the library's: a 36 px line 12 px down (so both titles sit on one line), the button 16 px in
         var head = new Grid { Padding = new Thickness(16, 12, 16, 8), MinHeight = 56 };
-        head.Children.Add(_heading);
-        _heading.VerticalAlignment = VerticalAlignment.Center;
+        var titles = Ui.Column(0, _heading, _whereLine);
+        titles.VerticalAlignment = VerticalAlignment.Center;
+        _whereLine.Visibility = Visibility.Collapsed;
+        head.Children.Add(titles);
         var close = Ui.IconButton(Glyphs.Close, "关闭右侧面板", (_, _) => CloseRequested?.Invoke(), 32, 12);
         close.HorizontalAlignment = HorizontalAlignment.Right; close.VerticalAlignment = VerticalAlignment.Center;
         close.Resources["ButtonForegroundPointerOver"] = Ui.Brush("TextPrimaryBrush");
@@ -56,7 +60,12 @@ public sealed class NowPlayingPane : UserControl
         UpdateHeading();
     }
 
-    private void UpdateHeading() => _heading.Text = _mode == "queue" ? "播放队列" : _music.Queue.Context?.Label is { Length: > 0 } l ? l : "正在播放";
+    private void UpdateHeading()
+    {
+        _heading.Text = _mode == "queue" ? "播放队列" : _music.Queue.Context?.Label is { Length: > 0 } l ? l : "正在播放";
+        _whereLine.Text = _music.Where ?? "";
+        _whereLine.Visibility = _music.Where is null ? Visibility.Collapsed : Visibility.Visible;
+    }
 
     // ---------------------------------------------------------------- Now playing
     private StackPanel? _nextBox;

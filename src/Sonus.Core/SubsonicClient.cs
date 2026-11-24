@@ -81,6 +81,8 @@ public sealed class SubsonicClient
     /// <summary>What the server lists this client as (Navidrome: Players, and who saved the play queue).</summary>
     public string ClientName { get; }
     public HashSet<string> Extensions { get; } = [];
+    /// <summary>The versions of each OpenSubsonic extension the server offers (Sonus Connect: 1, 2).</summary>
+    public Dictionary<string, IReadOnlyList<int>> ExtensionVersions { get; } = [];
     public bool IsOnline => _online;
 
     /// <summary>Reachable / not reachable, as the last request found it.</summary>
@@ -281,7 +283,12 @@ public sealed class SubsonicClient
         try
         {
             var ext = await CallAsync("getOpenSubsonicExtensions", null, cancel: cancel).ConfigureAwait(false);
-            foreach (var x in Array(ext, "openSubsonicExtensions")) if (Str(x, "name") is { } n) Extensions.Add(n);
+            foreach (var x in Array(ext, "openSubsonicExtensions"))
+            {
+                if (Str(x, "name") is not { } n) continue;
+                Extensions.Add(n);
+                ExtensionVersions[n] = Array(x, "versions").Where(v => v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out _)).Select(v => v.GetInt32()).ToList();
+            }
         }
         catch (SubsonicException) { /* plain Subsonic */ }
         string type = Str(r, "type") ?? "";

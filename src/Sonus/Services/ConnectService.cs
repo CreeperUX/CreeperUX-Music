@@ -27,7 +27,8 @@ public sealed class ConnectService : IDisposable
         _push.Interval = TimeSpan.FromMilliseconds(150); // a burst of changes (a new song: queue, state, position) is said once
         _push.IsRepeating = false;
         _push.Tick += (_, _) => Push();
-        if (!ConnectClient.Supported(music.Client)) return;
+        // version 1 only where the server offers no version 2 (SessionService speaks that)
+        if (!ConnectClient.Supported(music.Client) || SessionClient.Supported(music.Client)) return;
 
         _client = new ConnectClient(music.Client, name);
         _client.DevicesChanged += () => _ui.TryEnqueue(OnDevices);

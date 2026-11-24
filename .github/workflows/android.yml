@@ -1,0 +1,60 @@
+# The Android client (android/): its JVM tests (the core against the demo server, the queue against the Connect v2
+# vectors, the app's Robolectric tests) and a debug build, on every change to it. The device tests need an emulator and
+# run on a developer's machine (android/tools/test-device.ps1, see android/README.md).
+name: "Android"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "android/**"
+      - "tools/demo-server/**"
+      - "docs/protocol/connect-vectors.json"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - "tools/demo-server/**"
+      - "docs/protocol/connect-vectors.json"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: JVM tests and debug build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # the demo server the core's tests start (DemoServerTest, ConnectDemoTest)
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      # the SDK with its licences accepted: the Android Gradle plugin then fetches the platform and build tools it needs
+      - uses: android-actions/setup-android@v4
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - run: ./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug --console=plain
+
+      - name: Test reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-test-reports
+          path: |
+            android/core/build/reports/tests
+            android/app/build/reports/tests

@@ -62,6 +62,10 @@ class DeviceTest {
     private val server = InstrumentationRegistry.getArguments().getString("sonusServer") ?: "http://127.0.0.1:4633"
     private val http = OkHttpClient.Builder().readTimeout(10, TimeUnit.SECONDS).build()
 
+    /** The account: the tests run on the phone and the tablet at once, and one account is one playback session (Sonus
+     *  Connect v2), so the tablet uses the demo server's other account. */
+    private val user: String get() = account(context)
+
     @Before
     fun signedOut() {
         instrumentation.runOnMainSync { graph.signOut() }
@@ -110,7 +114,7 @@ class DeviceTest {
         compose.waitForIdle()
     }
 
-    private fun signIn(user: String = "demo", password: String = "demo") {
+    private fun signIn(user: String = this.user, password: String = this.user) {
         compose.onNodeWithTag("server").performTextReplacement(server)
         compose.onNodeWithTag("user").performTextReplacement(user)
         compose.onNodeWithTag("password").performTextReplacement(password)
@@ -223,7 +227,7 @@ class DeviceTest {
         shot("07-browser-sign-in")
         val code = compose.onAllNodes(hasTestTag("user-code"))[0].fetchSemanticsNode().config[SemanticsProperties.Text].joinToString("") { it.text }
         // the user allows the app on the server's page (the demo server's test hook stands for it)
-        assertThat(get("/__test/device?code=$code&decide=allow")).contains("\"decided\":true")
+        assertThat(get("/__test/device?code=$code&decide=allow&u=$user")).contains("\"decided\":true")
         bringToFront()
         compose.waitUntil(30_000) { exists("home") }
         val login = graph.logins.load()!!
@@ -240,3 +244,6 @@ class DeviceTest {
         assertThat(refused).isTrue()
     }
 }
+
+/** The demo server's account a device's tests use: demo on a phone, friend on a tablet (both have the same library). */
+fun account(context: Context): String = if (context.resources.configuration.smallestScreenWidthDp >= 600) "friend" else "demo"

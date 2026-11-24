@@ -221,10 +221,14 @@ fun MiniPlayer(open: () -> Unit) {
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
                     Text(t.title, style = Sonus.type.cardTitle, color = c.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(
-                        if (state.status == PlayerStatus.Error) state.error.orEmpty() else t.artist,
-                        style = Sonus.type.caption, color = if (state.status == PlayerStatus.Error) c.bad else c.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    )
+                    if (rememberLink()?.where != null) {
+                        WhereLine()
+                    } else {
+                        Text(
+                            if (state.status == PlayerStatus.Error) state.error.orEmpty() else t.artist,
+                            style = Sonus.type.caption, color = if (state.status == PlayerStatus.Error) c.bad else c.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
                 Heart(t, size = 40.dp)
                 RoundButton(if (state.isActive) "pause" else "play", if (state.isActive) "暂停" else "播放", player::togglePlay, Modifier.testTag("mini-play"), size = 44.dp, iconSize = 20.dp)
@@ -267,7 +271,7 @@ fun FullPlayer() {
         Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             RoundButton("chevron-down", "收起", { nav.playerOpen.value = false }, tint = Color.White)
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("正在播放", style = Sonus.type.caption, color = Color.White.copy(alpha = 0.7f))
+                if (rememberLink()?.where != null) WhereLine(light = true) else Text("正在播放", style = Sonus.type.caption, color = Color.White.copy(alpha = 0.7f))
                 Text(state.context?.label.orEmpty(), style = Sonus.type.cardTitle, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Box {
@@ -303,6 +307,7 @@ fun FullPlayer() {
         Controls(big = true, Modifier.fillMaxWidth(), light = true)
         Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             RoundButton("lyrics", "歌词", { nav.playerView.value = if (view == PlayerView.Lyrics) PlayerView.Cover else PlayerView.Lyrics }, Modifier.testTag("show-lyrics"), on = view == PlayerView.Lyrics, tint = if (view == PlayerView.Lyrics) c.accent else Color.White)
+            DevicesButton(light = true)
             RoundButton("queue", "播放队列", { nav.playerView.value = if (view == PlayerView.Queue) PlayerView.Cover else PlayerView.Queue }, Modifier.testTag("show-queue"), on = view == PlayerView.Queue, tint = if (view == PlayerView.Queue) c.accent else Color.White)
         }
     }
@@ -500,6 +505,7 @@ fun PlaybackBar() {
                 Column(Modifier.weight(1f, fill = false)) {
                     Text(t.title, style = Sonus.type.cardTitle, color = c.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { nav.go(Route.Album(t.albumId)) })
                     Text(t.artist, style = Sonus.type.caption, color = c.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { nav.go(Route.Artist(t.artistId)) })
+                    WhereLine()
                 }
                 Heart(t)
             }
@@ -509,6 +515,7 @@ fun PlaybackBar() {
             SeekBar(Modifier.fillMaxWidth().widthIn(max = 720.dp))
         }
         Row(Modifier.weight(1f), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+            DevicesButton()
             val lyricsOn = nav.current == Route.Lyrics
             RoundButton("lyrics", "歌词", { if (lyricsOn) nav.back() else nav.go(Route.Lyrics) }, on = lyricsOn)
             val queueOn = nav.panelOpen.value && nav.panel.value == PanelView.Queue
@@ -556,6 +563,7 @@ private fun NowPlayingPanel() {
     val next = session.lib.track(nextId)
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(state.context?.label?.ifEmpty { null } ?: "正在播放", style = Sonus.type.panelHeading, color = c.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        WhereLine()
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             Cover(session.trackCoverUrl(t, maxWidth.px()), maxWidth, Modifier.aspectRatio(1f), shape = RoundedCornerShape(Shapes.panel))
         }

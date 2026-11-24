@@ -263,12 +263,24 @@ class SessionClient(
         return false
     }
 
-    /** A goodbye (the server then knows this device left on purpose: no grace period), then the loop stops. */
+    /** Connecting (or trying to). */
+    val isStarted: Boolean get() = loop != null
+
+    /**
+     * A goodbye (the server then knows this device left on purpose: no grace period), then the loop stops; [start] connects
+     * again (the app does both as it goes to the background and comes back).
+     */
     suspend fun stop() {
         socket?.close(1000, "bye")
         delay(100)
         loop?.cancelAndJoin()
         loop = null
+        connectedFlow.value = false
+    }
+
+    /** Stops for good. */
+    suspend fun close() {
+        stop()
         scope.coroutineContext[Job]?.cancel()
     }
 

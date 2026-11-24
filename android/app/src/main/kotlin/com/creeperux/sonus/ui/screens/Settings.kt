@@ -101,6 +101,8 @@ fun SettingsScreen() {
             Fact("登录方式", if (login.isApiKey) "在浏览器中登录（本设备专用的密钥）" else "用户名和密码（只保存登录凭证）")
             Fact("服务器版本", server.version)
             Fact("这台设备", graph.clientName)
+            val link = rememberLink()
+            Fact("多设备同步", if (link == null) "服务器不支持（Sonus Connect v2）" else if (link.isConnected) "已开启：所有设备共享一个播放会话" else "已开启，正在连接…")
             PillButton("退出登录", graph::signOut, Modifier.testTag("sign-out"), icon = "user")
         }
 

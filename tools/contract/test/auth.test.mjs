@@ -1,5 +1,6 @@
 // Signing in: token (t, s), password (p and p=enc:), OpenSubsonic API keys (errors 43, 44; tokenInfo), app passwords
-// for a user with two-step verification, and the errors for a wrong password (40) and a missing parameter (10).
+// for a user with two-step verification, and the errors for a wrong password (40) and a missing parameter (10), mixed
+// credentials included.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -62,6 +63,48 @@ test('an API key nobody has is error 44', async () => {
   await failsWith(plain({ apiKey: 'no-such-key-0000000000000000' }), 44);
 });
 
+test('the user name signs in in any case', async () => {
+  const shout = new Subsonic(BASE, { u: me.username.toUpperCase(), password: me.password, as: 'password' }, { client: CLIENT });
+  assert.equal((await shout.call('ping')).body.status, 'ok');
+});
+
+test('p=enc: that is not hex is a wrong password (40)', async () => {
+  await failsWith(plain({ u: me.username, p: 'enc:zz' }), 40);
+});
+
+test('with p and t both sent, p is the one checked', async () => {
+  const r = await plain({ u: me.username, p: me.password, ...token('not the password') });
+  assert.equal(r.body.status, 'ok', JSON.stringify(r.body.error));
+  await failsWith(plain({ u: me.username, p: 'not the password', ...token(me.password) }), 40);
+});
+
+test('without v or c the answer is error 10, whatever the password', async () => {
+  const bare = (params) => fetch(`${BASE}/rest/ping?${new URLSearchParams({ f: 'json', ...params })}`).then(r => r.json()).then(j => j['subsonic-response']);
+  for (const [params, missing] of [
+    [{ u: me.username, p: me.password, c: CLIENT }, 'v'],
+    [{ u: me.username, p: me.password, v: '1.16.1' }, 'c'],
+    [{ u: me.username, p: 'not the password', c: CLIENT }, 'v'],
+  ]) {
+    const body = await bare(params);
+    assert.equal(body.error?.code, 10, `${missing}: ${JSON.stringify(body.error)}`);
+    assert.match(body.error.message, new RegExp(`'${missing}'`), 'the message names the parameter');
+  }
+});
+
+test('a refused sign-in can be read by a page on another origin (CORS)', async () => {
+  const res = await fetch(`${BASE}/rest/ping?${new URLSearchParams({ u: me.username, p: 'not the password', v: '1.16.1', c: CLIENT, f: 'json' })}`, { headers: { Origin: 'https://sonus.example' } });
+  assert.equal(res.headers.get('access-control-allow-origin'), '*');
+  assert.equal((await res.json())['subsonic-response'].error?.code, 40);
+});
+
+test('tokenInfo answers a password sign-in too, with the user’s name', async () => {
+  assert.equal((await api.ok('tokenInfo')).tokenInfo.username, me.username);
+});
+
+test('tokenInfo with an unknown API key is error 44', async () => {
+  await failsWith(new Subsonic(BASE, { apiKey: 'no-such-key-0000000000000000' }, { client: CLIENT }).call('tokenInfo'), 44);
+});
+
 // ---------------------------------------------------------------- the user with two-step verification
 
 const secure = manifest.users?.secure;
@@ -76,6 +119,24 @@ test('an API key with u (or a password, a token) is error 43', { skip: needsUser
   await failsWith(plain({ apiKey: secure.apiKey, u: secure.username }), 43);
   await failsWith(plain({ apiKey: secure.apiKey, p: 'x' }), 43);
   await failsWith(plain({ apiKey: secure.apiKey, ...token('x') }), 43);
+});
+
+test('mixed credentials are error 43 before any of them is checked', { skip: needsUser('secure') }, async () => {
+  // a key nobody has, beside a right password: still 43, not 44 and not a sign-in
+  await failsWith(plain({ apiKey: 'no-such-key-0000000000000000', u: me.username, p: me.password }), 43);
+  await failsWith(plain({ apiKey: secure.apiKey, u: secure.username, p: secure.appPassword }), 43);
+  await failsWith(plain({ apiKey: secure.apiKey, s: 'c0ffee42' }), 43);
+});
+
+test('an app password is an API key too', { skip: needsUser('secure') }, async () => {
+  const key = new Subsonic(BASE, { apiKey: secure.appPassword }, { client: CLIENT });
+  assert.equal((await key.ok('tokenInfo')).tokenInfo.username, secure.username);
+  const undashed = new Subsonic(BASE, { apiKey: secure.appPassword.replaceAll('-', '').toUpperCase() }, { client: CLIENT });
+  assert.equal((await undashed.call('ping')).body.status, 'ok', 'without dashes, in capitals');
+});
+
+test('the account password is not an API key (44)', { skip: needsUser('secure') }, async () => {
+  await failsWith(plain({ apiKey: secure.password }), 44);
 });
 
 test('with two-step verification the account password opens nothing (40)', { skip: needsUser('secure') }, async () => {

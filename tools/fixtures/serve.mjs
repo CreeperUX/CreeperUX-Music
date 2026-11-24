@@ -17,20 +17,31 @@ export async function readManifest(file = MANIFEST) {
 }
 
 let runs = 0;
-/** Starts Navidrome on a copy of the golden database: { url, stop, data, manifest }. */
-export async function serveGolden({ port, data, navidrome } = {}) {
+/**
+ * A fresh copy of the golden database in a folder of its own, and the settings Navidrome serves it with (all but its
+ * port): { folder, manifest, env, remove }.
+ */
+export async function goldenCopy({ data } = {}) {
   const manifest = await readManifest();
   const folder = data ?? join(WORK, 'runs', `${process.pid}-${Date.now()}-${runs++}`);
   await rm(folder, { recursive: true, force: true });
   await mkdir(folder, { recursive: true });
   await copyFile(join(GOLDEN, 'navidrome.db'), join(folder, 'navidrome.db'));
+  const env = { ...manifest.server.env, ND_DATAFOLDER: folder, ND_CACHEFOLDER: join(folder, 'cache'), ND_SCANNER_SCANONSTARTUP: 'false' };
+  // Windows lets go of a stopped server's files a moment after it is gone
+  const remove = () => rm(folder, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  return { folder, manifest, env, remove };
+}
+
+/** Starts Navidrome on a copy of the golden database: { url, stop, data, manifest }. `env`: settings over the golden ones. */
+export async function serveGolden({ port, data, navidrome, env = {} } = {}) {
+  const copy = await goldenCopy({ data });
+  const { manifest, folder } = copy;
   const p = port ?? await freePort();
-  const nd = await startNavidrome(navidrome ?? manifest.server.navidrome, {
-    ...manifest.server.env, ND_DATAFOLDER: folder, ND_CACHEFOLDER: join(folder, 'cache'), ND_PORT: String(p), ND_SCANNER_SCANONSTARTUP: 'false',
-  });
+  const nd = await startNavidrome(navidrome ?? manifest.server.navidrome, { ...copy.env, ...env, ND_PORT: String(p) });
   return {
     url: nd.url, data: folder, manifest, log: nd.log,
-    stop: async ({ keep = !!data } = {}) => { await nd.stop(); if (!keep) await rm(folder, { recursive: true, force: true }); },
+    stop: async ({ keep = !!data } = {}) => { await nd.stop(); if (!keep) await copy.remove(); },
   };
 }
 

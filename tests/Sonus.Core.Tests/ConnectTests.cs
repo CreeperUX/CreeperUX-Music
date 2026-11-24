@@ -2,12 +2,13 @@ using Sonus.Core.Connect;
 
 namespace Sonus.Core.Tests;
 
-/// <summary>Sonus Connect against the demo server (tools/demo-server/connect.mjs, the protocol of the CreeperUX/navidrome fork).</summary>
-public class ConnectTests(DemoServer server) : IClassFixture<DemoServer>
+/// <summary>Sonus Connect against the demo server (tools/demo-server/connect.mjs, the protocol of the CreeperUX/navidrome fork),
+/// or any server (SONUS_TEST_SERVER: <see cref="TestServer"/>; going offline is the recording proxy's).</summary>
+public class ConnectTests(TestServer server) : IClassFixture<TestServer>
 {
     private async Task<(SubsonicClient Client, ConnectClient Connect)> Device(string clientName, string name)
     {
-        var client = new SubsonicClient(await SubsonicClient.SignInAsync(server.Url, "demo", "demo", clientName), clientName);
+        var client = new SubsonicClient(await SubsonicClient.SignInAsync(server.Url, server.Main.User, server.Main.Password, clientName), clientName);
         await client.ConnectAsync();
         Assert.True(ConnectClient.Supported(client));
         var connect = new ConnectClient(client, name);

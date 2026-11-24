@@ -2,15 +2,18 @@
 // page, then: the interface acts and the server's own state is read back through the Subsonic API; playback is checked on
 // the page's real <audio> element; every view is opened in five layouts (themes, densities, widths, 200 % zoom) and
 // checked for console errors, page overflow and axe WCAG 2.1 A/AA; and 50 route changes must not grow the page.
-// Usage: node tools/check.mjs [--only=chromium|webkit|edge] [--shots] [--server=https://music.example.com]
+// Usage: node tools/check-web.mjs [--only=chromium|webkit|edge] [--shots] [--server=https://music.example.com]
+// Any test server: SONUS_TEST_SERVER, SONUS_TEST_CREDENTIALS and SONUS_TEST_MANIFEST (tools/e2e/target.mjs, README.md):
+// every check runs, through the recording proxy, with that server's library; one its library cannot give is skipped.
 // --server runs READ-ONLY against a real server: MUSIC_USER and MUSIC_PASSWORD from the environment (use a separate
 // test user); it reads the library, artwork, lyrics, search and artist info and runs axe, and plays nothing.
-import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
+import { startDemoServer } from './e2e/e2e.mjs';
+import { startTarget } from './e2e/target.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 function load(name) {
@@ -24,14 +27,16 @@ const only = process.argv.find(a => a.startsWith('--only='))?.slice(7), shots = 
 const real = process.argv.find(a => a.startsWith('--server='))?.slice(9)?.replace(/\/$/, '');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const md5 = s => createHash('md5').update(s).digest('hex');
-const account = real ? { user: process.env.MUSIC_USER, password: process.env.MUSIC_PASSWORD } : { user: 'demo', password: 'demo' };
-if (real && (!account.user || !account.password)) { console.error('Set MUSIC_USER and MUSIC_PASSWORD (a test user) to check a real server.'); process.exit(2); }
-
-// the page is served by the demo server in both cases; against a real server only its static files are used
-const port = 4600 + Math.floor(Math.random() * 300);
-const demo = spawn(process.execPath, [join(root, 'tools/demo-server/demo-server.mjs'), String(port)], { stdio: ['ignore', 'pipe', 'inherit'] });
-await new Promise((ok, fail) => { demo.stdout.on('data', d => { if (String(d).includes('demo server')) ok(); }); demo.on('exit', fail); });
-const site = `http://127.0.0.1:${port}`, server = real ?? site;
+if (real && (!process.env.MUSIC_USER || !process.env.MUSIC_PASSWORD)) { console.error('Set MUSIC_USER and MUSIC_PASSWORD (a test user) to check a real server.'); process.exit(2); }
+// the server: read-only (--server), or the target of the tests (the demo server, or SONUS_TEST_SERVER behind the
+// recording proxy, tools/e2e/target.mjs) with what the checks take from its library
+const target = real ? null : await startTarget();
+const cat = target ? await target.catalogue() : null;
+const demo = target?.demo ?? false;
+const account = real ? { user: process.env.MUSIC_USER, password: process.env.MUSIC_PASSWORD } : { user: target.user.username, password: target.user.password };
+// the page is served by a demo server in every case; against another server only its static files are used
+const pages = demo ? null : await startDemoServer();
+const site = demo ? target.url : pages.url, server = real ?? target.url;
 const out = join(root, 'qa');
 await mkdir(out, { recursive: true });
 
@@ -44,8 +49,8 @@ async function api(method, params = {}) {
   if (r.status !== 'ok') throw new Error(`${method}: ${r.error?.message}`);
   return r;
 }
-const testLog = async () => (await fetch(`${site}/__test/log`)).json();
-const setOffline = on => fetch(`${site}/__test/offline?on=${on ? 1 : 0}`);
+const testLog = () => target.log();      // the demo server's hook, or the recording proxy's
+const setOffline = on => target.offline(on);
 
 const LAYOUTS = [
   { id: 'wide-dark-zh', w: 1440, h: 900, q: 'theme=dark&locale=zh-CN' },
@@ -54,15 +59,18 @@ const LAYOUTS = [
   { id: 'narrow', w: 700, h: 820, q: 'theme=dark&panel=closed' },
   { id: 'zoom-200', w: 720, h: 450, q: 'theme=light' },
 ];
-const ROUTES = ['#/', '#/album/al0', '#/playlist/pl1', '#/playlist/liked', '#/playlist/library', '#/artist/ar5', '#/search/', '#/search/%E5%A4%9C', '#/genre/Jazz', '#/shelf/recent', '#/lyrics', '#/settings'];
+const e = encodeURIComponent;
+// the demo's al0, pl1, ar5, 夜 and Jazz; another server's own
+const ROUTES = cat ? ['#/', `#/album/${cat.browse.id}`, `#/playlist/${cat.ownPlaylist.id}`, '#/playlist/liked', '#/playlist/library', `#/artist/${cat.artist.id}`, '#/search/', `#/search/${e(cat.search.term)}`, ...(cat.genre ? [`#/genre/${e(cat.genre)}`] : []), '#/shelf/recent', '#/lyrics', '#/settings']
+  : ['#/', '#/album/al0', '#/playlist/pl1', '#/playlist/liked', '#/playlist/library', '#/artist/ar5', '#/search/', '#/search/%E5%A4%9C', '#/genre/Jazz', '#/shelf/recent', '#/lyrics', '#/settings'];
 const engines = [['chromium', () => chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] })], ['webkit', () => webkit.launch()], ['edge', () => chromium.launch({ channel: 'msedge', args: ['--autoplay-policy=no-user-gesture-required'] })]]
   .filter(([n]) => (only ? n === only : n !== 'edge'));
 const settle = page => page.waitForFunction(() => document.getAnimations().every(a => a.playState !== 'running' || a.effect?.getTiming().iterations === Infinity), null, { timeout: 4000 }).catch(() => {});
-let failed = 0;
+let failed = 0, skipped = 0;
 
 for (const [engine, launch] of engines) {
   const browser = await launch();
-  console.log(`\n${engine}${real ? ` (real server at ${real}, read-only)` : ' (demo server)'}`);
+  console.log(`\n${engine}${real ? ` (real server at ${real}, read-only)` : demo ? ' (demo server)' : ` (${target.origin}, through the recording proxy)`}`);
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
   const errors = [];
@@ -72,6 +80,8 @@ for (const [engine, launch] of engines) {
   };
   watch(page);
   const check = async (name, fn) => { const t0 = Date.now(); try { await fn(); console.log(`  ✓ ${name} (${Date.now() - t0} ms)`); } catch (e) { failed++; console.log(`  ✗ ${name}: ${e.message.split('\n')[0]}`); } };
+  /** A check this server's library cannot give the data for (never against the demo server). */
+  const skip = (name, reason) => { skipped++; console.log(`  – ${name}: skipped (${reason})`); };
   const assert = (ok, msg) => { if (!ok) throw new Error(msg); };
   const app = (fn, arg, p = page) => p.evaluate(fn, arg);
   const until = async (fn, what, ms = 6000) => { const t0 = Date.now(); for (;;) { const v = await fn(); if (v) return v; if (Date.now() - t0 > ms) throw new Error(`timed out: ${what}`); await sleep(100); } };
@@ -103,7 +113,7 @@ for (const [engine, launch] of engines) {
     await page.waitForFunction(() => window.__ready === true, null, { timeout: 60000 });
     const s = await app(() => ({ tracks: __app.lib.trackList.length, albums: __app.lib.albumList.length, artists: __app.lib.artistList.length, pl: __app.playlists.map(p => p.kind), server: __app.server?.version }));
     assert(s.tracks > 0 && s.albums > 0 && s.pl[0] === 'liked' && s.pl[1] === 'library', JSON.stringify(s));
-    if (!real) assert(s.tracks === 293 && s.albums === 34 && s.pl.length === 7, JSON.stringify(s));
+    if (cat) assert(s.tracks === cat.counts.songs && s.albums === cat.counts.albums && s.pl.length === cat.counts.playlists + 2, JSON.stringify({ ...s, server: cat.counts })); // the demo's: 293, 34, 5
     console.log(`    ${s.server}: ${s.tracks} songs, ${s.albums} albums, ${s.artists} artists, ${s.pl.length - 2} playlists`);
   });
   await check('the password is not kept (only the salt and token), and nothing says foobar2000', async () => {
@@ -129,6 +139,13 @@ for (const [engine, launch] of engines) {
       console.log(`    ${found ? `${found.length} lines (${found[0].time != null ? 'synced' : 'plain'})` : 'none of the first 30 songs has lyrics'}`);
       return;
     }
+    if (!demo) {
+      // the song the server has synced lyrics for: its first line, when the server says
+      if (!cat.lyrics) { console.log('    no song with synced lyrics on this server (manifest key track.syncedLyrics)'); return; }
+      const lines = await app(id => __app.adapter.lyrics(id), cat.lyrics.id);
+      assert(lines?.length >= 3 && Math.abs(lines[0].time - cat.lyrics.firstTime) < 0.01, JSON.stringify(lines?.slice(0, 2)));
+      return;
+    }
     const id = await app(() => __app.lib.trackList.find(t => t.genre === 'City Pop').id);
     const lines = await app(id => __app.adapter.lyrics(id), id);
     assert(lines?.length > 5 && lines[0].time === 8 && lines[0].text, JSON.stringify(lines?.slice(0, 2)));
@@ -137,13 +154,24 @@ for (const [engine, launch] of engines) {
     const id = await app(() => __app.lib.artistList[0].id);
     await app(id => { location.hash = `#/artist/${id}`; }, id);
     if (real) { await sleep(1500); console.log(`    ${(await page.locator('.cm-bio:not([hidden])').count()) ? 'has a biography' : 'no biography (Last.fm not set up?)'}`); return; }
+    if (!demo) {
+      // shown when the server has one (the text without its HTML), not shown when it has none
+      const bio = String((await api('getArtistInfo2', { id }).catch(() => null))?.artistInfo2?.biography ?? '').replace(/<[^>]+>/g, '').trim();
+      if (bio) await until(() => page.locator('.cm-bio:not([hidden]) .cm-bio-text').count(), 'biography shown');
+      else { await sleep(1500); assert(!(await page.locator('.cm-bio:not([hidden]) .cm-bio-text').count()), 'a biography the server does not have'); }
+      console.log(`    ${bio ? 'the server has a biography: shown' : 'the server has no biography: none shown'}`);
+      return;
+    }
     await until(() => page.locator('.cm-bio:not([hidden]) .cm-bio-text').count(), 'biography shown');
     assert(/演示数据/.test(await page.locator('.cm-bio-text').textContent()), 'text');
   });
 
   if (!real) {
-    // ---------------------------------------------------------------- playback, against the demo server
-    const album = await app(() => __app.lib.albumList.find(a => a.trackIds.length >= 4 && __app.lib.tracks.get(a.trackIds[0]).codec === 'FLAC' && a.trackIds.every(id => !__app.track(id).unavailable)));
+    // ---------------------------------------------------------------- playback, against the demo server or a test server
+    // an album of four songs or more that stream (the demo's first such FLAC album; another server's album.playable)
+    const album = demo ? await app(() => __app.lib.albumList.find(a => a.trackIds.length >= 4 && __app.lib.tracks.get(a.trackIds[0]).codec === 'FLAC' && a.trackIds.every(id => !__app.track(id).unavailable)))
+      : { id: cat.playable.id };
+
     await check('double-click a track: the <audio> element plays its stream and the server shows it as now playing', async () => {
       await app(id => { location.hash = `#/album/${id}`; }, album.id); await sleep(800);
       await page.locator('.cm-view .ui-tracklist .ui-tr:not(.ui-tr-head)').nth(1).dblclick();
@@ -167,7 +195,7 @@ for (const [engine, launch] of engines) {
     });
     await check('past half the song the play is counted once on the server, and in the interface', async () => {
       const id = await app(() => __app.player.trackId);
-      const before = (await api('getSong', { id })).song.playCount, d = await app(() => __app.player.duration);
+      const before = (await api('getSong', { id })).song.playCount ?? 0, d = await app(() => __app.player.duration); // left out when 0 (Navidrome)
       const counted = async () => (await testLog()).scrobbles.filter(x => x.id === id && x.submission).length, already = await counted();
       await app(s => __app.adapter.seek(s), Math.min(d / 2 + 2, 245));
       await until(async () => (await api('getSong', { id })).song.playCount === before + 1, 'server count +1');
@@ -206,12 +234,22 @@ for (const [engine, launch] of engines) {
       await ctx2.close();
     });
     await check('start radio from a song: the song, then similar ones from getSimilarSongs2', async () => {
-      const seed = await app(() => __app.lib.trackList.find(t => t.genre === 'City Pop' && !t.unavailable));
+      const seed = demo ? await app(() => __app.lib.trackList.find(t => t.genre === 'City Pop' && !t.unavailable)) : await app(id => __app.track(id), cat.radio.id);
       await app(id => __app.onTrackMenu({ id: 'radio' }, [id]), seed.id);
       await until(() => app(id => __app.player.context?.kind === 'radio' && __app.player.trackId === id, seed.id), 'radio playing the seed');
       const ctxLabel = await app(() => __app.player.context.label), genres = await app(() => [...new Set(__app.queue.slice(0, 10).map(q => __app.track(q.trackId).genre))]);
       assert(ctxLabel.includes(seed.title) && ctxLabel.includes('电台'), ctxLabel);
-      assert(genres.every(g => ['City Pop', 'J-Pop', 'Dream Pop'].includes(g)), genres.join());
+      if (demo) assert(genres.every(g => ['City Pop', 'J-Pop', 'Dream Pop'].includes(g)), genres.join());
+      else {
+        // after the seed: the songs the server answered, in its order (what the recording proxy saw: a server may pick
+        // them at random each time); with none, songs of the same artist or genre from the library
+        const answer = (await testLog()).similar.filter(x => x.id === seed.id).at(-1)?.songs?.filter(id => id !== seed.id);
+        const queue = await app(() => __app.queue.filter(q => q.section === 'context').map(q => q.trackId)); // after the seed
+        assert(answer, 'no getSimilarSongs2 answer seen');
+        assert(queue.length >= 1 && !queue.includes(seed.id) && new Set(queue).size === queue.length, JSON.stringify(queue.slice(0, 5)));
+        if (answer.length) assert(JSON.stringify(queue) === JSON.stringify(answer), `the radio is not the server's answer: ${JSON.stringify(queue.slice(0, 3))} vs ${JSON.stringify(answer.slice(0, 3))}`);
+        console.log(`    the server gave ${answer.length} similar songs${answer.length ? '' : ' (the radio takes the same artist or genre)'}; the radio has ${queue.length + 1}`);
+      }
       await app(() => __app.adapter.pause());
     });
     await check('shuffle and repeat in the bar set the playback order', async () => {
@@ -222,7 +260,8 @@ for (const [engine, launch] of engines) {
       await app(() => __app.adapter.setOrder('default'));
     });
     await check('a queued song plays next', async () => {
-      const id = await app(() => __app.lib.trackList.find(t => t.codec === 'FLAC' && !t.unavailable && t.id !== __app.player.trackId).id);
+      // a song the browser plays as it is: on the demo server a FLAC one; elsewhere any but DSD and the missing one
+      const id = await app(([demo, missing]) => __app.lib.trackList.find(t => (demo ? t.codec === 'FLAC' : !/^DSD/.test(t.codec ?? '') && t.id !== missing) && !t.unavailable && t.id !== __app.player.trackId).id, [demo, cat.missing ?? '']);
       await app(id => __app.onTrackMenu({ id: 'next' }, [id]), id);
       await app(() => __app.panel.show('queue'));
       const title = await app(id => __app.track(id).title, id);
@@ -237,13 +276,16 @@ for (const [engine, launch] of engines) {
       assert(g != null && Math.abs(v - 10 ** (g / 20)) < 0.01, `gain ${g} dB, volume ${v}`);
       await app(() => __app.adapter.setReplayGain('album'));
     });
-    await check('a DSD song is asked for as Opus (the browser cannot decode DSD)', async () => {
+    const dsdId = await app(() => __app.lib.trackList.find(t => t.codec?.startsWith('DSD'))?.id ?? null);
+    if (!dsdId && !demo) skip('a DSD song is asked for as Opus (the browser cannot decode DSD)', 'no DSD song on this server');
+    else await check('a DSD song is asked for as Opus (the browser cannot decode DSD)', async () => {
       const id = await app(() => __app.lib.trackList.find(t => t.codec.startsWith('DSD')).id);
       await app(id => __app.playContext('library', 'all', { trackId: id }), id);
       await until(async () => (await testLog()).streams.some(s => s.id === id && s.format === 'opus'), 'format=opus');
     });
-    await check('a song the server cannot stream shows an error, not silence', async () => {
-      const id = await app(() => __app.lib.trackList[57].id);
+    if (!demo && !cat.missing) skip('a song the server cannot stream shows an error, not silence', 'no song whose file is gone (manifest key track.missingFile)');
+    else await check('a song the server cannot stream shows an error, not silence', async () => {
+      const id = demo ? await app(() => __app.lib.trackList[57].id) : cat.missing;
       await app(id => __app.playContext('library', 'all', { trackId: id }), id);
       await until(() => app(() => __app.player.state === 'error' && !!__app.player.error), 'error state');
       await until(() => page.locator('.ui-pb[data-state="error"]').count(), 'bar shows it');
@@ -258,7 +300,7 @@ for (const [engine, launch] of engines) {
       await until(async () => !(await starred()), 'server unstarred');
     });
     await check('playlists: create, reorder, remove, rename and delete reach the server', async () => {
-      const ids = await app(() => __app.lib.trackList.slice(10, 13).map(t => t.id)), [a, b, c] = ids;
+      const ids = await app(() => __app.lib.trackList.slice(__app.lib.trackList.length >= 13 ? 10 : 0).slice(0, 3).map(t => t.id)), [a, b, c] = ids;
       const p = await app(ids => __app.adapter.playlistCreate(`check ${Date.now()}`, ids), ids);
       const entries = async () => ((await api('getPlaylist', { id: p.id })).playlist.entry ?? []).map(e => e.id).join();
       assert(await entries() === ids.join(), 'created');
@@ -273,14 +315,15 @@ for (const [engine, launch] of engines) {
       assert(!(await api('getPlaylists')).playlists.playlist.some(x => x.id === p.id), 'deleted');
       await until(async () => (await page.locator('.cm-lib .ui-mcard-title', { hasText: 'check renamed' }).count()) === 0, 'sidebar drops it');
     });
-    await check('another user\'s playlist plays but cannot be changed', async () => {
-      const p = await app(() => __app.playlists.find(x => x.name === '朋友的歌单'));
-      assert(p.kind === 'auto' && p.owner === 'friend', `${p.kind} ${p.owner}`);
+    if (!cat.othersPlaylist) skip('another user\'s playlist plays but cannot be changed', 'no other user\'s public playlist on this server, and no second test user (users.other)');
+    else await check('another user\'s playlist plays but cannot be changed', async () => {
+      const p = await app(id => __app.playlists.find(x => x.id === id), cat.othersPlaylist.id); // the demo's 朋友的歌单, friend's
+      assert(p.name === cat.othersPlaylist.name && p.kind === 'auto' && p.owner === cat.othersPlaylist.owner, `${p.name} ${p.kind} ${p.owner}`);
       const msg = await app(id => __app.adapter.playlistAdd(id, [__app.lib.trackList[0].id]).then(() => '', e => e.message), p.id);
       assert(msg.includes('只能播放'), msg);
     });
     await check('a playlist made on another device appears after a refresh', async () => {
-      const made = (await api('createPlaylist', { name: `other device ${engine}`, songId: ['t1', 't2'] })).playlist;
+      const made = (await api('createPlaylist', { name: `other device ${engine}`, songId: cat.songIds.slice(0, 2) })).playlist;
       await app(() => __app.adapter.refresh());
       await until(() => page.locator('.cm-lib .ui-mcard-title', { hasText: `other device ${engine}` }).count(), 'sidebar shows it');
       await api('deletePlaylist', { id: made.id });
@@ -294,7 +337,7 @@ for (const [engine, launch] of engines) {
       await until(async () => (await page.locator('.cm-conn').getAttribute('data-state')) === 'online', 'badge online');
     });
     await check('eight rapid song changes end on the last one everywhere', async () => {
-      const last = await app(async () => { const ids = __app.lib.trackList.filter(t => !t.unavailable).map(t => t.id); for (let i = 0; i < 8; i++) { __app.playContext('library', 'all', { trackId: ids[100 + i] }); await new Promise(r => setTimeout(r, 70)); } return ids[107]; });
+      const last = await app(async missing => { const ids = __app.lib.trackList.filter(t => !t.unavailable && t.id !== missing).map(t => t.id), from = Math.max(0, Math.min(100, ids.length - 8)); for (let i = 0; i < 8; i++) { __app.playContext('library', 'all', { trackId: ids[from + i] }); await new Promise(r => setTimeout(r, 70)); } return ids[from + 7]; }, demo ? null : cat.missing);
       await until(async () => (await app(() => __app.player.trackId)) === last && (await barTitle()) === (await app(id => __app.track(id).title, last)), 'ended on the last', 6000);
       await until(async () => (await audio()).src.includes(`id=${last}`), 'audio on the last');
       await app(() => __app.adapter.pause());
@@ -310,7 +353,7 @@ for (const [engine, launch] of engines) {
     await lp.goto(`${site}/?${L.q}#/`);
     await lp.waitForFunction(() => window.__ready === true, null, { timeout: 30000 });
     await sleep(400);
-    if (!real) { await app(() => __app.playContext('album', 'al3', { trackId: __app.lib.albums.get('al3').trackIds[2] }), undefined, lp); await sleep(500); await app(() => __app.adapter.pause(), undefined, lp); }
+    if (!real) { await app(al => __app.playContext('album', al, { trackId: __app.lib.albums.get(al).trackIds[2] }), cat.playable.id, lp); await sleep(500); await app(() => __app.adapter.pause(), undefined, lp); }
     for (const hash of ROUTES.filter(h => !real || !/al0|pl1|ar5|Jazz/.test(h))) {
       await lp.evaluate(h => { location.hash = h; }, hash);
       await sleep(450); await settle(lp);
@@ -340,6 +383,7 @@ for (const [engine, launch] of engines) {
   for (const e of errors) { failed++; console.log(`  ✗ console: ${e}`); }
   await browser.close();
 }
-demo.kill();
-console.log(failed ? `\n${failed} failures` : '\nall passed');
+await target?.stop();
+pages?.stop();
+console.log(`${failed ? `\n${failed} failures` : '\nall passed'}${skipped ? ` (${skipped} skipped: this server's library has nothing for them)` : ''}`);
 process.exit(failed ? 1 : 0);

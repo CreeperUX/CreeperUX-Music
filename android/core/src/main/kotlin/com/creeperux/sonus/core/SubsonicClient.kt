@@ -41,6 +41,11 @@ class SubsonicClient(val login: Login, val clientName: String, private val http:
     var extensions: Set<String> = emptySet()
         private set
 
+    /** The OpenSubsonic extensions with the versions the server speaks of each (sonusConnect: [1, 2]). */
+    @Volatile
+    var extensionVersions: Map<String, Set<Int>> = emptyMap()
+        private set
+
     private val online = MutableStateFlow(true)
 
     /** Reachable / not reachable, as the last request found it. */
@@ -120,8 +125,11 @@ class SubsonicClient(val login: Login, val clientName: String, private val http:
     suspend fun connect(): ServerInfo {
         val r = call("ping")
         try {
-            val ext = call("getOpenSubsonicExtensions")
-            extensions = J.array(ext, "openSubsonicExtensions").mapNotNull { J.str(it, "name") }.toSet()
+            val ext = J.array(call("getOpenSubsonicExtensions"), "openSubsonicExtensions")
+            extensionVersions = ext.mapNotNull { x ->
+                J.str(x, "name")?.let { n -> n to J.array(x, "versions").mapNotNull { v -> (v as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() }.toSet() }
+            }.toMap()
+            extensions = extensionVersions.keys
         } catch (_: SubsonicException) {
             // plain Subsonic
         }

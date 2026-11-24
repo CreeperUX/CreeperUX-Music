@@ -29,8 +29,7 @@ class DemoServerTest {
         @JvmStatic
         @BeforeClass
         fun startServer() {
-            val repo = File(System.getProperty("sonus.repo") ?: "..")
-            val script = File(repo, "tools/demo-server/demo-server.mjs")
+            val script = File(demoRepo(), "tools/demo-server/demo-server.mjs")
             assumeTrue("the demo server is in the repository", script.isFile)
             val port = ServerSocket(0).use { it.localPort }
             val p = try {

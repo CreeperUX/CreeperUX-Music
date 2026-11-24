@@ -7,7 +7,8 @@
 // getSong, getPlaylists / getPlaylist / createPlaylist (new, or overwrite with playlistId) / updatePlaylist /
 // deletePlaylist, star / unstar, getStarred2, scrobble, getNowPlaying, savePlayQueue / getPlayQueue,
 // getSimilarSongs2, getTopSongs, getArtistInfo2, getCoverArt, stream (WAV, with byte ranges), getLyricsBySongId and
-// getLyrics; and Sonus Connect (rest/connect, a WebSocket: connect.mjs), as the CreeperUX/navidrome fork serves it.
+// getLyrics; and Sonus Connect (rest/connect, a WebSocket): version 1 as the CreeperUX/navidrome fork serves it
+// (connect.mjs), version 2 at rest/connect?protocol=2 (connect2.mjs, docs/protocol/connect.md).
 // Signing in: token (u, t, s) or password (u, p), and OpenSubsonic apiKeyAuthentication (apiKey, tokenInfo) with the
 // fork's browser sign-in (sonusDeviceLogin: POST /auth/device/start, /poll, /revoke), which hands an app a key.
 // GET query parameters and POSTed forms are both read; every /rest answer carries
@@ -18,7 +19,8 @@
 // Test hooks (not part of the API): GET /__test/log → the stream, scrobble and cover requests seen, and how many streams
 // are open;
 // GET /__test/offline?on=1|0 drops every /rest connection (Connect's WebSockets too) while on;
-// GET /__test/devices?u=demo → the user's connected devices and what they play;
+// GET /__test/devices?u=demo → the user's connected devices and what they play (Connect version 1);
+// GET /__test/connect2?u=demo, /__test/connect2/drop → Connect version 2's session (connect2.mjs);
 // GET /__test/device?code=BCDF-GHJK&decide=allow|deny[&u=demo] → decides a browser sign-in as the user would on the
 // approval page; without decide, lists the sign-ins waiting and the API keys given (names, not the keys).
 // Usage: node tools/demo-server/demo-server.mjs [port]   (default 4533, Navidrome's)
@@ -31,7 +33,9 @@ import { extname, join, resolve, dirname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildLibrary, rng, hash, LYRIC } from './catalogue.mjs';
 import { wav } from './synth.mjs';
-import { attachConnect, EXTENSION as CONNECT } from './connect.mjs';
+import { EventEmitter } from 'node:events';
+import { attachConnect } from './connect.mjs';
+import { attachConnect2, isV2, EXTENSION as CONNECT } from './connect2.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..'); // the repository (web/, assets/)
 const port = Number(process.argv.slice(2).find(a => /^\d+$/.test(a)) || 4533);
@@ -317,8 +321,8 @@ const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   if (url.pathname.startsWith('/__test/')) {
-    if (url.pathname === '/__test/offline') { offline = url.searchParams.get('on') === '1'; if (offline) connect.dropAll(); }
-    const body = url.pathname === '/__test/log' ? log : url.pathname === '/__test/devices' ? connect.devices(url.searchParams.get('u') ?? 'demo')
+    if (url.pathname === '/__test/offline') { offline = url.searchParams.get('on') === '1'; if (offline) { connect.dropAll(); connect2.dropAll(); } }
+    const body = url.pathname.startsWith('/__test/connect2') ? connect2.test(url) : url.pathname === '/__test/log' ? log : url.pathname === '/__test/devices' ? connect.devices(url.searchParams.get('u') ?? 'demo')
       : url.pathname === '/__test/device' ? decideLogin(url.searchParams) : { offline };
     res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(body));
     return;
@@ -357,6 +361,11 @@ const server = createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': TYPES[extname(real)] || 'application/octet-stream', 'Cache-Control': 'no-store' }).end(await readFile(real));
   } catch { res.writeHead(404).end('not found'); }
 });
-const connect = attachConnect(server, { authenticate: q => signIn(q).user ?? null, isOffline: () => offline });
+// Connect: version 2's upgrades go to connect2.mjs, the rest to version 1 (which sees only those)
+const v1 = new EventEmitter();
+server.on('upgrade', (req, socket) => (isV2(req) ? connect2.upgrade(req, socket) : v1.emit('upgrade', req, socket)));
+const connect = attachConnect(v1, { authenticate: q => signIn(q).user ?? null, isOffline: () => offline });
+const connect2 = attachConnect2({ authenticate: q => signIn(q).user ?? null, isOffline: () => offline, has: id => songs.has(id),
+  lookup: id => { const t = songs.get(id); return t ? { title: t.title, artist: t.artist, album: t.album, albumId: t.albumId, coverArt: albums.get(t.albumId)?._art ? t.albumId : null, durationMs: t.duration * 1000 } : null; } });
 server.listen(port, '127.0.0.1', () => console.log(`demo server: http://127.0.0.1:${port}/ (${songs.size} songs, ${albums.size} albums, ${playlists.length} playlists; sign in as demo / demo)`));
 export { server };

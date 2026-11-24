@@ -61,6 +61,8 @@
 
 ### 阶段 1：Sonus 自己的部分（M）
 
+服务器这一半已完成（2026-11-24）：Rust 服务器回答 `rest/connect?protocol=2`，做了什么、和参考实现有哪些已知差异、测了什么，见 `server/README.md` 的“Sonus Connect version 2”；安全上的决定见 `server/SECURITY.md`。
+
 - **Connect 第 2 版：Spotify 式的播放会话**（2026-11-24 定）。不移植第 1 版，在 Rust 里直接实现第 2 版。规则：
   1. 一个账号同时只有一台设备出声。
   2. 每台设备一打开就显示正在哪台放什么，进度实时走。
@@ -73,11 +75,16 @@
 - **怎么推进**：
   - 协议先写成文档：`docs/protocol/connect.md`。
   - 演示服务器和 Windows 客户端先按新协议改。这一步不依赖网关，可以和阶段 0 并行，但要等“客户端测试改造”合并之后再开始，因为两边都要改验收测试。
-  - 服务器那一半在网关里实现，会话保存在数据库里，关机重启后仍在。
-  - 身份先交给 Go 判断：调用 `tokenInfo` 并短暂缓存，阶段 2 之后改用 Rust 自己的鉴权。
+  - 服务器那一半在网关里实现，会话保存在数据库里，关机重启后仍在。（已完成）
+    - 会话逻辑照着参考实现（`tools/demo-server/connect-session.mjs`）逐句移植，不含时钟、随机数和网络；共用的测试向量（`docs/protocol/connect-vectors.json`，14 个用例、157 步）逐步回放，结果完全一致。
+    - 会话存在 Rust 自己的表 `sonus_connect_session` 里，版本记在 Rust 自己的版本表 `sonus_server_schema` 里；都放在 Navidrome 的数据库文件中，只新增、不改 Go 的表。变化后一秒内写入，关机时再写一次；重启后会话还在，没有出声设备，停在原位置。
+    - 歌曲信息（标题、时长、是否存在）只读 Navidrome 的曲库表，按这个用户看得到的范围来。
+    - 实测：带着这两张新表，冻结版 Navidrome 照常启动和运行。
+  - 身份由 Rust 自己判断（阶段 2 先完成了，所以没有走“先交给 Go”的过渡）：和其他 Subsonic 请求用同一套校验和同一个失败限流；没登录就没有会话。
   - 网页版这时第一次加上 Connect。
-  - Go 的第 1 版在所有客户端都换到新版之前继续保留。
-- **扩展列表**：`getOpenSubsonicExtensions` 由网关合并 Go 和 Rust 两边的列表。
+  - Go 的第 1 版在所有客户端都换到新版之前继续保留：不带 `protocol=2` 的请求照旧转给 Go。
+  - 还没做的：Windows 和 Android 客户端对着 Rust 服务器的实测；正式服务器换上新镜像。
+- **扩展列表**：`getOpenSubsonicExtensions` 由网关合并 Go 和 Rust 两边的列表。（已完成：`sonusConnect` 的版本现在是 `[1, 2]`；回复的其余部分和格式保持 Go 的原样，JSON、JSONP、XML 都是。）
 - **请求体上限**：搬到网关（已在阶段 2 完成）。
 
 ### 阶段 2：身份与鉴权（M）

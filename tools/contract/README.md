@@ -15,7 +15,7 @@ Both run on `tools/fixtures/` (the fixture library and the golden database). Nod
 node tools/fixtures/build.mjs                 # once: the library, the golden database, its manifest
 node tools/contract/run.mjs                   # the suite against Navidrome on a fresh copy of it
 node tools/contract/diff.mjs --go-vs-gateway  # Navidrome vs the Rust server running another Navidrome
-node --test tools/contract/gateway.test.mjs   # what only the Rust server decides: the sign-in limit, what Navidrome never sees
+node --test tools/contract/gateway.test.mjs   # what only the Rust server decides: the sign-in limit, what Navidrome never sees, Connect 2 across a restart
 node --test tools/contract/auth-routes.test.mjs   # /auth on servers of their own: a new server, optional/off, limits
 node tools/contract/web-ui.check.mjs          # the old web UI, headless, through the Rust server (--go: Navidrome alone)
 ```
@@ -53,6 +53,7 @@ Navidrome does); `run.mjs` prints them and skips them.
 | `media` | `getCoverArt` (as is: the folder's and the embedded picture byte for byte; resized), `stream` (whole, `Range` from, to, open-ended, suffix, past the end 416, `format=raw`, unknown id) |
 | `form-post` | the same calls as `application/x-www-form-urlencoded` posts: reads, sign-in errors, API key, app password, a 300-song `savePlayQueue`, playlist changes, stars |
 | `connect` | Connect v1: `welcome`, `devices`, `hello`, `state` (stamped `at`), a command from one connection to another, the `offline` error, a `transfer` (`load` and `stop`), leaving, a wrong password |
+| `connect2` | Connect v2 (`docs/protocol/connect.md`), for servers that list `sonusConnect` version 2 (skipped otherwise): the versions; `hello` and `welcome`; `playContext` with the song filled in from the library (`now`, `durationMs`, a `coverArt` `getCoverArt` shows), the queue, `loaded`; a remote's `seek`, `next`, `add`, `pause`; reports (`notActive`, `stale`); `transfer`; `volume` and `device`; refusals; hello first (1008); a wrong password; a second connection of the same device (4000); version 1 beside it; a lost connection (a close that is not 1000 or 1001) back within the grace period, the stop after its 10 s, `resume`, a goodbye; another user's own session. `lib/connect.mjs` is the device the tests use |
 | `device-login` | `/auth/device/start`, `poll` (pending, approved once then expired, denied), approval on the web as the two-step user, `tokenInfo` with the key, `revoke` (204, then 44, then 404), 422 |
 | `web-auth` | the web sign-in (`/auth`), with a user the file makes through the native API and removes: `login` (unknown user, wrong password, unreadable and oversized bodies); the first sign-in's setup token and what refuses it (`/auth`, `/api`, `/rest`); the setup (secret, link, QR code, a wrong code, the confirmed one) with recovery codes and a session; a code at every sign-in, each once, recovery codes once and in capitals; app passwords (made, listed with their last use, used as `p` and as an API key, revoked, only by their user); new recovery codes; `disable` refused while required; an admin's status and reset; the approval page's routes; 404 and 405; `createAdmin` refused; session tokens both ways (a session from `/auth/login` opens `/api`, the token `/api` hands back opens `/auth`), a forged one refused. Skipped for servers without a web sign-in (the demo server) |
 
@@ -62,8 +63,9 @@ Navidrome does); `run.mjs` prints them and skips them.
   ffmpeg versions anyway.
 - What Sonus does not use (roadmap, decision 1): XML, JSONP, `getArtists`/`getIndexes`, sharing, radio, bookmarks,
   downloads; the native `/api` (only used to build the database).
-- Limits and timers: Connect's 30 s ping and 75 s timeout, its 32-device cap and close code 4000, a device sign-in's
-  10-minute expiry and 200-at-a-time cap. The sign-in rate limit is off in the suite's settings; `gateway.test.mjs`
+- Limits and timers: Connect's 30 s ping and 75 s timeout and its 32-device cap (the Rust server's own tests check
+  them, `server/tests/connect.rs`), version 1's close code 4000, a device sign-in's 10-minute expiry and
+  200-at-a-time cap. The sign-in rate limit is off in the suite's settings; `gateway.test.mjs`
   (below) checks it with servers of its own.
 - `getNowPlaying`, `reportPlayback`, `startScan`, `setRating` (the database build uses it; the writes corpus compares it).
 
@@ -73,7 +75,7 @@ Navidrome does); `run.mjs` prints them and skips them.
 node --test tools/contract/gateway.test.mjs
 ```
 
-Four tests that need servers of their own, each started on a fresh copy of the golden database: Navidrome alone, and
+Five tests that need servers of their own, each started on a fresh copy of the golden database: Navidrome alone, and
 the Rust server running its own Navidrome, with the same settings.
 
 | Test | Shows |
@@ -81,6 +83,7 @@ the Rust server running its own Navidrome, with the same settings.
 | failed sign-ins are limited the same way | with `AuthRequestLimit=3` and a 5 s window: three failures (by GET, by form post, by HEAD), then the right password refused (40), the name in capitals too, another user and an API key not; three unknown keys, then the right key refused (44), mixed credentials still 43, a password user not limited by keys; a window later both sign in again. The sixteen answers are the same from both servers |
 | Navidrome never sees what the Rust server refused | with Navidrome's log at debug level (it logs every request with its query): six refused requests are not in the log of the Navidrome behind the Rust server, three accepted ones are, without any `p`, `t`, `s` or `apiKey` parameter, and it logged no "Invalid login"; Navidrome alone logs all nine and refuses the six itself |
 | signed in by the gateway, a request is to Navidrome what it was with credentials | the player cookie's name (after the user name as typed) and attributes, the player in `getNowPlaying`, the user's last access written, no user created by an unknown name |
+| Sonus Connect version 2: the session is kept across a restart | the extensions answer in JSON, JSONP and XML is Navidrome's but for `sonusConnect`'s version 2; two users' sessions are in the Rust server's own table 1.5 s after their last change (the server is then killed, so nothing is written at its end); the Rust server and Navidrome start again on the same data folder, tables included, without errors; both sessions are back with no active device, paused at their position, and play on from there |
 | a client cannot name itself a user | `Remote-User`, `X-Sonus-User`, `X-Sonus-User-000…` sent by a client: 10 without credentials, 40 with a wrong password, and beside the listener's own sign-in the request is still the listener's; the web UI's page signs nobody in |
 
 ## `/auth` on servers of their own: `auth-routes.test.mjs`
@@ -134,9 +137,16 @@ Results so far (Navidrome 0.64.2-sonus.10): `corpus/read-only.json`, 169 request
 out identical between Navidrome and the Rust server checking sign-ins in front of its own Navidrome, and between two
 Navidromes.
 
+**Expected differences.** Where the Rust server is meant to answer differently from Navidrome alone, the difference
+is written down in `diff.mjs` (`EXPECTED`) and applied to Navidrome's answer before the comparison, so the two must
+then be the same and nothing else about that answer is hidden. `--go-vs-gateway` applies them and says so at the
+top of its output; `--go-vs-go` and `--a/--b` apply none. So far one: `getOpenSubsonicExtensions` lists
+`sonusConnect` as `[1, 2]` from the Rust server (it speaks version 2 itself), `[1]` from Navidrome alone.
+
 `--go-vs-gateway` and `--through-gateway` run the Rust server as its image runs it (`startGatewayOnGolden` in
 `diff.mjs`): `cargo run`, which starts Navidrome itself (`SONUS_NAVIDROME_BIN`) with the golden settings, so Navidrome
-believes the gateway's user header and nobody else's. `startGateway(url)` is the other way, the gateway in front of a
+believes the gateway's user header and nobody else's. A server stopped with `stop({ keep: true })` leaves its data
+folder; `startGatewayOnGolden({ copy: server.copy })` starts one on it again (a restart). `startGateway(url)` is the other way, the gateway in front of a
 server that runs on its own: then it only passes requests through.
 
 ### The corpora

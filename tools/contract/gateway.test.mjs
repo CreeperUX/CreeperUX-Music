@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { Subsonic } from './lib/subsonic.mjs';
 import { serveGolden } from '../fixtures/serve.mjs';
 import { startGatewayOnGolden } from './diff.mjs';
+import { device } from './lib/connect.mjs';
 
 const CLIENT = 'sonus-gateway-test';
 const sleep = ms => new Promise(done => setTimeout(done, ms));
@@ -195,4 +196,98 @@ test('a client cannot name itself a user', { timeout: 600_000 }, async t => {
   const page = await fetch(`${rust.url}/app/`, { headers: { 'Remote-User': admin.username } });
   const html = await page.text();
   assert.ok(!/"auth":\s*\{/.test(html) && !html.includes('"token"'), 'the page signs nobody in');
+});
+
+test('Sonus Connect version 2: the session is kept across a restart, in tables of the Rust server’s own that Navidrome runs beside', { timeout: 600_000 }, async t => {
+  const go = await serveGolden();
+  let rust = await startGatewayOnGolden();
+  t.after(async () => { await go.stop(); await rust.stop(); });
+  const { listener, secure } = go.manifest.users;
+  const signed = u => new Subsonic(rust.url, { u: u.username, password: u.appPassword ?? u.password }, { client: CLIENT });
+  const tables = () => {
+    const db = new DatabaseSync(join(rust.data, 'navidrome.db'), { readOnly: true });
+    try { return db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'sonus_%' ORDER BY name").all().map(r => r.name); } finally { db.close(); }
+  };
+  const row = username => {
+    const db = new DatabaseSync(join(rust.data, 'navidrome.db'), { readOnly: true });
+    try {
+      const r = db.prepare('SELECT s.session, s.lists FROM sonus_connect_session s JOIN user u ON u.id = s.user_id WHERE u.user_name = ?').get(username);
+      return r ? { session: JSON.parse(r.session), lists: JSON.parse(r.lists) } : null;
+    } finally { db.close(); }
+  };
+
+  // the list of extensions: Navidrome's own, in each format, with version 2 beside sonusConnect's version 1
+  for (const [format, version1, both] of [
+    ['f=json', '{"name":"sonusConnect","versions":[1]}', '{"name":"sonusConnect","versions":[1,2]}'],
+    ['f=jsonp&callback=cb', '{"name":"sonusConnect","versions":[1]}', '{"name":"sonusConnect","versions":[1,2]}'],
+    ['f=xml', '<openSubsonicExtensions name="sonusConnect"><versions>1</versions></openSubsonicExtensions>', '<openSubsonicExtensions name="sonusConnect"><versions>1</versions><versions>2</versions></openSubsonicExtensions>'],
+  ]) {
+    const [fromGo, fromRust] = await Promise.all([go, rust].map(s => fetch(`${s.url}/rest/getOpenSubsonicExtensions.view?${format}`, { headers: { 'Accept-Encoding': 'identity' } })));
+    const [textGo, textRust] = [await fromGo.text(), await fromRust.text()];
+    assert.ok(textGo.includes(version1), `${format}: Navidrome alone lists version 1`);
+    assert.equal(textRust, textGo.replace(version1, both), `${format}: the same answer, but for the version`);
+    assert.equal(fromRust.headers.get('content-type'), fromGo.headers.get('content-type'));
+    assert.equal(fromRust.headers.get('content-length'), String(Buffer.byteLength(textRust)));
+  }
+
+  assert.deepEqual(tables(), ['sonus_app_password', 'sonus_connect_session', 'sonus_recovery_code', 'sonus_server_schema', 'sonus_two_factor'], 'two tables of the Rust server’s own beside the fork’s three');
+  const songs = (await signed(listener).allSongs()).slice(0, 5);
+  const pc = await device(rust.url, signed(listener).query().toString(), 'restart-pc-0001', '书房电脑');
+  const played = await pc.command('playContext', { context: { kind: 'album', id: 'x', label: 'X' }, ids: songs.map(s => s.id), startId: songs[1].id });
+  await pc.command('add', { ids: [songs[4].id] });
+  const where = Math.floor(played.durationMs / 2); // within the song: the fixture library's are a few seconds long
+  await pc.command('seek', { positionMs: where });
+  const paused = await pc.command('pause');
+  // another user's session, to see that each comes back as its own
+  const other = await device(rust.url, signed(secure).query().toString(), 'restart-pc-0002', 'Secure');
+  const theirs = await other.command('playContext', { ids: [songs[3].id] });
+
+  // written within a second of the change: the server is killed, not stopped (so nothing is written at its end)
+  await sleep(1500);
+  assert.equal(row(listener.username).session.rev, paused.rev);
+  assert.deepEqual(row(listener.username).lists.context, songs.map(s => s.id));
+  await rust.stop({ keep: true });
+  assert.ok([1005, 1006].includes(await pc.closed), 'the connection went with the server');
+
+  // the same data folder again: Navidrome starts on a database with the Rust server's tables in it, and runs
+  rust = await startGatewayOnGolden({ copy: rust.copy });
+  const log = rust.log();
+  assert.ok(!/level=(error|fatal)/i.test(log), `Navidrome and the Rust server start without errors:\n${log.slice(-2000)}`);
+  assert.equal((await signed(listener).ok('ping')).status, 'ok');
+  assert.equal((await signed(listener).allSongs()).length, (await new Subsonic(go.url, { u: listener.username, password: listener.password }, { client: CLIENT }).allSongs()).length);
+  assert.deepEqual(tables().length, 5);
+
+  const laptop = await device(rust.url, signed(listener).query().toString(), 'restart-laptop-1', '笔记本');
+  const back = laptop.welcome.session;
+  assert.equal(back.activeDevice, null, 'no active device after a restart');
+  assert.equal(back.playing, false);
+  assert.equal(back.positionMs, paused.positionMs, 'paused at its position');
+  assert.ok(paused.positionMs >= where && paused.positionMs < where + 500, 'which is where it was sought to, and the moment it played on');
+  assert.equal(back.rev, paused.rev);
+  assert.deepEqual(back.current, paused.current);
+  assert.deepEqual(back.now, paused.now);
+  assert.deepEqual(back.lastDevice, { id: 'restart-pc-0001', name: '书房电脑' });
+  assert.deepEqual(laptop.welcome.queue.order, songs.map(s => s.id));
+  assert.deepEqual(laptop.welcome.queue.manual.map(m => m.trackId), [songs[4].id]);
+  assert.deepEqual(laptop.welcome.devices.map(d => d.id), ['restart-laptop-1']);
+  // whichever device presses play continues it, and becomes the active device
+  const playing = await laptop.command('play');
+  assert.equal(playing.activeDevice, 'restart-laptop-1');
+  assert.equal(playing.positionMs, paused.positionMs);
+  // the other user's came back as theirs, stopped where it played (it was playing when the server was killed)
+  const again = await device(rust.url, signed(secure).query().toString(), 'restart-pc-0002', 'Secure');
+  assert.equal(again.welcome.session.current.trackId, songs[3].id);
+  assert.equal(again.welcome.session.activeDevice, null);
+  assert.equal(again.welcome.session.playing, false);
+  assert.ok(again.welcome.session.rev >= theirs.rev);
+
+  // stopped properly this time: the last change is written when the server stops (where it can be told to: a
+  // killed process writes nothing, so this part is for systems with signals)
+  const last = await laptop.command('seek', { positionMs: where + 100 });
+  if (process.platform !== 'win32') {
+    await rust.stop({ keep: true });
+    assert.equal(row(listener.username).session.rev, last.rev, 'written at shutdown');
+    rust = await startGatewayOnGolden({ copy: rust.copy });
+  }
+  await Promise.all([laptop.close(), again.close(), other.close()]);
 });

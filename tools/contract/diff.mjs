@@ -22,6 +22,8 @@
 //   { …, volatile: [paths], unordered: [paths] }                                   the same, for this request only
 // The corpus's volatile paths are left out of every comparison (serverVersion, times of the request); its unordered
 // paths are arrays whose order means nothing (Go builds them from maps, in random order): compared sorted.
+// What the Rust server is meant to answer differently is not hidden as volatile: it is written down (EXPECTED, below)
+// and applied to Navidrome's answer before the comparison, so the two must then be the same, field for field.
 // Placeholders: {{key}} is the manifest's id for key, {{user.<name>}} a user's username, {{$}} the key of a `for`.
 // Paths: dot-separated keys, * for any one key or array index, ** for any number (subsonic-response.**.roles).
 // Answers: JSON is compared field by field, whatever the key order; anything else by status, a few headers, length and
@@ -148,11 +150,29 @@ export function compare(a, b, volatile, path = [], out = [], unordered = []) {
 
 const show = v => (v === undefined ? '(missing)' : JSON.stringify(v)?.slice(0, 160));
 
-export async function runDiff({ a, b, manifest, corpus, only, log = console.log }) {
+/**
+ * Where the Rust server (B) is meant to answer differently from Navidrome alone (A), each as a change made to A's
+ * answer before the comparison: the answers must then be the same, so anything else that differs still shows.
+ */
+export const EXPECTED = {
+  /** The Rust server speaks Sonus Connect version 2 itself and adds it to Navidrome's list of extensions (version 1). */
+  connectVersion2: {
+    what: 'getOpenSubsonicExtensions: sonusConnect is [1, 2] from the Rust server ([1] from Navidrome alone)',
+    apply(answerOfA) {
+      const list = answerOfA.json?.['subsonic-response']?.openSubsonicExtensions;
+      const connect = Array.isArray(list) && list.find(e => e.name === 'sonusConnect');
+      if (connect && Array.isArray(connect.versions) && !connect.versions.includes(2)) connect.versions = [...connect.versions, 2].sort((x, y) => x - y);
+    },
+  },
+};
+
+export async function runDiff({ a, b, manifest, corpus, only, expected = [], log = console.log }) {
   const requests = expand(corpus).filter(r => !only || r.name.includes(only));
   const results = [];
+  for (const e of expected) log(`  expected to differ, and compared with that applied to A: ${e.what}`);
   for (const r of requests) {
     const [ra, rb] = await Promise.all([answer(a, r, manifest), answer(b, r, manifest)]);
+    for (const e of expected) e.apply(ra);
     const inJson = v => (v.startsWith('json.') ? v : `json.${v}`);
     const volatile = [...(corpus.volatile ?? []), ...(r.volatile ?? [])].map(inJson);
     const unordered = [...(corpus.unordered ?? []), ...(r.unordered ?? [])].map(inJson);
@@ -212,16 +232,17 @@ export async function startGateway(upstream) {
  * { url, stop, log, data, manifest }. `env`: settings over the golden ones (both servers read them); `empty`: a new
  * server without users instead of the golden database. The log is the gateway's and Navidrome's together.
  */
-export async function startGatewayOnGolden({ env = {}, empty = false } = {}) {
+export async function startGatewayOnGolden({ env = {}, empty = false, copy: started = null } = {}) {
   const { freePort } = await import('../fixtures/lib/navidrome.mjs');
   const { goldenCopy } = await import('../fixtures/serve.mjs');
-  const copy = await goldenCopy({ empty });
+  // `copy`: the `copy` of a server stopped with stop({ keep: true }): the same data folder again (a restart)
+  const copy = started ?? await goldenCopy({ empty });
   const settings = { ...copy.env, ...env, SONUS_NAVIDROME_BIN: copy.manifest.server.navidrome, SONUS_NAVIDROME_PORT: String(await freePort()) };
   // up when Navidrome answers behind it and the gateway has checked the database (503 until then)
   const ready = async url => (await fetch(`${url}/rest/ping?f=json`)).status === 200;
   let gw;
   try { gw = await runGateway({ env: settings, cwd: copy.folder, port: await freePort(), ready }); } catch (e) { await copy.remove(); throw e; }
-  return { ...gw, data: copy.folder, manifest: copy.manifest, stop: async () => { await gw.stop(); await copy.remove(); } };
+  return { ...gw, data: copy.folder, manifest: copy.manifest, copy, stop: async ({ keep = false } = {}) => { await gw.stop(); if (!keep) await copy.remove(); } };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -231,7 +252,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   } });
   const corpus = JSON.parse(await readFile(values.corpus ? resolve(values.corpus) : join(here, 'corpus', 'read-only.json'), 'utf8'));
   const stops = [];
-  let a = values.a, b = values.b, manifest;
+  let a = values.a, b = values.b, manifest, expected = [];
   try {
     if (values['go-vs-gateway'] || values['go-vs-go']) {
       const { serveGolden } = await import('../fixtures/serve.mjs');
@@ -242,6 +263,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         console.log('Starting the Rust server (cargo run in server/; the first build takes a while)…');
         const gw = await startGatewayOnGolden(); stops.push(gw.stop);
         b = gw.url;
+        expected = [EXPECTED.connectVersion2];
         console.log(`A: Navidrome ${manifest.server.serverVersion} at ${a}\nB: the Rust server at ${b}, running its own Navidrome on another copy of the golden database\n`);
       } else {
         const goB = await serveGolden(); stops.push(goB.stop);
@@ -253,7 +275,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       manifest = JSON.parse(await readFile(resolve(values.manifest), 'utf8'));
       console.log(`A: ${a}\nB: ${b}\n`);
     }
-    const report = await runDiff({ a, b, manifest, corpus, only: values.only });
+    const report = await runDiff({ a, b, manifest, corpus, only: values.only, expected });
     if (values.json) await writeFile(resolve(values.json), JSON.stringify(report, null, 2));
     process.exitCode = report.different ? 1 : 0;
   } finally {

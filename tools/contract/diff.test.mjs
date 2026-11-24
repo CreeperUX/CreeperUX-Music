@@ -2,7 +2,7 @@
 // that. Usage: node --test tools/contract/diff.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compare, expand, matches } from './diff.mjs';
+import { compare, expand, matches, EXPECTED } from './diff.mjs';
 
 test('paths: * is one key or index, ** any number', () => {
   assert.ok(matches(['a', 'b', 0, 'c'], 'a.b.*.c'));
@@ -38,4 +38,22 @@ test('for: one request per key, {{$}} replaced, {{{{$}}}} becoming a placeholder
   assert.deepEqual(r.map(x => x.name), ['getSong track.a', 'getSong track.b', 'ping']);
   assert.equal(r[1].params.id, '{{track.b}}');
   assert.equal(r[0].for, undefined);
+});
+
+test('an expected difference is applied to A, and everything else still has to be the same', () => {
+  const answer = versions => ({ status: 200, json: { 'subsonic-response': { status: 'ok', openSubsonicExtensions: [{ name: 'formPost', versions: [1] }, { name: 'sonusConnect', versions }] } } });
+  const go = answer([1]), rust = answer([1, 2]);
+  assert.equal(compare(go, rust, []).length, 1, 'without it, the lists differ');
+  EXPECTED.connectVersion2.apply(go);
+  assert.deepEqual(compare(go, rust, []), []);
+  // only that: another extension's versions, or a version 3, still show
+  const other = answer([1, 2]);
+  other.json['subsonic-response'].openSubsonicExtensions[0].versions = [1, 2];
+  assert.equal(compare(go, other, []).length, 1);
+  assert.equal(compare(go, answer([1, 2, 3]), []).length, 1);
+  // answers without the list are left as they are
+  const error = { status: 200, json: { 'subsonic-response': { status: 'failed', error: { code: 40 } } } };
+  EXPECTED.connectVersion2.apply(error);
+  assert.deepEqual(error.json['subsonic-response'], { status: 'failed', error: { code: 40 } });
+  EXPECTED.connectVersion2.apply({ status: 200, sha256: 'x' });
 });

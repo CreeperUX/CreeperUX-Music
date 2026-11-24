@@ -28,22 +28,39 @@ const PART: &str = "connect";
 /// Makes Connect's tables when the database has none yet. Err: the tables are from a newer server (or cannot be
 /// made); the server then does not run on this database.
 pub fn prepare(db: &Db) -> Result<(), String> {
-    let found = db
-        .write_blocking(|tx| {
-            tx.execute_batch("CREATE TABLE IF NOT EXISTS sonus_server_schema (part TEXT PRIMARY KEY, version INTEGER NOT NULL);")?;
-            let version: Option<i64> = tx.query_row("SELECT version FROM sonus_server_schema WHERE part = ?1", [PART], |r| r.get(0)).optional()?;
-            if version.is_none() {
+    let failed = |e: DbError| format!("cannot prepare the Sonus Connect tables: {e}");
+    // nothing is written when the tables are there already (every start but the first): Navidrome may be busy writing
+    let mut found = db.read_blocking(version).map_err(failed)?;
+    if found.is_none() {
+        found = db
+            .write_blocking(|tx| {
+                tx.execute_batch("CREATE TABLE IF NOT EXISTS sonus_server_schema (part TEXT PRIMARY KEY, version INTEGER NOT NULL);")?;
+                // another server on the same file may have been first
+                if let Some(version) = version(tx)? {
+                    return Ok(Some(version));
+                }
                 create(tx)?;
-            }
-            Ok(version.unwrap_or(SCHEMA_VERSION))
-        })
-        .map_err(|e| format!("cannot prepare the Sonus Connect tables: {e}"))?;
-    if found != SCHEMA_VERSION {
-        return Err(format!(
-            "the database's Sonus Connect tables are at version {found}, but this Sonus server knows {SCHEMA_VERSION}: it was used by a newer server"
-        ));
+                Ok(Some(SCHEMA_VERSION))
+            })
+            .map_err(failed)?;
     }
-    Ok(())
+    match found {
+        Some(SCHEMA_VERSION) => Ok(()),
+        other => Err(format!(
+            "the database's Sonus Connect tables are at version {}, but this Sonus server knows {SCHEMA_VERSION}: it was used by a newer server",
+            other.unwrap_or(0)
+        )),
+    }
+}
+
+/// The version of Connect's tables in the database, None when it has none.
+fn version(conn: &Connection) -> rusqlite::Result<Option<i64>> {
+    let has_table: Option<String> =
+        conn.query_row("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sonus_server_schema'", [], |r| r.get(0)).optional()?;
+    if has_table.is_none() {
+        return Ok(None);
+    }
+    conn.query_row("SELECT version FROM sonus_server_schema WHERE part = ?1", [PART], |r| r.get(0)).optional()
 }
 
 fn create(tx: &Transaction) -> rusqlite::Result<()> {

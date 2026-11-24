@@ -7,7 +7,7 @@
   "scripts": {
     "demo": "node tools/demo.mjs",
     "demo:browser": "node tools/demo.mjs --browser",
-    "server": "node server/demo-server.mjs",
+    "server": "node tools/demo-server/demo-server.mjs",
     "build": "dotnet build src/Sonus/Sonus.csproj -c Release",
     "test": "dotnet test tests/Sonus.Core.Tests",
     "check": "node tools/e2e/acceptance.mjs",

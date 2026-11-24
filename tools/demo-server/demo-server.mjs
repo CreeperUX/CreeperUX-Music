@@ -21,7 +21,7 @@
 // GET /__test/devices?u=demo → the user's connected devices and what they play;
 // GET /__test/device?code=BCDF-GHJK&decide=allow|deny[&u=demo] → decides a browser sign-in as the user would on the
 // approval page; without decide, lists the sign-ins waiting and the API keys given (names, not the keys).
-// Usage: node server/demo-server.mjs [port]   (default 4533, Navidrome's)
+// Usage: node tools/demo-server/demo-server.mjs [port]   (default 4533, Navidrome's)
 import { createServer } from 'node:http';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -33,7 +33,7 @@ import { buildLibrary, rng, hash, LYRIC } from './catalogue.mjs';
 import { wav } from './synth.mjs';
 import { attachConnect, EXTENSION as CONNECT } from './connect.mjs';
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..'); // the repository (web/, assets/)
 const port = Number(process.argv.slice(2).find(a => /^\d+$/.test(a)) || 4533);
 const ACCOUNTS = { demo: 'demo', friend: 'friend' };
 const md5 = s => createHash('md5').update(s).digest('hex');
@@ -292,7 +292,7 @@ async function coverArt(q, res) {
   const a = albums.get(q.get('id'));
   if (!a?._art) { res.writeHead(404, { 'Access-Control-Allow-Origin': '*' }).end(); return; }
   const headers = { 'Cache-Control': 'public, max-age=31536000', 'Access-Control-Allow-Origin': '*' };
-  try { res.writeHead(200, { ...headers, 'Content-Type': 'image/jpeg' }).end(await readFile(join(root, 'server/covers', `${a.id.replace(/x\d+$/, '')}.jpg`))); } // copies share the cover
+  try { res.writeHead(200, { ...headers, 'Content-Type': 'image/jpeg' }).end(await readFile(join(root, 'tools/demo-server/covers', `${a.id.replace(/x\d+$/, '')}.jpg`))); } // copies share the cover
   catch { res.writeHead(200, { ...headers, 'Content-Type': 'image/svg+xml' }).end(decodeURIComponent(a._art.slice(a._art.indexOf(',') + 1))); }
 }
 function stream(q, req, res) {

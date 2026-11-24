@@ -30,7 +30,7 @@ export function build(arch = 'x64') {
 /** The demo server on a free port. */
 export async function startDemoServer({ scale = 1 } = {}) {
   const port = 4700 + Math.floor(Math.random() * 200);
-  const p = spawn(process.execPath, [join(root, 'server/demo-server.mjs'), String(port), `--scale=${scale}`], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const p = spawn(process.execPath, [join(root, 'tools/demo-server/demo-server.mjs'), String(port), `--scale=${scale}`], { stdio: ['ignore', 'pipe', 'inherit'] });
   await new Promise((ok, fail) => { p.stdout.on('data', d => { if (String(d).includes('demo server')) ok(); }); p.on('exit', fail); });
   const url = `http://127.0.0.1:${port}`;
   return { url, process: p, log: async () => (await fetch(`${url}/__test/log`)).json(), offline: on => fetch(`${url}/__test/offline?on=${on ? 1 : 0}`), stop: () => p.kill() };

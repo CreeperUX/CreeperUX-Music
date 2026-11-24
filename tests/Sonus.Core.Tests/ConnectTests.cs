@@ -2,7 +2,7 @@ using Sonus.Core.Connect;
 
 namespace Sonus.Core.Tests;
 
-/// <summary>Sonus Connect against the demo server (server/connect.mjs, the protocol of the CreeperUX/navidrome fork).</summary>
+/// <summary>Sonus Connect against the demo server (tools/demo-server/connect.mjs, the protocol of the CreeperUX/navidrome fork).</summary>
 public class ConnectTests(DemoServer server) : IClassFixture<DemoServer>
 {
     private async Task<(SubsonicClient Client, ConnectClient Connect)> Device(string clientName, string name)

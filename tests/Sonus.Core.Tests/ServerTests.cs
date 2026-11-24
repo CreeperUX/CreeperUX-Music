@@ -6,7 +6,7 @@ using Sonus.Core;
 
 namespace Sonus.Core.Tests;
 
-/// <summary>Starts the demo server (server/demo-server.mjs, Node.js) once for the tests that talk to a server.</summary>
+/// <summary>Starts the demo server (tools/demo-server/demo-server.mjs, Node.js) once for the tests that talk to a server.</summary>
 public sealed class DemoServer : IDisposable
 {
     private readonly Process _node;
@@ -18,9 +18,9 @@ public sealed class DemoServer : IDisposable
     internal DemoServer(string options)
     {
         string root = AppContext.BaseDirectory;
-        while (!File.Exists(Path.Combine(root, "server", "demo-server.mjs"))) root = Path.GetDirectoryName(root) ?? throw new InvalidOperationException("server/demo-server.mjs not found");
+        while (!File.Exists(Path.Combine(root, "tools", "demo-server", "demo-server.mjs"))) root = Path.GetDirectoryName(root) ?? throw new InvalidOperationException("tools/demo-server/demo-server.mjs not found");
         var probe = new TcpListener(IPAddress.Loopback, 0); probe.Start(); int port = ((IPEndPoint)probe.LocalEndpoint).Port; probe.Stop();
-        _node = Process.Start(new ProcessStartInfo("node", $"\"{Path.Combine(root, "server", "demo-server.mjs")}\" {port} {options}") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true })!;
+        _node = Process.Start(new ProcessStartInfo("node", $"\"{Path.Combine(root, "tools", "demo-server", "demo-server.mjs")}\" {port} {options}") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true })!;
         string? line = _node.StandardOutput.ReadLine();
         if (line is null || !line.Contains("demo server")) throw new InvalidOperationException("the demo server did not start: " + line);
         Url = $"http://127.0.0.1:{port}";

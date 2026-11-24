@@ -16,7 +16,7 @@ const free = port => new Promise(ok => { const s = createServer().once('error', 
 let port = 4533; // Navidrome's port; the next free one when it is taken (a real Navidrome may be running)
 while (!(await free(port))) port++;
 
-const server = spawn(process.execPath, [join(root, 'server/demo-server.mjs'), String(port)], { stdio: ['ignore', 'pipe', 'inherit'] });
+const server = spawn(process.execPath, [join(root, 'tools/demo-server/demo-server.mjs'), String(port)], { stdio: ['ignore', 'pipe', 'inherit'] });
 await new Promise((ok, fail) => { server.stdout.on('data', d => { if (String(d).includes('demo server')) ok(); }); server.on('exit', () => fail(new Error('the demo server did not start'))); });
 const site = `http://127.0.0.1:${port}`;
 console.log(`演示服务器：${site}（账号 demo / demo；293 首歌、34 张专辑）`);

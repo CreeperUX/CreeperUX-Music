@@ -1,4 +1,4 @@
-// Acceptance run for Sonus. It starts the demo server (server/demo-server.mjs), signs in through the sign-in
+// Acceptance run for Sonus. It starts the demo server (tools/demo-server/demo-server.mjs), signs in through the sign-in
 // page, then: the interface acts and the server's own state is read back through the Subsonic API; playback is checked on
 // the page's real <audio> element; every view is opened in five layouts (themes, densities, widths, 200 % zoom) and
 // checked for console errors, page overflow and axe WCAG 2.1 A/AA; and 50 route changes must not grow the page.
@@ -29,7 +29,7 @@ if (real && (!account.user || !account.password)) { console.error('Set MUSIC_USE
 
 // the page is served by the demo server in both cases; against a real server only its static files are used
 const port = 4600 + Math.floor(Math.random() * 300);
-const demo = spawn(process.execPath, [join(root, 'server/demo-server.mjs'), String(port)], { stdio: ['ignore', 'pipe', 'inherit'] });
+const demo = spawn(process.execPath, [join(root, 'tools/demo-server/demo-server.mjs'), String(port)], { stdio: ['ignore', 'pipe', 'inherit'] });
 await new Promise((ok, fail) => { demo.stdout.on('data', d => { if (String(d).includes('demo server')) ok(); }); demo.on('exit', fail); });
 const site = `http://127.0.0.1:${port}`, server = real ?? site;
 const out = join(root, 'qa');

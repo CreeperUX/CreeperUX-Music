@@ -21,6 +21,7 @@ use hyper::header::HeaderName;
 use hyper::service::service_fn;
 use hyper::{Request, Response, Uri};
 use hyper_util::rt::TokioIo;
+use sonus_server::auth::Auth;
 use sonus_server::gateway::{self, Gateway, Settings};
 use sonus_server::subsonic::Subsonic;
 use sonus_server::trust::TrustList;
@@ -69,6 +70,8 @@ pub struct GatewaySetup<'a> {
     /// The gateway checks Subsonic sign-ins itself, with `subsonic` once it has it.
     pub checks_sign_ins: bool,
     pub subsonic: Option<Subsonic>,
+    /// What the gateway answers `/auth` with.
+    pub auth: Option<Auth>,
 }
 
 impl Default for GatewaySetup<'_> {
@@ -81,6 +84,7 @@ impl Default for GatewaySetup<'_> {
             base_path: "",
             checks_sign_ins: false,
             subsonic: None,
+            auth: None,
         }
     }
 }
@@ -101,6 +105,9 @@ pub async fn gateway(upstream: SocketAddr, setup: GatewaySetup<'_>) -> (SocketAd
     let gateway = Gateway::new(settings, ready.clone());
     if let Some(subsonic) = setup.subsonic {
         gateway.set_subsonic(subsonic);
+    }
+    if let Some(auth) = setup.auth {
+        gateway.set_auth(auth);
     }
     tokio::spawn(gateway::serve(listener, gateway, std::future::pending()));
     (addr, ready)

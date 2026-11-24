@@ -200,8 +200,14 @@ fn xml_text(out: &mut String, text: &str) {
 pub fn response(content_type: &'static str, body: Vec<u8>, request: &HeaderMap, frame_options: &HeaderValue) -> Response<Body> {
     let mut r = Response::new(Full::new(Bytes::from(body)).map_err(|never| match never {}).boxed());
     *r.status_mut() = StatusCode::OK;
-    let h = r.headers_mut();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    navidrome_headers(r.headers_mut(), request, frame_options);
+    r
+}
+
+/// The headers Navidrome's middlewares add to every answer, for the answers given here: its security headers, and
+/// CORS open to every origin, without credentials, when the request comes from a page (`Origin`).
+pub fn navidrome_headers(h: &mut HeaderMap, request: &HeaderMap, frame_options: &HeaderValue) {
     h.insert(header::VARY, HeaderValue::from_static("Origin"));
     if request.get(header::ORIGIN).is_some_and(|origin| !origin.is_empty()) {
         h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
@@ -211,7 +217,6 @@ pub fn response(content_type: &'static str, body: Vec<u8>, request: &HeaderMap, 
     h.insert(header::X_FRAME_OPTIONS, frame_options.clone());
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("same-origin"));
     h.insert("permissions-policy", HeaderValue::from_static("autoplay=(), camera=(), microphone=(), usb=()"));
-    r
 }
 
 #[cfg(test)]

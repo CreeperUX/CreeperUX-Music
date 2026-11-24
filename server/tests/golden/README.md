@@ -8,6 +8,7 @@ What the unit tests of `src/secrets.rs` open and compare against, made by Navidr
 | `encrypt_default_key.in` | `utils.Encrypt` with the key sha256(`"just for obfuscation"`), Navidrome's default |
 | `encrypt_custom_key.in` | `utils.Encrypt` with the key sha256(`"sonus golden key ✓"`) |
 | `key_hash.in` | `keyHash` of `core/twofactor/store.go` (copied into the generator: it is not exported) |
+| `jwt.in` | session tokens signed as `core/auth` signs them (`jwtauth.New("HS256", secret, nil).Encode(Claims.ToMap())`), with fixed times: a session, a plain user's, a setup token, an expired one. `(name, secret, token)` |
 
 Each is a Rust slice of `(input, output)` pairs, included by the tests. The texts are made up; nothing here is a
 credential of anything.
@@ -36,3 +37,7 @@ go run . /tmp/out "just for obfuscation" "some text" "$sealed"          # go ope
 ```
 
 Checked on 2026-11-24 with both keys (true, true) and with the wrong key as a control (false).
+
+For tokens the reverse is checked against the running Navidrome instead (`tools/contract`): the session this server
+issues opens Navidrome's `/api`, and the token Navidrome renews opens `/auth` here. The generator can also verify one
+token by hand: `JWT_FROM_RUST=<token> go run . /tmp/out` (with the generator's own secret).

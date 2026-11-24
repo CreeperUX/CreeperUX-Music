@@ -33,6 +33,29 @@ pub fn now_local() -> String {
     format(&Local::now())
 }
 
+/// A time for a JSON answer, as Go's `time.Time` marshals it (RFC 3339 with the fraction it has, `Z` for UTC).
+pub fn to_json<Tz: TimeZone>(time: &DateTime<Tz>) -> String {
+    let written = format(time);
+    // "2006-01-02 15:04:05.999999999-07:00" → "2006-01-02T15:04:05.999999999-07:00", "+00:00" → "Z"
+    let (date, rest) = written.split_at(10);
+    let rest = &rest[1..];
+    match rest.strip_suffix("+00:00") {
+        Some(clock) => format!("{date}T{clock}Z"),
+        None => format!("{date}T{rest}"),
+    }
+}
+
+/// A stored time for a JSON answer: read as go-sqlite3 reads it (keeping its offset), written as Go marshals it.
+pub fn stored_to_json(text: &str) -> Option<String> {
+    let utc = parse(text)?;
+    let offset = text.trim_end_matches('Z').rfind(['+', '-']).filter(|at| *at > 10).and_then(|at| {
+        let (hours, minutes) = text[at + 1..].split_once(':')?;
+        let seconds = hours.parse::<i32>().ok()? * 3600 + minutes.parse::<i32>().ok()? * 60;
+        FixedOffset::east_opt(if text.as_bytes()[at] == b'-' { -seconds } else { seconds })
+    });
+    Some(to_json(&utc.with_timezone(&offset.unwrap_or(FixedOffset::east_opt(0)?))))
+}
+
 /// Reads what go-sqlite3 reads back as a time (its `SQLiteTimestampFormats`): a date, then optionally a time after a
 /// space or `T`, fractional seconds, and an offset or `Z`. Without an offset it is UTC.
 pub fn parse(text: &str) -> Option<DateTime<Utc>> {
@@ -97,6 +120,18 @@ mod tests {
         assert_eq!(parse("2026-11-24"), Some(utc(0, 0, 0, 0)));
         assert_eq!(parse(""), None);
         assert_eq!(parse("yesterday"), None);
+    }
+
+    #[test]
+    fn times_in_json_as_go_marshals_them() {
+        assert_eq!(to_json(&at(0, 34_582_900)), "2026-11-24T21:01:53.0345829Z");
+        assert_eq!(to_json(&at(0, 0)), "2026-11-24T21:01:53Z");
+        assert_eq!(to_json(&at(1, 596_376_800)), "2026-11-24T21:01:53.5963768+01:00");
+        assert_eq!(stored_to_json("2026-11-24 20:01:52.0345829+00:00").as_deref(), Some("2026-11-24T20:01:52.0345829Z"));
+        assert_eq!(stored_to_json("2026-11-24 21:01:53.5963768+01:00").as_deref(), Some("2026-11-24T21:01:53.5963768+01:00"));
+        assert_eq!(stored_to_json("2026-11-24 13:01:52-07:00").as_deref(), Some("2026-11-24T13:01:52-07:00"));
+        assert_eq!(stored_to_json("2026-11-24 20:01:52").as_deref(), Some("2026-11-24T20:01:52Z"));
+        assert_eq!(stored_to_json("soon"), None);
     }
 
     #[test]

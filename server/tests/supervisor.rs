@@ -40,6 +40,7 @@ fn fake_navidrome() {
     let keys = sonus_server::secrets::Keys::new(&std::env::var("ND_PASSWORDENCRYPTIONKEY").unwrap_or_default());
     let conn = common::database::create_at_version(std::path::Path::new("navidrome.db"), version);
     common::database::add_user(&conn, &keys, "alice", "sesame");
+    common::database::set_session_secret(&conn, &keys, "the fake Navidrome's session secret");
     drop(conn);
     // Navidrome's server: answers with the request's headers, until asked to stop
     let address = format!("{}:{}", std::env::var("ND_ADDRESS").unwrap(), std::env::var("ND_PORT").unwrap());
@@ -60,7 +61,7 @@ fn fake_navidrome() {
             head.push_str(&line);
         }
         // every Subsonic answer starts the same way; anything else is answered with the request itself
-        let body = if head.starts_with("GET /rest/getOpenSubsonicExtensions") {
+        let body = if head.starts_with("GET /rest/ping?u=sonus-server-start-probe") {
             r#"{"subsonic-response":{"status":"ok","version":"1.16.1","type":"navidrome","serverVersion":"0.64.2-fake","openSubsonic":true}}"#.to_string()
         } else {
             head.to_ascii_lowercase()
@@ -273,7 +274,7 @@ fn a_database_of_another_schema_stops_the_server() {
     assert_eq!(run.wait().code(), Some(1));
     let log = run.log();
     assert!(log.contains("schema version 20270101000000") && log.contains("20260922230428"), "{log}");
-    assert!(!log.contains("Subsonic sign-ins are checked here"), "{log}");
+    assert!(!log.contains("sign-ins are checked here"), "{log}");
 }
 
 #[test]

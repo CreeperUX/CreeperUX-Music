@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/go-chi/jwtauth/v5"
+	"github.com/navidrome/navidrome/core/auth"
 	"github.com/navidrome/navidrome/utils"
 )
 
@@ -45,6 +48,38 @@ func main() {
 	}
 	sb.WriteString("]\n")
 	os.WriteFile(os.Args[1]+"/key_hash.in", []byte(sb.String()), 0o644)
+	// session tokens, signed as Navidrome signs them (core/auth: jwtauth.New("HS256", secret, nil), Claims.ToMap)
+	{
+		const secret = "golden jwt secret"
+		ja := jwtauth.New("HS256", []byte(secret), nil)
+		at := func(unix int64) time.Time { return time.Unix(unix, 0) }
+		tokens := []struct {
+			name string
+			c    auth.Claims
+		}{
+			{"session", auth.Claims{Issuer: "ND", Subject: "alice", IssuedAt: at(1700000000), ExpiresAt: at(4102444800), UserID: "1h0kQuAetIeA34EYHnVwu1", IsAdmin: true, Epoch: 3}},
+			{"plain", auth.Claims{Issuer: "ND", Subject: "林夕雨", IssuedAt: at(1700000000), ExpiresAt: at(4102444800), UserID: "325cpis79ZPTebX1XhzTod"}},
+			{"setup", auth.Claims{Issuer: "ND", Subject: "alice", IssuedAt: at(1700000000), ExpiresAt: at(4102444800), UserID: "1h0kQuAetIeA34EYHnVwu1", Audience: []string{"sonus-2fa-setup"}}},
+			{"expired", auth.Claims{Issuer: "ND", Subject: "alice", IssuedAt: at(1700000000), ExpiresAt: at(1700000100), UserID: "1h0kQuAetIeA34EYHnVwu1"}},
+		}
+		var sb strings.Builder
+		sb.WriteString("&[\n")
+		for _, t := range tokens {
+			_, token, err := ja.Encode(t.c.ToMap())
+			if err != nil { panic(err) }
+			fmt.Fprintf(&sb, "    (%q, %q, %q),\n", t.name, secret, token)
+		}
+		sb.WriteString("]\n")
+		os.WriteFile(os.Args[1]+"/jwt.in", []byte(sb.String()), 0o644)
+		// the reverse: a token the Rust server signed (JWT_FROM_RUST) verifies with Navidrome's stack
+		if rust := os.Getenv("JWT_FROM_RUST"); rust != "" {
+			token, err := jwtauth.VerifyToken(ja, rust)
+			if err != nil { fmt.Println("go verifies rust's token: false:", err) } else {
+				c := auth.ClaimsFromToken(token)
+				fmt.Printf("go verifies rust's token: true (sub=%s uid=%s adm=%v ep=%d aud=%v)\n", c.Subject, c.UserID, c.IsAdmin, c.Epoch, c.Audience)
+			}
+		}
+	}
 	// the reverse: what the Rust server sealed (argv 2..: key, plain, sealed) opens with Navidrome's utils.Decrypt
 	for i := 2; i+2 < len(os.Args); i += 3 {
 		dec, err := utils.Decrypt(context.Background(), key(os.Args[i]), os.Args[i+2])

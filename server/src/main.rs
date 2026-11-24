@@ -83,9 +83,10 @@ async fn main() -> ExitCode {
             watch_until_ready(upstream.clone(), ready).await;
             match startup::local(&shared, &upstream, &base_path).await {
                 Ok(local) => {
+                    gateway.set_connect(local.connect);
                     gateway.set_subsonic(local.subsonic);
                     gateway.set_auth(local.auth);
-                    info!("Subsonic sign-ins are checked here, and /auth is answered here");
+                    info!("Subsonic sign-ins are checked here, and /auth and Sonus Connect version 2 are answered here");
                 }
                 Err(e) => {
                     let _ = failed_tx.send(e).await;
@@ -94,6 +95,7 @@ async fn main() -> ExitCode {
         });
     }
     let (stop_tx, mut stop_rx) = watch::channel(false);
+    let connect_owner = gateway.clone();
     let server = tokio::spawn(gateway::serve(listener, gateway, async move {
         let _ = stop_rx.wait_for(|stop| *stop).await;
     }));
@@ -101,6 +103,8 @@ async fn main() -> ExitCode {
     let code = tokio::select! {
         () = shutdown_signal() => {
             info!("stopping");
+            // Connect's sessions are written before anything else stops
+            stop_connect(&connect_owner).await;
             if let Some(navidrome) = navidrome.as_mut() {
                 navidrome.stop(Duration::from_secs(30)).await;
             }
@@ -109,12 +113,14 @@ async fn main() -> ExitCode {
         Some(reason) = failed_rx.recv() => {
             error!("{reason}");
             error!("cannot run on this database: stopping");
+            stop_connect(&connect_owner).await;
             if let Some(navidrome) = navidrome.as_mut() {
                 navidrome.stop(Duration::from_secs(30)).await;
             }
             ExitCode::from(1)
         }
         status = wait(navidrome.as_mut()) => {
+            stop_connect(&connect_owner).await;
             match status {
                 Ok(status) => {
                     error!(%status, "Navidrome stopped: stopping too");
@@ -132,6 +138,15 @@ async fn main() -> ExitCode {
         warn!("connections still open: leaving them");
     }
     code
+}
+
+/// Closes Sonus Connect's connections and writes its sessions, when the gateway answers it.
+async fn stop_connect(gateway: &Gateway) {
+    if let Some(connect) = gateway.connect() {
+        if tokio::time::timeout(Duration::from_secs(10), connect.stop()).await.is_err() {
+            warn!("Sonus Connect's sessions were not written in 10 s");
+        }
+    }
 }
 
 async fn wait(navidrome: Option<&mut Navidrome>) -> std::io::Result<std::process::ExitStatus> {

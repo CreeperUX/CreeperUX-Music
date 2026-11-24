@@ -72,7 +72,13 @@ struct Now {
 
 impl Now {
     fn of(song: &Song) -> Now {
-        Now { title: song.title.clone(), artist: song.artist.clone(), album: song.album.clone(), album_id: song.album_id.clone(), cover_art: song.cover_art.clone() }
+        Now {
+            title: song.title.clone(),
+            artist: song.artist.clone(),
+            album: song.album.clone(),
+            album_id: song.album_id.clone(),
+            cover_art: song.cover_art.clone(),
+        }
     }
 
     /// The reference's `pickNow`: the five fields, null for whatever is not a string.
@@ -273,9 +279,7 @@ fn clamp01(n: f64) -> f64 {
 
 /// JavaScript's `String.prototype.trim`: white space and line terminators.
 fn js_trim(s: &str) -> &str {
-    let space = |c: char| {
-        matches!(c, '\u{9}'..='\u{d}' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}')
-    };
+    let space = |c: char| matches!(c, '\u{9}'..='\u{d}' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}');
     s.trim_matches(space)
 }
 
@@ -405,6 +409,12 @@ impl ConnectSession {
 
     pub fn is_online(&self, id: &str) -> bool {
         self.device(id).is_some_and(|d| d.online)
+    }
+
+    /// The queue's lists (the context, the context in its own order, the hand-queued songs): the large part of what
+    /// is stored.
+    pub fn lists(&self) -> (Vec<Id>, Vec<Id>, Vec<super::queue::Manual>) {
+        (self.queue.context.clone(), self.queue.source.clone(), self.queue.manual.clone())
     }
 
     /// When `tick` has something to do (the grace period's end), or None.
@@ -625,10 +635,20 @@ impl ConnectSession {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn finish(&mut self, t: i64, id: Option<&str>, msg: &Value, result: Applied, error: Option<Fail>, queue_before: &PlayQueue, session_before: &Value) -> Vec<Out> {
+    fn finish(
+        &mut self,
+        t: i64,
+        id: Option<&str>,
+        msg: &Value,
+        result: Applied,
+        error: Option<Fail>,
+        queue_before: &PlayQueue,
+        session_before: &Value,
+    ) -> Vec<Out> {
         let mut out = result.out;
         // the queue as devices see it: the context, the pointer, the hand-queued songs
-        let queue_changed = self.queue.context != queue_before.context || self.queue.pointer != queue_before.pointer || self.queue.manual != queue_before.manual;
+        let queue_changed =
+            self.queue.context != queue_before.context || self.queue.pointer != queue_before.pointer || self.queue.manual != queue_before.manual;
         if queue_changed {
             self.queue_rev += 1;
         }

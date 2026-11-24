@@ -34,6 +34,10 @@ toml = { version = "1", default-features = false, features = ["std", "parse", "s
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
+[dev-dependencies]
+# the tests' WebSocket client (the server itself needs neither the client nor the handshake)
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

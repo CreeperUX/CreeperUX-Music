@@ -34,7 +34,7 @@ use crate::config::TwoFactor;
 use crate::db::Db;
 use crate::gateway::Body;
 use crate::secrets::Keys;
-use credentials::SignedIn;
+pub use credentials::SignedIn;
 use limiter::Limiter;
 use params::{CREDENTIALS, MAX_FORM_BYTES, Params};
 use respond::{Envelope, Format, Payload};
@@ -185,6 +185,22 @@ pub enum Outcome {
     SignedIn { path_and_query: String, body: Body, content_length: Option<usize>, user: HeaderValue },
 }
 
+/// Why `identify` names no user.
+enum Refusal {
+    Respond(Box<Response<Body>>),
+    /// The request carries a session token (`jwt`): Navidrome's to check.
+    SessionToken,
+}
+
+/// What `Subsonic::sign_in` found.
+pub enum SignIn {
+    User(SignedIn),
+    /// Refused, with the answer Navidrome would give (10, 40, 43, 44).
+    Refused(Response<Body>),
+    /// Not credentials this server checks: a session token (`jwt`), or a query Go's parser refuses.
+    NotChecked,
+}
+
 impl Subsonic {
     pub fn new(setup: Setup) -> Subsonic {
         Subsonic {
@@ -233,28 +249,10 @@ impl Subsonic {
 
         let format = Format::of(params.get("f"), params.get("callback"));
         let by_key = params.has("apiKey");
-        // Navidrome's checkRequiredParameters: an API key comes without u
-        let required: &[&str] = if by_key { &["v", "c"] } else { &["u", "v", "c"] };
-        if let Some(missing) = required.iter().find(|name| !params.has(name)) {
-            return self.error(&format, headers, respond::MISSING_PARAMETER, &format!("missing parameter: '{missing}'"));
-        }
-
-        let user = if by_key {
-            if ["u", "p", "t", "s", "jwt"].iter().any(|other| params.has(other)) {
-                return self.error(&format, headers, respond::CONFLICTING_AUTH, "Multiple conflicting authentication mechanisms provided");
-            }
-            match self.by_api_key(&params, client).await {
-                Ok(user) => user,
-                Err((code, message)) => return self.error(&format, headers, code, message),
-            }
-        } else {
-            if params.has("jwt") {
-                return Outcome::Untouched(body); // a web session: Navidrome checks its token
-            }
-            match self.by_password(params.get("u"), &params, client).await {
-                Ok(user) => user,
-                Err(()) => return self.error(&format, headers, respond::WRONG_CREDENTIALS, respond::WRONG_CREDENTIALS_MESSAGE),
-            }
+        let user = match self.identify(&params, headers, client, &format).await {
+            Ok(user) => user,
+            Err(Refusal::Respond(response)) => return Outcome::Respond(*response),
+            Err(Refusal::SessionToken) => return Outcome::Untouched(body), // a web session: Navidrome checks its token
         };
 
         if method == "tokenInfo" {
@@ -282,6 +280,48 @@ impl Subsonic {
                 Outcome::SignedIn { path_and_query, body: full(Bytes::from(stripped)), content_length: Some(length), user: user_header }
             }
             None => Outcome::SignedIn { path_and_query, body, content_length: None, user: user_header },
+        }
+    }
+
+    /// Who the parameters sign in as, exactly as `check` decides it: the required parameters first, then an API key
+    /// (alone) or a user name with its password or token. Err: the answer that refuses them, or that they carry a
+    /// session token (`jwt`), which is not checked here.
+    async fn identify(&self, params: &Params, headers: &HeaderMap, client: IpAddr, format: &Format) -> Result<SignedIn, Refusal> {
+        let refuse = |code: i32, message: &str| Err(Refusal::Respond(Box::new(self.error_response(format, headers, code, message))));
+        let by_key = params.has("apiKey");
+        // Navidrome's checkRequiredParameters: an API key comes without u
+        let required: &[&str] = if by_key { &["v", "c"] } else { &["u", "v", "c"] };
+        if let Some(missing) = required.iter().find(|name| !params.has(name)) {
+            return refuse(respond::MISSING_PARAMETER, &format!("missing parameter: '{missing}'"));
+        }
+        if by_key {
+            if ["u", "p", "t", "s", "jwt"].iter().any(|other| params.has(other)) {
+                return refuse(respond::CONFLICTING_AUTH, "Multiple conflicting authentication mechanisms provided");
+            }
+            return match self.by_api_key(params, client).await {
+                Ok(user) => Ok(user),
+                Err((code, message)) => refuse(code, message),
+            };
+        }
+        if params.has("jwt") {
+            return Err(Refusal::SessionToken);
+        }
+        match self.by_password(params.get("u"), params, client).await {
+            Ok(user) => Ok(user),
+            Err(()) => refuse(respond::WRONG_CREDENTIALS, respond::WRONG_CREDENTIALS_MESSAGE),
+        }
+    }
+
+    /// Who a request's query signs in as, for a route answered here whole (Sonus Connect's WebSocket): the same check
+    /// as `check` makes, with the same limiter and the same answers when it fails, but nothing goes on to Navidrome.
+    /// Only the query is read: such a request has no form.
+    pub async fn sign_in(&self, query: Option<&str>, headers: &HeaderMap, client: IpAddr) -> SignIn {
+        let Some(params) = Params::parse(query.unwrap_or("").as_bytes(), None) else { return SignIn::NotChecked };
+        let format = Format::of(params.get("f"), params.get("callback"));
+        match self.identify(&params, headers, client, &format).await {
+            Ok(user) => SignIn::User(user),
+            Err(Refusal::Respond(response)) => SignIn::Refused(*response),
+            Err(Refusal::SessionToken) => SignIn::NotChecked,
         }
     }
 
@@ -397,6 +437,11 @@ impl Subsonic {
 
     fn error(&self, format: &Format, request: &HeaderMap, code: i32, message: &str) -> Outcome {
         self.respond(format, request, &Payload::Error { code, message })
+    }
+
+    fn error_response(&self, format: &Format, request: &HeaderMap, code: i32, message: &str) -> Response<Body> {
+        let (content_type, body) = respond::render(&self.envelope, format, &Payload::Error { code, message });
+        respond::response(content_type, body, request, &self.frame_options)
     }
 
     fn respond(&self, format: &Format, request: &HeaderMap, payload: &Payload) -> Outcome {

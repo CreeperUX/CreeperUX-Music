@@ -1,8 +1,8 @@
 //! The gateway: every request goes to Navidrome as it came, streamed both ways (songs, uploads, server-sent events),
 //! WebSockets included (Sonus Connect, the Jellyfin API). Only what a proxy must change changes: hop-by-hop headers,
 //! and who the client is (trust.rs). Parts of the API move out of Navidrome by being answered or checked here instead:
-//! `routes.rs` lists them. So far: Subsonic sign-ins (`subsonic`) and the `/auth` routes (`auth`). Request bodies to
-//! Navidrome's own API are bounded here as Navidrome bounds them.
+//! `routes.rs` lists them. So far: Subsonic sign-ins (`subsonic`), the `/auth` routes (`auth`) and Sonus Connect
+//! version 2 (`connect`). Request bodies to Navidrome's own API are bounded here as Navidrome bounds them.
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -27,6 +27,7 @@ use tokio::net::TcpListener;
 use tracing::{debug, warn};
 
 use crate::auth::{self, Auth};
+use crate::connect::{self, Connect};
 use crate::routes::{self, Local};
 use crate::subsonic::{self, Subsonic};
 use crate::trust::{TrustList, client_ip};
@@ -79,6 +80,7 @@ struct Inner {
     ready: Arc<AtomicBool>,
     subsonic: OnceLock<Arc<Subsonic>>,
     auth: OnceLock<Arc<Auth>>,
+    connect: OnceLock<Connect>,
 }
 
 impl Gateway {
@@ -87,7 +89,7 @@ impl Gateway {
         connector.set_nodelay(true);
         connector.set_connect_timeout(Some(Duration::from_secs(5)));
         let client = Client::builder(TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).pool_timer(TokioTimer::new()).build(connector);
-        Gateway { inner: Arc::new(Inner { settings, client, ready, subsonic: OnceLock::new(), auth: OnceLock::new() }) }
+        Gateway { inner: Arc::new(Inner { settings, client, ready, subsonic: OnceLock::new(), auth: OnceLock::new(), connect: OnceLock::new() }) }
     }
 
     /// Gives the gateway what it checks Subsonic sign-ins with (the database is open and is the schema it knows).
@@ -99,6 +101,17 @@ impl Gateway {
     /// Gives the gateway what it answers the `/auth` routes with. Once: a second call changes nothing.
     pub fn set_auth(&self, auth: Auth) {
         let _ = self.inner.auth.set(Arc::new(auth));
+    }
+
+    /// Gives the gateway Sonus Connect version 2: from then on it answers `rest/connect?protocol=2` itself and says so
+    /// in `getOpenSubsonicExtensions`. Once: a second call changes nothing.
+    pub fn set_connect(&self, connect: Connect) {
+        let _ = self.inner.connect.set(connect);
+    }
+
+    /// Sonus Connect, when the gateway answers it.
+    pub fn connect(&self) -> Option<&Connect> {
+        self.inner.connect.get()
     }
 
     pub async fn handle(&self, mut req: Request<Incoming>, peer: IpAddr) -> Response<Body> {
@@ -113,7 +126,7 @@ impl Gateway {
         }
 
         let upgrade = upgrade_protocol(req.headers());
-        let client_upgrade = upgrade.as_ref().map(|_| hyper::upgrade::on(&mut req));
+        let mut client_upgrade = upgrade.as_ref().map(|_| hyper::upgrade::on(&mut req));
 
         let (parts, body) = req.into_parts();
         // Navidrome's address and the request's own path, as it came (a BaseURL path included)
@@ -149,7 +162,28 @@ impl Gateway {
         // What is answered or checked here instead of by Navidrome (routes.rs). A user a trusted proxy names is
         // Navidrome's to look up, as before.
         let local = if settings.checks_sign_ins { routes::find(&parts.method, parts.uri.path(), &headers, &settings.base_path) } else { None };
+        // Navidrome's list of extensions gets this server's own added (below), so it must come as it is written
+        let merge_extensions = local == Some(Local::Extensions) && self.inner.connect.get().is_some() && parts.method != Method::HEAD;
+        if merge_extensions {
+            headers.remove(header::ACCEPT_ENCODING);
+        }
         let body: Body = match local {
+            // Sonus Connect version 2: its WebSocket is answered here, for the user the query's credentials sign in
+            // (a trusted proxy's user header does not open it)
+            Some(ref connect_v2) if self.inner.connect.get().is_some() && routes::is_connect_v2(connect_v2, parts.uri.query()) => {
+                let (Some(connect), Some(subsonic)) = (self.inner.connect.get(), self.inner.subsonic.get()) else { return starting() };
+                let request = connect::Request {
+                    method: &parts.method,
+                    query: parts.uri.query(),
+                    headers: &headers,
+                    client,
+                    upgrade: upgrade.as_ref(),
+                    on_upgrade: client_upgrade.take(),
+                };
+                let response = connect.handle(subsonic, request).await;
+                debug!(%method, path, status = response.status().as_u16(), ms = started.elapsed().as_millis() as u64, %client, "answered here");
+                return response;
+            }
             Some(Local::Auth(rest)) => {
                 let Some(auth) = self.inner.auth.get() else { return starting() };
                 let request = auth::Request {
@@ -267,6 +301,16 @@ impl Gateway {
 
         let (mut parts, body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
+        if merge_extensions && status == StatusCode::OK && !parts.headers.contains_key(header::CONTENT_ENCODING) {
+            // the list is a few hundred bytes; an answer that is not one goes out as it came
+            let Ok(read) = Limited::new(body, 1 << 20).collect().await else {
+                return text(StatusCode::BAD_GATEWAY, "The music server (Navidrome) did not answer");
+            };
+            let bytes = read.to_bytes();
+            let merged = connect::extensions::merge(&bytes, connect::extensions::OURS).map(Bytes::from).unwrap_or(bytes);
+            parts.headers.insert(header::CONTENT_LENGTH, HeaderValue::from(merged.len()));
+            return Response::from_parts(parts, Full::new(merged).map_err(|never: Infallible| match never {}).boxed());
+        }
         Response::from_parts(parts, body.map_err(Into::into).boxed())
     }
 }

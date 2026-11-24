@@ -43,16 +43,20 @@
 
 ### 阶段 0：网关，行为不变（S–M）
 
-- **网关本身**（`server/`，骨架已写，还没编译）：
+- **网关本身**（`server/`，已完成，PR #2，细节见 `server/README.md`）：
   - 原样转发所有请求，流式双向传输，支持 WebSocket；
-  - 自己判断客户端 IP，剥掉客户端伪造的转发头和 `Remote-User` 头；
-  - 负责启动和看护 Navidrome。
-- **要补的**：读取 `ND_CONFIGFILE`（默认 `/data/navidrome.toml`）和 `BaseURL`。现在只读环境变量，用户把端口或可信代理写在配置文件里时会对不上。
+  - 自己判断客户端 IP，剥掉客户端伪造的转发头和 `Remote-User` 头；判断规则与 Navidrome 逐条对齐；
+  - 负责启动和看护 Navidrome：把地址、端口、只信任网关、用户头名告诉它；没有可信代理时，用户头名每次启动随机生成；
+  - 和 Navidrome 一样读配置：`ND_CONFIGFILE`（默认 `/data/navidrome.toml`）、`ND_*` 环境变量、命令行，优先级相同；`BaseURL` 的路径记下备用；
+  - 会让 Navidrome 绕过网关的设置（TLS、命令行里的端口和地址等）直接拒绝启动；
+  - 有单元测试和集成测试；冻结版 Navidrome 已在本机放到网关后面实测通过（网页登录、事件流、Subsonic、Range 串流、Connect、客户端 IP）。
 - **测试**：
   - 演示服务器的测试和验收测试能指向外部地址（演示服务器已经搬到 `tools/demo-server/`）；
   - 写差分测试工具：请求清单 → 两边各发一次 → 规整 → 比较；
   - 准备一套固定的测试曲库和对应的数据库。
 - **镜像与 CI**：`ghcr.io/creeperux/sonus-server`，在冻结版 Navidrome 镜像上加入 Rust 程序。Unraid 换成新镜像；回退就是换回旧镜像。
+  - `server/Dockerfile` 和 `.github/workflows/server.yml` 已写好：每次改动跑格式、代码检查和测试；合并到 `main` 后、每周一 02:30 UTC 构建 amd64 和 arm64 两种镜像。
+  - 本机没有 Docker，镜像要等合并后由 CI 第一次构建。
 - **完成标准**：Sonus 的全部测试经过网关通过；正式服务器在网关后面平稳运行一两周。
 
 ### 阶段 1：Sonus 自己的部分（M）
@@ -192,4 +196,4 @@
 - **网页版的歌词时间偏移正负号反了**（已确认）：`web/src/api/subsonic.js` 用的是 `start + offset`，Windows 版用 `start − offset`。按 OpenSubsonic，正的偏移应该让歌词提前，所以网页版错了。演示服务器的偏移总是 0，测试一直没发现。
 - **改版：经反向代理外部认证登录的二步验证用户，网页仍会拿到由密码算出的 Subsonic 令牌**（已确认）：`server/auth.go` 的 `handleLoginFromHeaders` 没有调用 `withoutSubsonicToken`。只有启用了 `ExtAuth` 才会碰到。
 - **待核实**：曲目持久 ID 的规则用了 `discnumber`/`tracknumber`，而标签映射里叫 `disc`/`track`，这两项可能永远是空的。Rust 必须照原样复现，不能顺手修掉。
-- **网关骨架还缺**：读取 `navidrome.toml` 和 `BaseURL`。已列入阶段 0。
+- **网关骨架还缺读取 `navidrome.toml` 和 `BaseURL`**：已补上（PR #2）。补的时候还发现骨架有一处和 Navidrome 不一致：同一个 `X-Real-IP` 头出现两次时，骨架取第一个值，Navidrome 取最后一个；可信代理若是追加这个头，客户端就能伪造地址。也已改正。

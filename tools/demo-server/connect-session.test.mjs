@@ -238,9 +238,10 @@ test('session: reports come from the active device, about the current song, and 
   w.report(A, 'ended');
   assert.equal(w.s.current.trackId, 't1');
   assert.equal(w.s.positionMs, 0);
-  const failed = w.report(A, 'failed');
-  assert.equal(w.replies(failed, 'error')[0].code, 'unplayable');
-  assert.equal(w.s.current.trackId, 't2');
+  const failed = w.replies(w.report(A, 'failed'), 'error')[0];
+  assert.deepEqual([failed.code, failed.message, failed.trackId, failed.stopped], ['unplayable', '无法播放“Song t1”，已跳到下一首。', 't1', false]);
+  assert.equal(w.s.current.trackId, 't2'); // skipped, as Spotify does
+  assert.equal(w.s.playing, true);
 });
 
 test('session: repeat one keeps the entry at the end of the song; stop after current stops at its start', () => {

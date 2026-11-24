@@ -6679,7 +6679,9 @@
          "type": "error",
          "ref": "failed",
          "code": "unplayable",
-         "message": "这首歌无法播放，已跳到下一首。"
+         "message": "无法播放“Song 1”，已跳到下一首。",
+         "trackId": "t1",
+         "stopped": false
         }
        }
       ]
@@ -6756,7 +6758,9 @@
          "type": "error",
          "ref": "failed",
          "code": "unplayable",
-         "message": "这首歌无法播放，已跳到下一首。"
+         "message": "无法播放“Song 2”，已跳到下一首。",
+         "trackId": "t2",
+         "stopped": false
         }
        }
       ]
@@ -6833,7 +6837,9 @@
          "type": "error",
          "ref": "failed",
          "code": "unplayable",
-         "message": "这首歌无法播放，已跳到下一首。"
+         "message": "无法播放“Song 3”，已跳到下一首。",
+         "trackId": "t3",
+         "stopped": false
         }
        }
       ]
@@ -6910,7 +6916,9 @@
          "type": "error",
          "ref": "failed",
          "code": "unplayable",
-         "message": "这首歌无法播放，已跳到下一首。"
+         "message": "无法播放“Song 4”，已跳到下一首。",
+         "trackId": "t4",
+         "stopped": false
         }
        }
       ]
@@ -7063,7 +7071,9 @@
          "type": "error",
          "ref": "failed",
          "code": "unplayable",
-         "message": "这首歌无法播放，已跳到下一首。"
+         "message": "无法播放“Song 5”，已跳到下一首。",
+         "trackId": "t5",
+         "stopped": false
         }
        }
       ]
@@ -7356,7 +7366,9 @@
          "type": "error",
          "ref": "failed",
          "code": "unplayable",
-         "message": "这首歌无法播放，已跳到下一首。"
+         "message": "无法播放“Song 0”，已跳到下一首。",
+         "trackId": "t0",
+         "stopped": false
         }
        }
       ]
@@ -7434,7 +7446,9 @@
          "type": "error",
          "ref": "failed",
          "code": "unplayable",
-         "message": "这首歌无法播放，已跳到下一首。"
+         "message": "无法播放“Song 1”，已跳到下一首。",
+         "trackId": "t1",
+         "stopped": false
         }
        }
       ]
@@ -7512,7 +7526,9 @@
          "type": "error",
          "ref": "failed",
          "code": "unplayable",
-         "message": "这首歌无法播放，已跳到下一首。"
+         "message": "无法播放“Song 2”，已跳到下一首。",
+         "trackId": "t2",
+         "stopped": false
         }
        }
       ]
@@ -7590,7 +7606,9 @@
          "type": "error",
          "ref": "failed",
          "code": "unplayable",
-         "message": "这首歌无法播放，已跳到下一首。"
+         "message": "无法播放“Song 3”，已跳到下一首。",
+         "trackId": "t3",
+         "stopped": false
         }
        }
       ]
@@ -7668,7 +7686,9 @@
          "type": "error",
          "ref": "failed",
          "code": "unplayable",
-         "message": "这首歌无法播放，已跳到下一首。"
+         "message": "无法播放“Song 4”；连续 5 首都无法播放，已停止播放。",
+         "trackId": "t4",
+         "stopped": true
         }
        }
       ]

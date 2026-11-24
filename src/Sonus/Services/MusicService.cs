@@ -222,6 +222,7 @@ public sealed class MusicService : IDisposable
     public void Play(PlayContext context, IReadOnlyList<string> ids, string? trackId = null, bool shuffle = false)
     {
         if (Session is { } session) { session.PlayContext(context, ids, trackId, shuffle); return; }
+        _failures = 0;
         if (Queue.Start(context, ids, trackId, shuffle) is { } start)
         {
             SaveOrder();
@@ -311,6 +312,7 @@ public sealed class MusicService : IDisposable
         switch (Engine.State)
         {
             case EngineState.Playing:
+                _failures = 0;
                 bool started = State is PlayerState.Loading;
                 SetState(PlayerState.Playing);
                 if (started) NowPlaying();
@@ -318,9 +320,31 @@ public sealed class MusicService : IDisposable
                 break;
             case EngineState.Paused: SetState(PlayerState.Paused); ScheduleSave(soon: true); SayHere("paused"); break;
             case EngineState.Loading: SetState(PlayerState.Loading); break;
-            case EngineState.Error: SetState(PlayerState.Error, $"无法播放“{Current?.Title}”：{Engine.Error}"); SayHere("failed"); break;
+            case EngineState.Error:
+                if (Session is null && SkipUnplayable()) break;
+                SetState(PlayerState.Error, $"无法播放“{Current?.Title}”：{Engine.Error}");
+                SayHere("failed"); // with a session: the server skips it and says so
+                break;
             case EngineState.Stopped when State is not PlayerState.Error: break; // Ended decides what follows
         }
+    }
+
+    private int _failures; // songs in a row that could not play
+
+    /// <summary>A song that can't play is skipped, as Spotify does (the next song: repeat one does not loop on it), with a
+    /// toast that names it; after five in a row, or at the end, it stops on the error with 重试. True when it skipped.</summary>
+    private bool SkipUnplayable()
+    {
+        string name = Current is { } t ? $"“{t.Title}”" : "这首歌";
+        if (++_failures >= 5)
+        {
+            Toast?.Invoke(new($"无法播放{name}；连续 {_failures} 首都无法播放，已停止播放。", true));
+            return false;
+        }
+        if (Queue.Next() is not { } next) return false;
+        Toast?.Invoke(new($"无法播放{name}，已跳到下一首。"));
+        Load(next, autoplay: true);
+        return true;
     }
 
     private void NowPlaying(Track? song = null)
@@ -379,6 +403,7 @@ public sealed class MusicService : IDisposable
             if (Command("play", engineOffline: true)) return;
         }
         if (Queue.Current is not { } id) return;
+        _failures = 0;
         if (State is PlayerState.Error or PlayerState.Stopped || Engine.CurrentId != id) { Load(id, autoplay: true, at: State == PlayerState.Stopped ? 0 : Position); return; }
         Engine.Play();
         SetState(PlayerState.Loading);
@@ -387,12 +412,14 @@ public sealed class MusicService : IDisposable
     public void Next()
     {
         if (Command("next")) return;
+        _failures = 0;
         if (Queue.Next() is { } id) Load(id, autoplay: true); else Stop();
     }
 
     public void Previous()
     {
         if (Command("previous")) return; // the server goes back to the start more than 3 s in, as below
+        _failures = 0;
         if (Position > 3) { Seek(0); return; }
         if (Queue.Previous() is { } id) Load(id, autoplay: true); else Seek(0);
     }
@@ -471,7 +498,7 @@ public sealed class MusicService : IDisposable
     public void QueueAdd(IEnumerable<string> ids, bool next = false) { if (!Command("add", new { ids = ids.ToList(), next })) Queue.Add(ids, next); }
     public void QueueRemove(IEnumerable<string> entryIds) { if (!Command("remove", new { entries = entryIds.ToList() })) Queue.Remove(entryIds); }
     public void QueueClear(bool manual) { if (!Command("clear", new { manual })) Queue.Clear(manual); }
-    public void QueueJump(string entryId) { if (!Command("jump", new { entry = entryId }) && Queue.Jump(entryId) is { } id) Load(id, autoplay: true); }
+    public void QueueJump(string entryId) { if (!Command("jump", new { entry = entryId }) && Queue.Jump(entryId) is { } id) { _failures = 0; Load(id, autoplay: true); } }
 
     /// <summary>A radio from a song: the song, then similar ones from the server (without Last.fm there: songs of the same
     /// artist or genre from the library).</summary>

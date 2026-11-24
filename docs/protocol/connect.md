@@ -141,7 +141,7 @@ does not change which device is active (rule 3). Commands on an empty session th
 | `playing` / `paused` | audio started or stopped, by itself or as asked | `playing`, `positionMs`, `at` = now |
 | `position` | a seek done, and at least every 30 s while playing | corrects `positionMs`/`at` |
 | `ended` | the current song reached its end | `PlayQueue.Next(ended: true)`: the next song, or the end of the session (`playing: false`, position 0 of the last song) |
-| `failed` | the song can't play here | skips to the next song, as the app does today, and tells everyone (`error unplayable` to the active device, which may show it) |
+| `failed` | the song can't play here | skips it, as Spotify does: `PlayQueue.Next()` (not as at an end, so repeat one does not loop on it), and answers the active device `error unplayable` with a message naming the song, `trackId` and `stopped`. Five failures in a row (or none left) stop the session (`playing: false`); the next command gives a fresh try |
 
 `key` is the entry the report is about; a report for a song that is no longer current is ignored. At an `ended`, the
 active device may start `next` at once (it preloaded it) without waiting for the server: the server moves to the same

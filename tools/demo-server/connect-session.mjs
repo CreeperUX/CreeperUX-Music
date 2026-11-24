@@ -205,7 +205,7 @@ class Fail extends Error { constructor(code, message, extra = {}) { super(messag
 const fail = (code, message, extra) => { throw new Fail(code, message, extra); };
 const MESSAGES = {
   nothing: '没有可以播放的歌曲。', cannotPlay: '这台设备不能播放。', offline: '这台设备不在线。', notActive: '这台设备不是正在播放的设备。',
-  stale: '队列已经变了，这个操作没有执行。', invalid: '无效的请求。', unplayable: '这首歌无法播放，已跳到下一首。',
+  stale: '队列已经变了，这个操作没有执行。', invalid: '无效的请求。',
 };
 const isStr = v => typeof v === 'string';
 const isNum = v => typeof v === 'number' && Number.isFinite(v);
@@ -417,6 +417,7 @@ export class ConnectSession {
   // ---------------------------------------------------------------- commands (any device)
   #command(id, c) {
     if (isNum(c.rev) && c.rev !== this.rev) fail('stale', MESSAGES.stale);
+    if (c.action !== 'volume') this.failures = 0; // what the user does next gets a fresh try
     const t = this.clock();
     const sender = this.devices.get(id);
     const keyBefore = this.queue.currentKey;
@@ -568,13 +569,19 @@ export class ConnectSession {
         break;
       }
       case 'failed': {
-        // skipped, as when the song had ended (five in a row: stopped, rather than going round a list that can't play)
+        // skipped, as Spotify does: the next song (not as at an end, so repeat one does not loop on it); five in a row
+        // stop the session rather than going round a list that can't play. The message names the song, for any device.
         this.failures++;
+        const failed = this.queue.current;
+        const title = this.now?.title ?? this.lookup(failed)?.title ?? null;
+        const name = title ? `“${title}”` : '这首歌';
         const song = this.queue.next();
         this.positionMs = 0; this.at = t;
-        if (song == null || this.failures >= 5) this.playing = false;
+        const stopped = song == null || this.failures >= 5;
+        if (stopped) this.playing = false;
         if (song != null && this.queue.currentKey !== keyBefore) this.#loaded();
-        return { out: this.#reply(id, r, 'unplayable', MESSAGES.unplayable), noAck: true };
+        const message = song == null ? `无法播放${name}，后面没有歌曲了。` : this.failures >= 5 ? `无法播放${name}；连续 ${this.failures} 首都无法播放，已停止播放。` : `无法播放${name}，已跳到下一首。`;
+        return { out: this.#reply(id, r, 'unplayable', message, { trackId: failed, stopped }), noAck: true };
       }
       default: fail('invalid', `未知的报告：${r.event}`);
     }

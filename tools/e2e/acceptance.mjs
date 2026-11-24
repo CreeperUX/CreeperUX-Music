@@ -353,14 +353,14 @@ try {
       await until(async () => (await state()).engine === 'Playing', 'plays');
     });
     else skip('DSD 歌曲请服务器转成 MP3（Windows 不能直接解 DSD）', '服务器上没有 DSD（.dsf）歌曲');
-    if (cat.missing) await check('服务器给不出文件的歌：显示错误和“重试”，不是静默', async () => {
+    if (cat.missing) await check('服务器给不出文件的歌：像 Spotify 一样跳到下一首，并说哪首无法播放', async () => {
       await app.send(`do play library all ${cat.missing}`);
-      await until(async () => (await state()).state === 'Error', 'error state', 10000);
-      assert(await hasName('重试'), '播放按钮没有变成“重试”');
-      assert((await state()).error.includes('无法播放'), (await state()).error);
+      await until(async () => { const s = await state(); return s.track && s.track !== cat.missing && s.engine === 'Playing'; }, 'skipped to the next song', 10000);
+      const toasts = (await state()).toasts ?? [];
+      assert(toasts.some(t => t.startsWith('无法播放“') && t.includes('已跳到下一首')), JSON.stringify(toasts));
       await shot('play-error');
     });
-    else skip('服务器给不出文件的歌：显示错误和“重试”，不是静默', '清单里没有文件已丢失的歌（track.missingFile）');
+    else skip('服务器给不出文件的歌：像 Spotify 一样跳到下一首，并说哪首无法播放', '清单里没有文件已丢失的歌（track.missingFile）');
     await check('回放增益：按音轨降低音量', async () => {
       await app.send(`do play album ${cat.playable.id} 0`);
       await until(async () => (await state()).engine === 'Playing', 'playing');

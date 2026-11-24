@@ -1,0 +1,42 @@
+package com.creeperux.sonus
+
+import android.content.ComponentName
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.media3.session.MediaController
+import androidx.media3.session.SessionToken
+import com.creeperux.sonus.playback.PlaybackService
+import com.creeperux.sonus.ui.SonusRoot
+import com.creeperux.sonus.ui.theme.SonusTheme
+import com.google.common.util.concurrent.ListenableFuture
+
+class MainActivity : ComponentActivity() {
+    private var controller: ListenableFuture<MediaController>? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
+        super.onCreate(savedInstanceState)
+        val graph = (application as SonusApp).graph
+        setContent {
+            val mode by graph.themeMode.collectAsState()
+            SonusTheme(mode) { SonusRoot(graph) }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // connecting to the session starts the playback service, which keeps the music going in the background and
+        // shows the media notification while something plays
+        controller = MediaController.Builder(this, SessionToken(this, ComponentName(this, PlaybackService::class.java))).buildAsync()
+    }
+
+    override fun onStop() {
+        controller?.let(MediaController::releaseFuture)
+        controller = null
+        super.onStop()
+    }
+}

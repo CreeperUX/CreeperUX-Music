@@ -1,7 +1,8 @@
 //! The gateway: every request goes to Navidrome as it came, streamed both ways (songs, uploads, server-sent events),
 //! WebSockets included (Sonus Connect, the Jellyfin API). Only what a proxy must change changes: hop-by-hop headers,
 //! and who the client is (trust.rs). Parts of the API move out of Navidrome by being answered or checked here instead:
-//! `routes.rs` lists them. So far: Subsonic sign-ins (`subsonic`).
+//! `routes.rs` lists them. So far: Subsonic sign-ins (`subsonic`) and the `/auth` routes (`auth`). Request bodies to
+//! Navidrome's own API are bounded here as Navidrome bounds them.
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -12,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
 use hyper::header::{self, HeaderMap, HeaderName, HeaderValue};
 use hyper::service::service_fn;
@@ -25,11 +26,17 @@ use hyper_util::server::graceful::GracefulShutdown;
 use tokio::net::TcpListener;
 use tracing::{debug, warn};
 
+use crate::auth::{self, Auth};
 use crate::routes::{self, Local};
 use crate::subsonic::{self, Subsonic};
 use crate::trust::{TrustList, client_ip};
 
-pub type Body = BoxBody<Bytes, hyper::Error>;
+pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+pub type Body = BoxBody<Bytes, BoxError>;
+
+/// Navidrome's `MaxAPIBodySize`: what a request to its own API or the Jellyfin API may send (uploads apart). Its
+/// handlers decode JSON bodies without a limit of their own; 4 MiB is about 150,000 song ids.
+pub const MAX_API_BODY_BYTES: u64 = 4 << 20;
 
 pub struct Settings {
     /// Navidrome's address: `http://127.0.0.1:4534`.
@@ -71,6 +78,7 @@ struct Inner {
     /// Whether Navidrome has answered yet: until then a refused connection is "starting" (503), afterwards "down" (502).
     ready: Arc<AtomicBool>,
     subsonic: OnceLock<Arc<Subsonic>>,
+    auth: OnceLock<Arc<Auth>>,
 }
 
 impl Gateway {
@@ -79,13 +87,18 @@ impl Gateway {
         connector.set_nodelay(true);
         connector.set_connect_timeout(Some(Duration::from_secs(5)));
         let client = Client::builder(TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).pool_timer(TokioTimer::new()).build(connector);
-        Gateway { inner: Arc::new(Inner { settings, client, ready, subsonic: OnceLock::new() }) }
+        Gateway { inner: Arc::new(Inner { settings, client, ready, subsonic: OnceLock::new(), auth: OnceLock::new() }) }
     }
 
     /// Gives the gateway what it checks Subsonic sign-ins with (the database is open and is the schema it knows).
     /// Once: a second call changes nothing.
     pub fn set_subsonic(&self, subsonic: Subsonic) {
         let _ = self.inner.subsonic.set(Arc::new(subsonic));
+    }
+
+    /// Gives the gateway what it answers the `/auth` routes with. Once: a second call changes nothing.
+    pub fn set_auth(&self, auth: Auth) {
+        let _ = self.inner.auth.set(Arc::new(auth));
     }
 
     pub async fn handle(&self, mut req: Request<Incoming>, peer: IpAddr) -> Response<Body> {
@@ -135,9 +148,24 @@ impl Gateway {
 
         // What is answered or checked here instead of by Navidrome (routes.rs). A user a trusted proxy names is
         // Navidrome's to look up, as before.
-        let local = if user.is_none() { routes::find(&parts.method, parts.uri.path(), &headers, &settings.base_path) } else { None };
+        let local = if settings.checks_sign_ins { routes::find(&parts.method, parts.uri.path(), &headers, &settings.base_path) } else { None };
         let body: Body = match local {
-            Some(Local::Subsonic(subsonic_method)) if settings.checks_sign_ins => {
+            Some(Local::Auth(rest)) => {
+                let Some(auth) = self.inner.auth.get() else { return starting() };
+                let request = auth::Request {
+                    method: &parts.method,
+                    path: &rest,
+                    query: parts.uri.query(),
+                    headers: &headers,
+                    client,
+                    proxy_user: user.as_ref().map(|name| name.as_bytes()),
+                };
+                let response = auth.handle(request, body).await;
+                debug!(%method, path, status = response.status().as_u16(), ms = started.elapsed().as_millis() as u64, %client, "answered here");
+                return response;
+            }
+            // a user a trusted proxy names is Navidrome's to look up, whatever credentials come along
+            Some(Local::Subsonic(subsonic_method)) if user.is_none() => {
                 let Some(subsonic) = self.inner.subsonic.get() else {
                     // not before the database is known to be the one this server understands
                     return starting();
@@ -166,7 +194,17 @@ impl Gateway {
                     }
                 }
             }
-            _ => body.boxed(),
+            _ if limits_body(&parts.method, parts.uri.path(), &headers, &settings.base_path) => {
+                let declared = headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
+                if declared.is_some_and(|length| length > MAX_API_BODY_BYTES) {
+                    // read what the client is sending, within reason, so it gets the answer and not a closed connection
+                    let _ = tokio::time::timeout(Duration::from_secs(10), discard(body, 8 * MAX_API_BODY_BYTES)).await;
+                    return too_large();
+                }
+                // a body that says no length is cut off at the limit: the request then fails (413, below)
+                Limited::new(body, MAX_API_BODY_BYTES as usize).boxed()
+            }
+            _ => body.map_err(Into::into).boxed(),
         };
         let uri = match settings.upstream.authority() {
             Some(authority) => Uri::builder().scheme("http").authority(authority.clone()).path_and_query(path_and_query.as_str()).build(),
@@ -192,6 +230,7 @@ impl Gateway {
 
         let mut response = match self.inner.client.request(upstream_req).await {
             Ok(response) => response,
+            Err(e) if is_length_limit(&e) => return too_large(),
             Err(e) => {
                 let ready = self.inner.ready.load(Ordering::Relaxed);
                 warn!(%method, path, error = %e, "Navidrome did not answer");
@@ -228,8 +267,51 @@ impl Gateway {
 
         let (mut parts, body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
-        Response::from_parts(parts, body.boxed())
+        Response::from_parts(parts, body.map_err(Into::into).boxed())
     }
+}
+
+/// Whether the request's body is bounded here as Navidrome's `LimitRequestBody` bounds it: requests to its own API
+/// (`/api`) and the Jellyfin API (`/jellyfin`), except uploads (`multipart/form-data`, `image/*`), which have limits
+/// of their own in Navidrome.
+fn limits_body(method: &Method, path: &str, headers: &HeaderMap, base_path: &str) -> bool {
+    let Some(path) = path.strip_prefix(base_path.trim_end_matches('/')) else { return false };
+    let under = |prefix: &str| path.strip_prefix(prefix).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));
+    if !(under("/api") || under("/jellyfin")) || matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        return false;
+    }
+    let media = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).and_then(|v| v.split(';').next()).unwrap_or("").trim().to_ascii_lowercase();
+    !(media == "multipart/form-data" || media.starts_with("image/"))
+}
+
+/// Reads a body and throws it away, up to `most` bytes.
+async fn discard(mut body: Incoming, most: u64) {
+    let mut seen = 0u64;
+    while let Some(Ok(frame)) = body.frame().await {
+        seen += frame.data_ref().map(|data| data.len() as u64).unwrap_or(0);
+        if seen > most {
+            break;
+        }
+    }
+}
+
+/// Whether a failed request to Navidrome failed because its body was cut off at the limit.
+fn is_length_limit(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut source = Some(error);
+    while let Some(e) = source {
+        if e.is::<http_body_util::LengthLimitError>() {
+            return true;
+        }
+        source = e.source();
+    }
+    false
+}
+
+/// Navidrome's answer to a body declared too long.
+fn too_large() -> Response<Body> {
+    let mut r = text(StatusCode::PAYLOAD_TOO_LARGE, "Request body must not be larger than 4194304 bytes\n");
+    r.headers_mut().insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    r
 }
 
 /// Accepts connections until `shutdown` resolves, then lets the open ones finish for a few seconds.

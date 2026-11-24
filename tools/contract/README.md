@@ -16,6 +16,8 @@ node tools/fixtures/build.mjs                 # once: the library, the golden da
 node tools/contract/run.mjs                   # the suite against Navidrome on a fresh copy of it
 node tools/contract/diff.mjs --go-vs-gateway  # Navidrome vs the Rust server running another Navidrome
 node --test tools/contract/gateway.test.mjs   # what only the Rust server decides: the sign-in limit, what Navidrome never sees
+node --test tools/contract/auth-routes.test.mjs   # /auth on servers of their own: a new server, optional/off, limits
+node tools/contract/web-ui.check.mjs          # the old web UI, headless, through the Rust server (--go: Navidrome alone)
 ```
 
 ## Running the suite
@@ -52,6 +54,7 @@ Navidrome does); `run.mjs` prints them and skips them.
 | `form-post` | the same calls as `application/x-www-form-urlencoded` posts: reads, sign-in errors, API key, app password, a 300-song `savePlayQueue`, playlist changes, stars |
 | `connect` | Connect v1: `welcome`, `devices`, `hello`, `state` (stamped `at`), a command from one connection to another, the `offline` error, a `transfer` (`load` and `stop`), leaving, a wrong password |
 | `device-login` | `/auth/device/start`, `poll` (pending, approved once then expired, denied), approval on the web as the two-step user, `tokenInfo` with the key, `revoke` (204, then 44, then 404), 422 |
+| `web-auth` | the web sign-in (`/auth`), with a user the file makes through the native API and removes: `login` (unknown user, wrong password, unreadable and oversized bodies); the first sign-in's setup token and what refuses it (`/auth`, `/api`, `/rest`); the setup (secret, link, QR code, a wrong code, the confirmed one) with recovery codes and a session; a code at every sign-in, each once, recovery codes once and in capitals; app passwords (made, listed with their last use, used as `p` and as an API key, revoked, only by their user); new recovery codes; `disable` refused while required; an admin's status and reset; the approval page's routes; 404 and 405; `createAdmin` refused; session tokens both ways (a session from `/auth/login` opens `/api`, the token `/api` hands back opens `/auth`), a forged one refused. Skipped for servers without a web sign-in (the demo server) |
 
 ### Not covered
 
@@ -62,8 +65,6 @@ Navidrome does); `run.mjs` prints them and skips them.
 - Limits and timers: Connect's 30 s ping and 75 s timeout, its 32-device cap and close code 4000, a device sign-in's
   10-minute expiry and 200-at-a-time cap. The sign-in rate limit is off in the suite's settings; `gateway.test.mjs`
   (below) checks it with servers of its own.
-- Two-step verification's web side beyond what the build does (recovery codes, turning it off, an admin's reset) and
-  the web sign-in itself (`/auth/login`, used by the device-login tests to approve).
 - `getNowPlaying`, `reportPlayback`, `startScan`, `setRating` (the database build uses it; the writes corpus compares it).
 
 ## What only the Rust server decides: `gateway.test.mjs`
@@ -81,6 +82,41 @@ the Rust server running its own Navidrome, with the same settings.
 | Navidrome never sees what the Rust server refused | with Navidrome's log at debug level (it logs every request with its query): six refused requests are not in the log of the Navidrome behind the Rust server, three accepted ones are, without any `p`, `t`, `s` or `apiKey` parameter, and it logged no "Invalid login"; Navidrome alone logs all nine and refuses the six itself |
 | signed in by the gateway, a request is to Navidrome what it was with credentials | the player cookie's name (after the user name as typed) and attributes, the player in `getNowPlaying`, the user's last access written, no user created by an unknown name |
 | a client cannot name itself a user | `Remote-User`, `X-Sonus-User`, `X-Sonus-User-000…` sent by a client: 10 without credentials, 40 with a wrong password, and beside the listener's own sign-in the request is still the listener's; the web UI's page signs nobody in |
+
+## `/auth` on servers of their own: `auth-routes.test.mjs`
+
+```sh
+node --test tools/contract/auth-routes.test.mjs
+```
+
+What needs other settings than the golden ones, or no users at all. Each test starts Navidrome alone and the Rust
+server with the same settings, sends both the same requests, and compares the two lists of answers step by step.
+
+| Test | Shows |
+|---|---|
+| a new server: the first admin | `createAdmin` (422 for a bad body, the admin and its session, 403 for a second one), the name in any case, the native API with that session and the admin's one library, the Subsonic API with the password; then a password change through the native API: Navidrome checks the current password (so each server reads what the other sealed), the session from before is refused (the epoch), the old password too, the new one signs in |
+| a new server with two-step verification required | `createAdmin` answers the setup step; setup and confirm give the session |
+| optional, and off | optional: a user turns it on with their session, is then asked for a code (and their account password stops signing the Subsonic API), replaces and turns it off with a code; off: the two-step user signs in with the password alone, and setup is refused |
+| the sign-in routes are rate-limited the same way | 3 requests in 6 s per address across `login`, `device/start`, the setup routes and `device/revoke`: the fourth is 429 with `Retry-After`, the `X-RateLimit-*` headers count down the same; signed-in limited routes answer 401 before they count; `poll` and the status are not limited |
+| request bodies are bounded the same way | 8 KB under `/auth` (422), 4 MiB to `/api` (413 with Navidrome's text), uploads apart |
+| sign-ins that wait for approval are the Rust server's own | with Navidrome's log at debug level, a whole browser sign-in through the Rust server leaves no `/auth` request in Navidrome's log |
+
+`serveGolden({ empty: true })` and `startGatewayOnGolden({ empty: true })` start a server on no database at all
+(Navidrome makes a new one), with the golden settings.
+
+## The old web UI: `web-ui.check.mjs`
+
+```sh
+node tools/contract/web-ui.check.mjs        # through the Rust server
+node tools/contract/web-ui.check.mjs --go   # Navidrome alone: the control
+```
+
+Navidrome's React UI in headless Chromium (Playwright, from the repository's `node_modules`), on a new server with
+two-step verification required: the first admin; the sign-in form refusing a wrong password; the setup at the first
+sign-in (the secret read from the page, the QR code a square picture); the browser sign-in's approval page (allow,
+refuse, a typed code, a code nobody waits for); the app's key working and listed in Personal settings; every call the
+UI makes to Navidrome's `/api` answered; signing in again with a code. Screenshots go to
+`tools/fixtures/.work/web-ui/`. It is a script, not part of the suite: it needs a browser.
 
 ## The differential runner
 

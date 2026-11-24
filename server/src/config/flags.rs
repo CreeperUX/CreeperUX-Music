@@ -13,6 +13,8 @@ pub struct Flags {
     pub base_url: Option<String>,
     /// `--datafolder`.
     pub data_folder: Option<String>,
+    /// `--sessiontimeout`.
+    pub session_timeout: Option<String>,
 }
 
 /// The root command's flags that take a value: long name, shorthand, and whether the gateway cannot run with it
@@ -79,6 +81,10 @@ pub fn scan(args: &[OsString]) -> Result<Flags, String> {
             }
             ("datafolder", _) => {
                 flags.data_folder = Some(value.to_string_lossy().into_owned());
+                Ok(())
+            }
+            ("sessiontimeout", _) => {
+                flags.session_timeout = Some(value.to_string_lossy().into_owned());
                 Ok(())
             }
             _ => Ok(()),

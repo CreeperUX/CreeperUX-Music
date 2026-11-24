@@ -1,0 +1,6 @@
+&[
+    ("session", "golden jwt secret", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhZG0iOnRydWUsImVwIjozLCJleHAiOjQxMDI0NDQ4MDAsImlhdCI6MTcwMDAwMDAwMCwiaXNzIjoiTkQiLCJzdWIiOiJhbGljZSIsInVpZCI6IjFoMGtRdUFldEllQTM0RVlIblZ3dTEifQ.JATYz1ezM-1bU8cPDdUaFn4ciHhsA5uI2hsZHOyKeuQ"),
+    ("plain", "golden jwt secret", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjQxMDI0NDQ4MDAsImlhdCI6MTcwMDAwMDAwMCwiaXNzIjoiTkQiLCJzdWIiOiLmnpflpJXpm6giLCJ1aWQiOiIzMjVjcGlzNzlaUFRlYlgxWGh6VG9kIn0.gRUMAWYgzgUIfgRfNWcqnKSCzu4hXSXJ064oWMjyJro"),
+    ("setup", "golden jwt secret", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOlsic29udXMtMmZhLXNldHVwIl0sImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxNzAwMDAwMDAwLCJpc3MiOiJORCIsInN1YiI6ImFsaWNlIiwidWlkIjoiMWgwa1F1QWV0SWVBMzRFWUhuVnd1MSJ9.72TiZvBDVJRYkPkrd24hu5jiMaylgtBBWnK3C0jykNA"),
+    ("expired", "golden jwt secret", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3MDAwMDAxMDAsImlhdCI6MTcwMDAwMDAwMCwiaXNzIjoiTkQiLCJzdWIiOiJhbGljZSIsInVpZCI6IjFoMGtRdUFldEllQTM0RVlIblZ3dTEifQ.jaVCvojyVCix4cMDiOtV52_hEj_VLLt6HTOJ-Ynvg9E"),
+]

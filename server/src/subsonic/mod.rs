@@ -202,17 +202,17 @@ impl Subsonic {
     pub async fn check(&self, request: Request<'_>, body: Incoming) -> Outcome {
         let Request { method, http_method, path, query, headers, client } = request;
         let raw_query = query.unwrap_or("").as_bytes();
-        let Some(from_query) = Params::parse(raw_query, None) else { return Outcome::Untouched(body.boxed()) };
+        let Some(from_query) = Params::parse(raw_query, None) else { return Outcome::Untouched(stream(body)) };
 
         // a form post carries parameters in its body: read it (Navidrome reads at most 10 MiB)
         // the parameters, the form's bytes when there is one, and the body to send on: the stream as it comes, or the
         // form that was read
         let (params, form, body) = match params::is_form(http_method, headers.get(header::CONTENT_TYPE).map(|v| v.as_bytes())) {
-            false => (from_query, None, body.boxed()),
+            false => (from_query, None, stream(body)),
             true => {
                 let declared = headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
                 if declared.is_some_and(|length| length > MAX_FORM_BYTES as u64) {
-                    return Outcome::Untouched(body.boxed()); // Navidrome refuses it, unread
+                    return Outcome::Untouched(stream(body)); // Navidrome refuses it, unread
                 }
                 let bytes = match Limited::new(body, MAX_FORM_BYTES).collect().await {
                     Ok(read) => read.to_bytes(),
@@ -405,13 +405,17 @@ impl Subsonic {
     }
 }
 
+fn stream(body: Incoming) -> Body {
+    body.map_err(Into::into).boxed()
+}
+
 fn full(bytes: Bytes) -> Body {
     Full::new(bytes).map_err(|never| match never {}).boxed()
 }
 
 /// The address a limit is counted for: Navidrome's `httprate.CanonicalizeIP`, an IPv4 address itself and an IPv6
 /// address's /64 (one subscriber, usually).
-fn limiter_address(client: IpAddr) -> String {
+pub fn limiter_address(client: IpAddr) -> String {
     match client {
         IpAddr::V4(v4) => v4.to_string(),
         IpAddr::V6(v6) => {

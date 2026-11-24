@@ -22,6 +22,7 @@ CREATE TABLE property
 		primary key,
 	value varchar(255) default '' not null
 );
+CREATE TABLE user_library (user_id VARCHAR(255) NOT NULL, library_id INTEGER NOT NULL, PRIMARY KEY (user_id, library_id));
 CREATE TABLE "user"
 (
     id             varchar(255)                              not null
@@ -70,6 +71,11 @@ pub fn create_at_version(path: &Path, version: i64) -> Connection {
     conn.execute_batch(SCHEMA).unwrap();
     conn.execute("INSERT INTO goose_db_version (version_id, is_applied) VALUES (0, 1), (?1, 1)", [version]).unwrap();
     conn
+}
+
+/// The session secret, sealed in the `property` table as Navidrome keeps it.
+pub fn set_session_secret(conn: &Connection, keys: &Keys, secret: &str) {
+    conn.execute("INSERT OR REPLACE INTO property (id, value) VALUES ('JWTSecret', ?1)", [keys.seal(secret.as_bytes()).unwrap()]).unwrap();
 }
 
 pub fn create(path: &Path) -> Connection {

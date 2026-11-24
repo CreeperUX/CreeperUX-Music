@@ -15,6 +15,9 @@ pub enum Local {
     /// A Subsonic method behind the sign-in (`/rest/<method>`, `/rest/<method>.view`): the gateway checks the
     /// credentials (subsonic/mod.rs) and Navidrome answers the method, except `tokenInfo`, answered here.
     Subsonic(&'static str),
+    /// Everything under `/auth` (auth/mod.rs): the web sign-in, two-step verification, app passwords, the browser
+    /// sign-in for apps. Answered here whole, unknown paths included; the path after `/auth`.
+    Auth(String),
 }
 
 /// What the gateway does itself with a request, None for what is Navidrome's alone. `base_path` is `BaseURL`'s path
@@ -29,6 +32,13 @@ pub fn find(method: &Method, path: &str, headers: &HeaderMap, base_path: &str) -
             return None;
         }
         return subsonic::protected_method(name).map(Local::Subsonic);
+    }
+    if let Some(rest) = path.strip_prefix("/auth") {
+        // a CORS preflight is Navidrome's CORS middleware's to answer, here too
+        let preflight = method == Method::OPTIONS && headers.contains_key(header::ACCESS_CONTROL_REQUEST_METHOD);
+        if (rest.is_empty() || rest.starts_with('/')) && !preflight {
+            return Some(Local::Auth(rest.to_string()));
+        }
     }
     None
 }
@@ -56,6 +66,20 @@ mod tests {
     }
 
     #[test]
+    fn everything_under_auth_is_answered_here() {
+        assert_eq!(get("/auth/login", ""), Some(Local::Auth("/login".into())));
+        assert_eq!(get("/auth", ""), Some(Local::Auth(String::new())));
+        assert_eq!(get("/auth/", ""), Some(Local::Auth("/".into())));
+        assert_eq!(get("/auth/no/such/route", ""), Some(Local::Auth("/no/such/route".into())), "unknown paths too: none reaches Navidrome");
+        assert_eq!(get("/music/auth/device/start", "/music"), Some(Local::Auth("/device/start".into())));
+        assert_eq!(find(&Method::DELETE, "/auth/app-passwords/x", &HeaderMap::new(), ""), Some(Local::Auth("/app-passwords/x".into())));
+        let mut preflight = HeaderMap::new();
+        preflight.insert(header::ACCESS_CONTROL_REQUEST_METHOD, "POST".parse().unwrap());
+        assert_eq!(find(&Method::OPTIONS, "/auth/device/start", &preflight, ""), None, "a CORS preflight is Navidrome's");
+        assert_eq!(find(&Method::OPTIONS, "/auth/device/start", &HeaderMap::new(), ""), Some(Local::Auth("/device/start".into())));
+    }
+
+    #[test]
     fn everything_else_is_navidromes() {
         assert_eq!(get("/rest/getOpenSubsonicExtensions", ""), None, "no sign-in needed");
         assert_eq!(get("/rest/nothing", ""), None);
@@ -66,7 +90,7 @@ mod tests {
         assert_eq!(get("/rest/pi%6Eg", ""), None, "not decoded: Navidrome's router does not match it either");
         assert_eq!(get("/rest", ""), None);
         assert_eq!(get("/api/song", ""), None);
-        assert_eq!(get("/auth/login", ""), None);
+        assert_eq!(get("/authentic", ""), None);
         assert_eq!(get("/rest/ping", "/music"), None, "outside the base path");
         assert_eq!(get("/music2/rest/ping", "/music"), None);
         // a CORS preflight: answered by Navidrome before any sign-in

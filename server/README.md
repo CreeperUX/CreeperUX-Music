@@ -5,8 +5,10 @@ CreeperUX fork of Navidrome (frozen at 0.64.2) behind it on a local port, and pa
 ways, WebSockets included. Parts of the server move here one by one behind the same APIs; the route, with the
 decisions behind it, is `docs/server-roadmap.md`.
 
-Status: phase 0's gateway, and the first half of phase 2: **Subsonic sign-ins are checked here** ([below](#sign-ins)),
-on Navidrome's own database, which the server opens beside Navidrome. Everything else is still Navidrome's. It reads
+Status: phase 0's gateway, and phase 2: **Subsonic sign-ins are checked here** ([below](#sign-ins)) and **the `/auth`
+routes are answered here** ([below](#the-auth-routes): the web sign-in with two-step verification, app passwords, the
+browser sign-in for apps), on Navidrome's own database, which the server opens beside Navidrome. Everything else is
+still Navidrome's. It reads
 Navidrome's own settings (`navidrome.toml`, `ND_*`, the command line), has unit and integration tests, and passes the
 contract suite and the differential corpora of `tools/contract` in front of the real frozen Navidrome
 ([below](#checked-against-the-real-navidrome)). The image `ghcr.io/creeperux/sonus-server` is built by CI
@@ -38,8 +40,9 @@ The gateway reads Navidrome's settings as Navidrome reads them, so a container k
   The old names `ReverseProxyWhitelist` / `ReverseProxyUserHeader` count only when the new ones are set nowhere.
 - **Read**: `Address`, `Port`, `BaseURL` (requests pass through as they came, and Navidrome serves under its path; the
   routes answered here are under it too), `ExtAuth.TrustedSources`, `ExtAuth.UserHeader`, `TLSCert`, `TLSKey`; and for
-  the sign-ins checked here: `DataFolder` (also `--datafolder`), `DbPath`, `PasswordEncryptionKey`, `AuthRequestLimit`,
-  `AuthWindowLength`, `Sonus.TwoFactor`, `HTTPHeaders.FrameOptions`.
+  what is answered here: `DataFolder` (also `--datafolder`), `DbPath`, `PasswordEncryptionKey`, `AuthRequestLimit`,
+  `AuthWindowLength`, `Sonus.TwoFactor`, `HTTPHeaders.FrameOptions`, `SessionTimeout` (also `--sessiontimeout`),
+  `EnableGravatar`, `DevAutoLoginUsername`.
 
 | Setting | Default | |
 |---|---|---|
@@ -48,7 +51,8 @@ The gateway reads Navidrome's settings as Navidrome reads them, so a container k
 | `ExtAuth.UserHeader` (`ND_EXTAUTH_USERHEADER`) | `Remote-User` | the signed-in user, believed from those proxies only; empty turns it off |
 | `DataFolder`, `DbPath` (`ND_DATAFOLDER`, `ND_DBPATH`) | `.`, `navidrome.db` in the data folder | Navidrome's database, which the server opens too (`DbPath`: a path, optionally after `file:` and before `?options`) |
 | `PasswordEncryptionKey` (`ND_PASSWORDENCRYPTIONKEY`) | Navidrome's built-in key | what stored passwords and app passwords are encrypted with; never logged |
-| `AuthRequestLimit`, `AuthWindowLength` | `5`, `20s` | failed sign-ins allowed per address and user in a window; `0` turns the limit off |
+| `AuthRequestLimit`, `AuthWindowLength` | `5`, `20s` | failed Subsonic sign-ins allowed per address and user in a window, and requests to the sign-in routes under `/auth` per address; `0` turns both limits off |
+| `SessionTimeout` (`ND_SESSIONTIMEOUT`) | `48h` | how long a web session's token is good; Navidrome renews it at every use of its API |
 | `Sonus.TwoFactor` (`ND_SONUS_TWOFACTOR`) | `required` | `off`: an account password signs the API even with two-step verification set up |
 | `SONUS_NAVIDROME_BIN` | `/app/navidrome`, else `navidrome` | the Navidrome to run |
 | `SONUS_NAVIDROME_PORT` | `4534` | its port, on 127.0.0.1 |
@@ -69,7 +73,8 @@ The gateway refuses to start (exit code 2, with the reason in the log) rather th
 - `ND_ADDRESS`, `ND_PORT`, `ND_EXTAUTH_TRUSTEDSOURCES`, `ND_EXTAUTH_USERHEADER` written as keys in the config file:
   there Navidrome takes them over its environment; write them as `Address`, `Port`, … instead;
 - a user header the gateway sets or removes itself (`X-Real-IP`, `Host`, `Connection`, …), or one that is not a header name;
-- `AuthRequestLimit` that is not a number, `AuthWindowLength` that is not a duration, an in-memory `DbPath`;
+- `AuthRequestLimit` that is not a number, `AuthWindowLength` or `SessionTimeout` that is not a duration,
+  `EnableGravatar` that is not true or false, an in-memory `DbPath`;
 - a config file Navidrome could not read either (bad TOML, the same key twice).
 
 ### What Navidrome is told
@@ -100,10 +105,19 @@ code 1, Navidrome stopped first) when it is not the one it knows:
 - the fork's tables are missing (`sonus_two_factor`, `sonus_recovery_code`, `sonus_app_password` with `secret_hash`):
   upstream Navidrome's database, or an old build of the fork's;
 - there is not exactly one library (roadmap, decision 4);
+- the session secret (`JWTSecret` in the `property` table, which Navidrome makes at its first start) is missing or
+  cannot be opened with `PasswordEncryptionKey`;
 - the file cannot be opened, or this build's SQLite lacks FTS5 or the JSON functions (it has both: `src/db.rs` tests it).
 
-Until that check is done, Subsonic requests that need a sign-in are answered 503 with `Retry-After`, as while
-Navidrome starts: credentials are not handed to Navidrome in the meantime.
+Until that check is done, Subsonic requests that need a sign-in and everything under `/auth` are answered 503 with
+`Retry-After`, as while Navidrome starts: credentials are not handed to Navidrome in the meantime.
+
+At start the server also makes one Subsonic request to Navidrome itself, a sign-in as nobody
+(`sonus-server-start-probe`, refused: Navidrome logs one invalid login per start). It reads from the answer how
+Navidrome starts its Subsonic answers, and it makes Navidrome open its user store, which is when Navidrome settles its
+password encryption: on a new database, or after `PasswordEncryptionKey` was set, Navidrome re-encrypts the passwords
+it finds, assuming the default key, at its first use of the user store. Were the first admin made here before that,
+Navidrome would take that password for an old one and never read it again.
 
 ## Sign-ins
 
@@ -158,6 +172,52 @@ which is the name the gateway passes on), writes the user's last access, and ans
 answered here, the gateway writes the last access itself, at most once a minute per user as Navidrome does. An app
 password's use (`last_used_at`, `last_used_by`) is noted here as Navidrome notes it, at most every five minutes per
 client name. Nothing else is written to the database.
+
+## The `/auth` routes
+
+Everything under `/auth` is answered here (`src/auth/`), as Navidrome's `server/auth.go` and the fork's
+`sonus_twofactor.go` and `sonus_device.go` answer it: the same JSON, status codes and messages.
+
+| Route | |
+|---|---|
+| `POST /auth/login` | the password, then per `Sonus.TwoFactor`: a code (`otp`: from the authenticator, each once, or a recovery code), or for a user who has not set it up while it is required, a setup token instead of a session (`"twoFactor": "setup"`) |
+| `POST /auth/createAdmin` | the first user, an admin, only while there is none (the count and the insert are one transaction) |
+| `POST /auth/2fa/setup`, `/2fa/confirm` | a new authenticator secret with its `otpauth://` link and QR code (a PNG), then a code from it: recovery codes, and a session |
+| `GET /auth/2fa`, `POST /2fa/recovery-codes`, `/2fa/disable` | the user's own: status, new recovery codes (takes a code), turning it off (takes a code; refused while required) |
+| `GET`, `POST /auth/app-passwords`, `DELETE /app-passwords/{id}` | app passwords: listed, made (shown once), revoked |
+| `GET /auth/2fa/users/{id}`, `POST /2fa/users/{id}/reset` | admins: someone's status, and a reset for a lost phone |
+| `POST /auth/device/start`, `/device/poll`, `/device/revoke` | the browser sign-in, the app's side: ask, poll (the API key is handed over once), give the key back |
+| `GET /auth/device/{code}`, `POST /device/{code}/approve`, `/deny` | the approval page's side, signed in |
+| anything else under `/auth` | 404, or 405 with `Allow`, as Navidrome's router; a CORS preflight alone goes to Navidrome (its CORS middleware answers it) |
+
+- **Sessions** are the JWTs Navidrome makes and checks (`src/jwt.rs`): HS256 with the secret from the `property`
+  table, claims `iss`, `sub`, `iat`, `exp`, `uid`, `adm`, `ep`, `aud`. A token made here opens Navidrome's `/api`
+  (which then renews it), and one Navidrome made or renewed opens `/auth` here; a password change through Navidrome's
+  API bumps the user's epoch and revokes the tokens made here too. A setup token (`aud: sonus-2fa-setup`, 15 minutes)
+  opens only the two setup routes.
+- **Who is signed in** on the signed-in routes is decided as Navidrome's `Authenticator` decides it:
+  `DevAutoLoginUsername`, else the session token (`X-ND-Authorization: Bearer …`, the `jwt` cookie, `?jwt=`: the first
+  one found), else a trusted proxy's user header; the user must exist, and a valid token naming them must still be
+  theirs (id), current (epoch) and for this API (audience).
+- **The rate limit** is Navidrome's (go-chi/httprate's sliding window, `src/auth/ratelimit.rs`): `AuthRequestLimit`
+  requests per `AuthWindowLength` per client address, every request counted, one count across `login`, the two setup
+  routes, `recovery-codes`, `disable`, `device/start` and `device/revoke`; 429 with `Retry-After`, and
+  `X-RateLimit-*` on every answer of those routes.
+- **Bodies**: at most 8 KB is read under `/auth` (more: the JSON does not decode, 422). Requests to Navidrome's own
+  API (`/api`) and the Jellyfin API (`/jellyfin`) are bounded at 4 MiB here as Navidrome bounds them (413 for a longer
+  declared body, read and thrown away within reason so the client gets the answer; a body without a length is cut off
+  at the limit), uploads (`multipart/form-data`, `image/*`) apart.
+- **Sign-ins waiting for approval** live in this process's memory (200 at most, ten minutes each): a restart drops
+  them and the app asks again.
+- **What is written**: a user's `last_login_at`; the first admin (as Navidrome's user repository writes a new user,
+  with every library); the two-step verification rows and app passwords, in the fork's tables and formats.
+
+Where it differs from Navidrome, knowingly: passwords are compared in constant time, and a stored password that
+cannot be decrypted matches nothing; two first admins asked for at once make one (Navidrome counts, then inserts);
+the QR code is the same code drawn by another library, so its PNG is not Navidrome's byte for byte; a user's display
+name at `createAdmin` is titled by a simpler rule than Go's (each word's first letter); JSON answers escape `<`, `>`,
+`&` as themselves where Go writes `\u003c` (the same JSON); a body cut off at 4 MiB without a declared length is
+answered 413 here, where Navidrome's handler would fail on the truncated JSON.
 
 ### The database
 
@@ -218,6 +278,16 @@ pushes linux/amd64 and linux/arm64, tagged `latest`, the Cargo version and `sha-
   rest is still being made; `Range` and 206; a WebSocket carrying bytes both ways; hop-by-hop headers (and those named
   in `Connection`) dropped both ways; forged forwarding and user headers from an untrusted peer; a trusted proxy's
   believed; 503 while Navidrome starts, 502 after; `CONNECT` refused;
+- `tests/auth.rs`: the `/auth` routes with a fake Navidrome that must never be asked: the cases of Navidrome's
+  `server/auth_test.go` and the fork's `sonus_twofactor_test.go` and `core/twofactor/twofactor_test.go` (sign-in, the
+  first admin, the setup at the first sign-in, a code at every sign-in and each once, recovery codes, app passwords,
+  an admin's reset, optional and off, the browser sign-in from start to revoke), who is signed in (a token's user,
+  epoch and audience; header, cookie, query; a trusted proxy's user; the development auto-login), 404 and 405 for
+  everything else under `/auth`, the rate limit, eight first admins at once making one;
+- unit tests of what they stand on: session tokens against ones Navidrome's own JWT stack signed (`tests/golden/`),
+  authenticator codes against RFC 6238's vectors, the QR code, ids, the rate limiter's window arithmetic, JSON bodies
+  decoded as Go decodes them;
+- `tests/gateway.rs` also: the 4 MiB limit on bodies to `/api` and `/jellyfin`;
 - `tests/supervisor.rs`: the real binary running a fake Navidrome (the test binary itself, started again, which makes
   its database first): the settings it gets (from a `navidrome.toml`), the random user header, exit codes passed on, a
   refused setting stopping it, a sign-in checked and passed on under that header, a database of another schema
@@ -231,6 +301,8 @@ node tools/contract/run.mjs --through-gateway         # the contract suite throu
 node tools/contract/diff.mjs --go-vs-gateway          # the same requests to Navidrome alone and to this server
 node tools/contract/diff.mjs --go-vs-gateway --corpus tools/contract/corpus/writes.json
 node --test tools/contract/gateway.test.mjs           # the limiter, and what Navidrome never sees
+node --test tools/contract/auth-routes.test.mjs       # /auth on a new server, optional and off, rate limit, body limits
+node tools/contract/web-ui.check.mjs                  # the old web UI, headless (Playwright), through this server
 ```
 
 These start this server as its image runs it: `cargo run`, which starts Navidrome itself on a copy of the golden
@@ -238,7 +310,36 @@ database.
 
 ## Checked against the real Navidrome
 
-### Sign-ins (phase 2), 2026-11-24
+### The `/auth` routes (phase 2, part 2), 2026-11-24
+
+Same machine, same Navidrome (0.64.2-sonus.10, `fb95b5ce`), started by this server on copies of the golden database
+or on no database at all (a new server):
+
+- `cargo test`: 168 tests (108 unit, 19 `/auth`, 24 Subsonic sign-in, 11 gateway, 6 with the real binary).
+- `node tools/contract/run.mjs --through-gateway`: 121 of 121: the suite's 110 and 11 new ones for the web sign-in
+  (`test/web-auth.test.mjs`), which also pass against Navidrome alone. Among them, tokens both ways: the session
+  `/auth/login` gives here opens Navidrome's `/api`, and the token `/api` hands back opens `/auth` here.
+- `node tools/contract/diff.mjs --go-vs-gateway`: 169 of 169 identical, and 34 of 34 with `corpus/writes.json`.
+- `node --test tools/contract/auth-routes.test.mjs`: 6 of 6, each comparing Navidrome alone and this server step by
+  step: a new server's first admin, then a password change through Navidrome's own API (Navidrome checks the current
+  password, so it opened what this server sealed; it seals the new one, which this server then reads; the session
+  made before is refused here: the epoch Navidrome bumped); the first admin with two-step verification required;
+  optional (on and off again) and off; the per-address rate limit with its headers (3 in 6 s: the fourth is 429 on
+  both, across routes); the 8 KB and 4 MiB body limits; and that with Navidrome's log at debug level no request under
+  `/auth` reaches Navidrome.
+- `node --test tools/contract/gateway.test.mjs`: 4 of 4, as before.
+- `node tools/contract/web-ui.check.mjs`: the React UI in headless Chromium through this server, 11 of 11 (and 11 of
+  11 against Navidrome alone, `--go`): the sign-in form refusing a wrong password; the first sign-in's setup (the
+  secret, the QR code as a square picture, a code); the approval page after it, with the app's code and device;
+  allow, and the app's key working; the key listed in Personal settings; the UI's own calls to `/api` all answered
+  (none 401 or 403); refuse; a typed code; a code nobody waits for; the key given back; signing in again with a code.
+
+Not checked: the image and Linux binaries beyond CI building them; `EnableGravatar` and `DevAutoLoginUsername` against
+the real Navidrome (unit and integration tests only); a `BaseURL` with a path in front of the real Navidrome; a real
+authenticator app scanning the QR code (the UI check reads the secret from the page; the code in the picture is
+checked by a unit test for its size only); load.
+
+### Sign-ins (phase 2, part 1), 2026-11-24
 
 On Windows (ARM64), with the fork's Navidrome 0.64.2-sonus.10 (`fb95b5ce`, x64) started by this server on copies of
 the golden database of `tools/fixtures` (three users: an admin and a user with two-step verification, app passwords
@@ -315,11 +416,15 @@ binaries (no Linux here).
   the command line.
 - `src/trust.rs`: who the client is (Navidrome's rules, reproduced).
 - `src/gateway.rs`: the proxy, and where the parts answered here branch off.
-- `src/routes.rs`: which requests the gateway answers or checks itself. A new part of the server (the `/auth` routes,
-  Connect) is a variant of `Local` there, its paths in `find`, an arm in `Gateway::handle`, and a module of its own.
+- `src/routes.rs`: which requests the gateway answers or checks itself. A new part of the server (Connect) is a
+  variant of `Local` there, its paths in `find`, an arm in `Gateway::handle`, and a module of its own.
 - `src/subsonic/`: Subsonic sign-ins. `mod.rs`: what happens to a request; `credentials.rs`: whose the credentials
   are (the rule, and the queries); `limiter.rs`: failed attempts; `params.rs`: the query and the form, as Go reads
   them; `respond.rs`: the answers, as Navidrome writes them.
+- `src/auth/`: the `/auth` routes. `mod.rs`: the routes and who is signed in; `store.rs`: users, two-step
+  verification, recovery codes and app passwords in the database; `totp.rs`: authenticator codes and the QR code;
+  `device.rs`: the sign-ins waiting for approval; `ratelimit.rs`: the per-address limit.
+- `src/jwt.rs`: session tokens; `src/id.rs`: ids and the random strings people type.
 - `src/db.rs`: Navidrome's database; `src/gotime.rs`: its timestamps; `src/secrets.rs`: its encryption.
 - `src/startup.rs`: what must hold before anything is answered here.
 - `src/supervisor.rs`: runs Navidrome.

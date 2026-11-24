@@ -65,6 +65,12 @@ pub struct Shared {
     pub two_factor: TwoFactor,
     /// `HTTPHeaders.FrameOptions` (default DENY): the `X-Frame-Options` Navidrome answers with.
     pub frame_options: String,
+    /// `SessionTimeout` (default 48 h): how long a web session's token is valid; Navidrome renews it at every use.
+    pub session_timeout: Duration,
+    /// `EnableGravatar` (default off): a sign-in's answer carries the user's Gravatar address.
+    pub enable_gravatar: bool,
+    /// `DevAutoLoginUsername`, empty when unset: Navidrome's development setting that signs everyone in as this user.
+    pub dev_auto_login_username: String,
 }
 
 impl std::fmt::Debug for Shared {
@@ -78,6 +84,9 @@ impl std::fmt::Debug for Shared {
             .field("auth_window", &self.auth_window)
             .field("two_factor", &self.two_factor)
             .field("frame_options", &self.frame_options)
+            .field("session_timeout", &self.session_timeout)
+            .field("enable_gravatar", &self.enable_gravatar)
+            .field("dev_auto_login_username", &self.dev_auto_login_username)
             .finish()
     }
 }
@@ -92,9 +101,15 @@ impl Default for Shared {
             auth_window: DEFAULT_AUTH_WINDOW,
             two_factor: TwoFactor::Required,
             frame_options: "DENY".into(),
+            session_timeout: DEFAULT_SESSION_TIMEOUT,
+            enable_gravatar: false,
+            dev_auto_login_username: String::new(),
         }
     }
 }
+
+/// Navidrome's `consts.DefaultSessionTimeout`.
+pub const DEFAULT_SESSION_TIMEOUT: Duration = Duration::from_secs(48 * 3600);
 
 /// Navidrome's `consts.DefaultAuthWindowLength`.
 pub const DEFAULT_AUTH_WINDOW: Duration = Duration::from_secs(20);
@@ -152,7 +167,13 @@ impl Config {
             Some(path) => Some(ConfigFile::read(&path, sources.files)?),
             None => None,
         };
-        let nd = Navidrome { var, base_url_flag: flags.base_url, data_folder_flag: flags.data_folder, file: file.as_ref() };
+        let nd = Navidrome {
+            var,
+            base_url_flag: flags.base_url,
+            data_folder_flag: flags.data_folder,
+            session_timeout_flag: flags.session_timeout,
+            file: file.as_ref(),
+        };
         if let Some(file) = &file {
             // these would outrank the environment the gateway gives Navidrome (see Navidrome::get)
             for name in ["address", "port", "extauth.trustedsources", "extauth.userheader"] {
@@ -213,6 +234,16 @@ impl Config {
             },
             two_factor: nd.get("sonus.twofactor")?.map(|v| TwoFactor::parse(&v)).unwrap_or(defaults.two_factor),
             frame_options: nd.get("httpheaders.frameoptions")?.filter(|v| !v.is_empty()).unwrap_or(defaults.frame_options),
+            session_timeout: match nd.get("sessiontimeout")? {
+                // Navidrome: a negative timeout falls back to the default
+                Some(v) => parse_go_duration(&v).ok_or_else(|| format!("SessionTimeout={v} is not a duration (48h, 30m)"))?.unwrap_or(DEFAULT_SESSION_TIMEOUT),
+                None => defaults.session_timeout,
+            },
+            enable_gravatar: match nd.get_bool("enablegravatar")? {
+                Some(v) => v,
+                None => defaults.enable_gravatar,
+            },
+            dev_auto_login_username: nd.get("devautologinusername")?.unwrap_or_default(),
         };
 
         let (upstream, navidrome, upstream_user_header) = match get(var, "SONUS_NAVIDROME_URL") {
@@ -257,6 +288,7 @@ struct Navidrome<'a> {
     var: &'a dyn Fn(&str) -> Option<String>,
     base_url_flag: Option<String>,
     data_folder_flag: Option<String>,
+    session_timeout_flag: Option<String>,
     file: Option<&'a ConfigFile>,
 }
 
@@ -270,6 +302,7 @@ impl Navidrome<'_> {
         let flag = match name {
             "baseurl" => &self.base_url_flag,
             "datafolder" => &self.data_folder_flag,
+            "sessiontimeout" => &self.session_timeout_flag,
             _ => &None,
         };
         if let Some(flag) = flag {
@@ -290,6 +323,22 @@ impl Navidrome<'_> {
         }
     }
 
+    /// A yes-or-no setting, as Go's `strconv.ParseBool` reads the environment's text; in the file, a TOML boolean.
+    fn get_bool(&self, name: &str) -> Result<Option<bool>, String> {
+        let from_file = |value: &Value| match value {
+            Value::Bool(b) => Ok(*b),
+            Value::Text(text) => parse_bool(text).ok_or_else(|| format!("{name}={text} is not true or false")),
+            Value::Other(kind) => Err(format!("{name} in the config file is a TOML {kind}: Navidrome needs true or false here")),
+        };
+        if let Some(value) = self.file.and_then(|f| f.get_env_named(name)) {
+            return from_file(value).map(Some);
+        }
+        if let Some(text) = (self.var)(&env_name(name)).filter(|v| !v.is_empty()) {
+            return parse_bool(&text).map(Some).ok_or_else(|| format!("{}={text} is not true or false", env_name(name)));
+        }
+        self.file.and_then(|f| f.get(name)).map(from_file).transpose()
+    }
+
     /// A renamed setting: the current name when it is set anywhere, else the old one, else the current name's default.
     fn get_renamed(&self, name: &str, old: &str) -> Result<Option<String>, String> {
         let explicit =
@@ -305,6 +354,7 @@ impl Navidrome<'_> {
     fn text(&self, name: &str, value: &Value) -> Result<String, String> {
         match value {
             Value::Text(text) => Ok(text.clone()),
+            Value::Bool(_) => Err(format!("{name} in the config file is a TOML boolean: Navidrome needs a string here")),
             Value::Other(kind) => Err(format!("{name} in the config file is a TOML {kind}: Navidrome needs a string here")),
         }
     }
@@ -323,6 +373,15 @@ fn parse_port(value: Option<String>, name: &str, default: u16) -> Result<u16, St
     match value {
         None => Ok(default),
         Some(v) => v.trim().parse::<u16>().ok().filter(|p| *p != 0).ok_or_else(|| format!("{name}={v} is not a port")),
+    }
+}
+
+/// Go's `strconv.ParseBool`.
+fn parse_bool(text: &str) -> Option<bool> {
+    match text {
+        "1" | "t" | "T" | "TRUE" | "true" | "True" => Some(true),
+        "0" | "f" | "F" | "FALSE" | "false" | "False" => Some(false),
+        _ => None,
     }
 }
 
@@ -562,6 +621,20 @@ mod tests {
         assert_eq!(load(&[("ND_AUTHWINDOWLENGTH", "-5s")], &[], None).unwrap().shared.auth_window, Duration::from_secs(20), "negative: the default");
         assert_eq!(load(&[("ND_AUTHWINDOWLENGTH", "0")], &[], None).unwrap().shared.auth_window, Duration::from_secs(20));
         assert!(load(&[("ND_AUTHREQUESTLIMIT", "many")], &[], None).is_err());
+
+        // what the /auth routes need
+        let c = load(&[], &[], None).unwrap();
+        assert_eq!(
+            (c.shared.session_timeout, c.shared.enable_gravatar, c.shared.dev_auto_login_username.as_str()),
+            (Duration::from_secs(48 * 3600), false, "")
+        );
+        let c = load(&[("ND_SESSIONTIMEOUT", "30m"), ("ND_ENABLEGRAVATAR", "true"), ("ND_DEVAUTOLOGINUSERNAME", "dev")], &[], None).unwrap();
+        assert_eq!((c.shared.session_timeout, c.shared.enable_gravatar, c.shared.dev_auto_login_username.as_str()), (Duration::from_secs(1800), true, "dev"));
+        let c = load(&[("ND_SESSIONTIMEOUT", "30m")], &["--sessiontimeout", "2h"], Some("EnableGravatar = true\nSessionTimeout = '1h'")).unwrap();
+        assert_eq!((c.shared.session_timeout, c.shared.enable_gravatar), (Duration::from_secs(7200), true), "a flag over the environment over the file");
+        assert_eq!(load(&[("ND_SESSIONTIMEOUT", "-1h")], &[], None).unwrap().shared.session_timeout, Duration::from_secs(48 * 3600));
+        assert!(load(&[("ND_ENABLEGRAVATAR", "maybe")], &[], None).is_err());
+        assert!(load(&[], &[], Some("EnableGravatar = 'yes'")).is_err());
         assert!(load(&[("ND_AUTHWINDOWLENGTH", "soon")], &[], None).is_err());
     }
 

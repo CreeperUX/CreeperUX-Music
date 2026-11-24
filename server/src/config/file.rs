@@ -54,6 +54,7 @@ pub fn locate(flag: Option<&OsStr>, env: Option<String>, files: &dyn Files) -> O
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Text(String),
+    Bool(bool),
     /// Not a string or a number: a TOML type name.
     Other(&'static str),
 }
@@ -128,6 +129,7 @@ fn flatten(table: &toml::Table, prefix: &str, depth: usize, out: &mut HashMap<St
             }
             toml::Value::String(s) => Value::Text(s.clone()),
             toml::Value::Integer(i) => Value::Text(i.to_string()),
+            toml::Value::Boolean(b) => Value::Bool(*b),
             other => Value::Other(other.type_str()),
         };
         match out.get(&name) {

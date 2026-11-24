@@ -81,10 +81,11 @@ async fn main() -> ExitCode {
         let (gateway, upstream, base_path, shared) = (gateway.clone(), config.upstream.clone(), config.base_path.clone(), config.shared.clone());
         tokio::spawn(async move {
             watch_until_ready(upstream.clone(), ready).await;
-            match startup::subsonic(&shared, &upstream, &base_path).await {
-                Ok(subsonic) => {
-                    gateway.set_subsonic(subsonic);
-                    info!("Subsonic sign-ins are checked here");
+            match startup::local(&shared, &upstream, &base_path).await {
+                Ok(local) => {
+                    gateway.set_subsonic(local.subsonic);
+                    gateway.set_auth(local.auth);
+                    info!("Subsonic sign-ins are checked here, and /auth is answered here");
                 }
                 Err(e) => {
                     let _ = failed_tx.send(e).await;

@@ -108,7 +108,10 @@ async fn a_large_upload_streams_through() {
     let (gw, _) = gateway(nd, GatewaySetup::default()).await;
 
     let (chunks, body) = channel_body();
-    let response = tokio::spawn(send(gw, Request::post("/api/upload").header(header::HOST, "h").body(body).unwrap()));
+    let response = tokio::spawn(send(
+        gw,
+        Request::post("/api/upload").header(header::HOST, "h").header(header::CONTENT_TYPE, "multipart/form-data; boundary=x").body(body).unwrap(),
+    ));
     chunks.send(Bytes::from(vec![7u8; CHUNK])).await.unwrap();
     // Navidrome has the first piece while the rest is still on the client: nothing waits for the whole body
     within("the first piece upstream, before the rest is sent", first_rx.recv()).await.unwrap();
@@ -119,6 +122,57 @@ async fn a_large_upload_streams_through() {
     let response = within("the response", response).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(body_bytes(response.into_body()).await, (CHUNK * CHUNKS).to_string());
+}
+
+#[tokio::test]
+async fn bodies_to_navidromes_api_are_bounded_as_navidrome_bounds_them() {
+    const LIMIT: usize = 4 << 20;
+    let (nd, mut requests) = recording_upstream().await;
+    let (gw, _) = gateway(nd, GatewaySetup::default()).await;
+    let json = |path: &str, bytes: usize| {
+        Request::post(path).header(header::HOST, "h").header(header::CONTENT_TYPE, "application/json").body(full(vec![b'1'; bytes])).unwrap()
+    };
+
+    // at the limit it passes; a byte more, declared, is refused before Navidrome sees it
+    let response = send(gw, json("/api/playlist", LIMIT)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(within("the request upstream", requests.recv()).await.unwrap().body.len(), LIMIT);
+    for path in ["/api/playlist", "/api", "/jellyfin/Items"] {
+        let response = send(gw, json(path, LIMIT + 1)).await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{path}");
+        assert_eq!(
+            body_bytes(response.into_body()).await,
+            "Request body must not be larger than 4194304 bytes
+"
+        );
+    }
+    assert!(requests.try_recv().is_err(), "none of them reached Navidrome");
+
+    // without a declared length, the body is cut off at the limit and the request refused
+    let (chunks, body) = channel_body();
+    let response = tokio::spawn(send(gw, Request::put("/api/queue").header(header::HOST, "h").body(body).unwrap()));
+    for _ in 0..5 {
+        if chunks.send(Bytes::from(vec![b'1'; 1 << 20])).await.is_err() {
+            break; // the gateway stopped reading
+        }
+    }
+    drop(chunks);
+    assert_eq!(within("the response", response).await.unwrap().status(), StatusCode::PAYLOAD_TOO_LARGE);
+    while requests.try_recv().is_ok() {}
+
+    // uploads have limits of their own in Navidrome, and other parts of the server are not bounded here
+    let upload =
+        |path: &str, kind: &str| Request::post(path).header(header::HOST, "h").header(header::CONTENT_TYPE, kind).body(full(vec![b'1'; LIMIT + 1])).unwrap();
+    for (path, kind) in [
+        ("/api/playlist/1/image", "multipart/form-data; boundary=x"),
+        ("/jellyfin/Items/1/Images/Primary", "image/png"),
+        ("/rest/savePlayQueue", "application/json"),
+        ("/apiary", "application/json"),
+    ] {
+        let response = send(gw, upload(path, kind)).await;
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(within("the request upstream", requests.recv()).await.unwrap().body.len(), LIMIT + 1);
+    }
 }
 
 #[tokio::test]

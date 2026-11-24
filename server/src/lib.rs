@@ -3,10 +3,13 @@
 //! of the server move here one by one, behind the same APIs; see `server/README.md`.
 #![deny(unsafe_code)]
 
+pub mod auth;
 pub mod config;
 pub mod db;
 pub mod gateway;
 pub mod gotime;
+pub mod id;
+pub mod jwt;
 pub mod routes;
 pub mod secrets;
 pub mod startup;

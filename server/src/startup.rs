@@ -1,5 +1,6 @@
 //! What must hold before the gateway answers anything itself: Navidrome is up (so its migrations are done), its
-//! database is the schema this server knows, and Navidrome has said how it signs its Subsonic answers.
+//! database is the schema this server knows, Navidrome has said how it starts its Subsonic answers, and the secret
+//! both servers sign sessions with is read.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,52 +10,97 @@ use http_body_util::{BodyExt, Empty, Limited};
 use hyper::{Request, Uri};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
+use rusqlite::OptionalExtension;
 use tracing::info;
 
+use crate::auth::{self, Auth};
 use crate::config::Shared;
 use crate::db::{self, Db};
+use crate::jwt::Signer;
 use crate::secrets::Keys;
 use crate::subsonic::credentials;
 use crate::subsonic::respond::Envelope;
 use crate::subsonic::{Setup, Subsonic};
 
+/// What the gateway answers its own routes with.
+pub struct Local {
+    pub subsonic: Subsonic,
+    pub auth: Auth,
+}
+
+/// Navidrome's `consts.JWTSecretKey`: where the `property` table keeps the session secret, sealed.
+const SESSION_SECRET: &str = "JWTSecret";
+
+/// The secret Navidrome signs session tokens with. Navidrome makes it at its first start, before it listens.
+fn session_secret(db: &Db, keys: &Keys) -> Result<Signer, String> {
+    let sealed: Option<String> = db
+        .read_blocking(|conn| conn.query_row("SELECT value FROM property WHERE id = ?1", [SESSION_SECRET], |r| r.get(0)).optional())
+        .map_err(|e| format!("cannot read the session secret: {e}"))?;
+    let sealed = sealed.filter(|s| !s.is_empty()).ok_or("Navidrome's database has no session secret (JWTSecret): Navidrome has not finished starting")?;
+    let secret = keys.open(&sealed).map_err(|_| "the session secret cannot be opened: was PasswordEncryptionKey changed?".to_string())?;
+    Ok(Signer::new(&secret))
+}
+
 /// Opens Navidrome's database and checks it; call when Navidrome answers (it migrates before it listens). The error
 /// says why the server cannot run.
-pub async fn subsonic(shared: &Shared, upstream: &Uri, base_path: &str) -> Result<Subsonic, String> {
+pub async fn local(shared: &Shared, upstream: &Uri, base_path: &str) -> Result<Local, String> {
     let path = db::locate(&shared.data_folder, &shared.db_path)?;
     let keys = Keys::new(&shared.password_encryption_key);
     let opened = {
         let keys = keys.clone();
-        tokio::task::spawn_blocking(move || -> Result<Arc<Db>, String> {
+        tokio::task::spawn_blocking(move || -> Result<(Arc<Db>, Signer), String> {
             let db = Db::open(&path)?;
             db.read_blocking(|conn| Ok(db::check_sqlite(conn).and_then(|()| db::check_schema(conn)))).map_err(|e| e.to_string())??;
             let hashed = credentials::fill_key_hashes(&db, &keys).map_err(|e| format!("cannot prepare app passwords as API keys: {e}"))?;
             if hashed > 0 {
                 info!(hashed, "app passwords made before API keys now work as API keys");
             }
-            Ok(db)
+            let signer = session_secret(&db, &keys)?;
+            Ok((db, signer))
         })
         .await
         .map_err(|_| "the database check did not finish".to_string())??
     };
+    let (opened, signer) = opened;
     info!(database = %opened.path().display(), schema = db::SCHEMA_VERSION, "Navidrome's database is the schema this server knows");
     let envelope = envelope(upstream, base_path).await?;
-    Ok(Subsonic::new(Setup {
-        db: opened,
-        keys,
+    let subsonic = Subsonic::new(Setup {
+        db: opened.clone(),
+        keys: keys.clone(),
         two_factor: shared.two_factor,
         limit: shared.auth_request_limit,
         window: shared.auth_window,
         envelope,
         frame_options: shared.frame_options.clone(),
-    }))
+    });
+    let auth = Auth::new(auth::Setup {
+        db: opened,
+        keys,
+        two_factor: shared.two_factor,
+        signer,
+        session_timeout: shared.session_timeout,
+        limit: shared.auth_request_limit,
+        window: shared.auth_window,
+        base_path: base_path.to_string(),
+        frame_options: shared.frame_options.clone(),
+        enable_gravatar: shared.enable_gravatar,
+        auto_login: shared.dev_auto_login_username.clone(),
+    });
+    Ok(Local { subsonic, auth })
 }
 
-/// How Navidrome starts its Subsonic answers (version, type, its own version): asked of the one method that needs no
-/// sign-in, so the answers given here carry the very same.
+/// The user name of the sign-in the server tries at Navidrome when it starts: nobody's.
+pub const START_PROBE_USER: &str = "sonus-server-start-probe";
+
+/// How Navidrome starts its Subsonic answers (version, type, its own version), so the answers given here carry the
+/// very same. Asked with a sign-in that is nobody's, on purpose: checking it makes Navidrome open its user store, and
+/// with that settle its password encryption (on a new database, or after `PasswordEncryptionKey` was set, it
+/// re-encrypts the passwords it finds and notes the key, which it otherwise does at its first sign-in). After this
+/// the server may write passwords itself (the first admin) without Navidrome mistaking them for old ones.
 async fn envelope(upstream: &Uri, base_path: &str) -> Result<Envelope, String> {
     let authority = upstream.authority().ok_or("no upstream address")?;
-    let target = format!("http://{authority}{}/rest/getOpenSubsonicExtensions?f=json", base_path.trim_end_matches('/'));
+    let nothing = crate::id::random_hex(16).map_err(|e| e.to_string())?;
+    let target = format!("http://{authority}{}/rest/ping?u={START_PROBE_USER}&p={nothing}&v=1.16.1&c=sonus-server&f=json", base_path.trim_end_matches('/'));
     let client: Client<_, Empty<Bytes>> = Client::builder(TokioExecutor::new()).build_http();
     let mut last = String::new();
     for _ in 0..20 {
@@ -75,5 +121,5 @@ async fn envelope(upstream: &Uri, base_path: &str) -> Result<Envelope, String> {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    Err(format!("Navidrome did not answer getOpenSubsonicExtensions ({target}): {last}"))
+    Err(format!("Navidrome did not answer a Subsonic request (http://{authority}/rest/ping): {last}"))
 }

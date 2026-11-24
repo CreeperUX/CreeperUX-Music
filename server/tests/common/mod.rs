@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+pub mod database;
+
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -20,6 +22,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, Uri};
 use hyper_util::rt::TokioIo;
 use sonus_server::gateway::{self, Gateway, Settings};
+use sonus_server::subsonic::Subsonic;
 use sonus_server::trust::TrustList;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -62,11 +65,23 @@ pub struct GatewaySetup<'a> {
     pub user_header: Option<&'a str>,
     pub upstream_user_header: &'a str,
     pub ready: bool,
+    pub base_path: &'a str,
+    /// The gateway checks Subsonic sign-ins itself, with `subsonic` once it has it.
+    pub checks_sign_ins: bool,
+    pub subsonic: Option<Subsonic>,
 }
 
 impl Default for GatewaySetup<'_> {
     fn default() -> Self {
-        GatewaySetup { trusted: "", user_header: Some("Remote-User"), upstream_user_header: "x-sonus-user-0123456789abcdef", ready: true }
+        GatewaySetup {
+            trusted: "",
+            user_header: Some("Remote-User"),
+            upstream_user_header: "x-sonus-user-0123456789abcdef",
+            ready: true,
+            base_path: "",
+            checks_sign_ins: false,
+            subsonic: None,
+        }
     }
 }
 
@@ -77,11 +92,17 @@ pub async fn gateway(upstream: SocketAddr, setup: GatewaySetup<'_>) -> (SocketAd
         trusted: TrustList::parse(setup.trusted),
         user_header: setup.user_header.map(|h| HeaderName::try_from(h).unwrap()),
         upstream_user_header: HeaderName::try_from(setup.upstream_user_header).unwrap(),
+        base_path: setup.base_path.to_string(),
+        checks_sign_ins: setup.checks_sign_ins,
     };
     let ready = Arc::new(AtomicBool::new(setup.ready));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(gateway::serve(listener, Gateway::new(settings, ready.clone()), std::future::pending()));
+    let gateway = Gateway::new(settings, ready.clone());
+    if let Some(subsonic) = setup.subsonic {
+        gateway.set_subsonic(subsonic);
+    }
+    tokio::spawn(gateway::serve(listener, gateway, std::future::pending()));
     (addr, ready)
 }
 

@@ -14,7 +14,8 @@ Both run on `tools/fixtures/` (the fixture library and the golden database). Nod
 ```sh
 node tools/fixtures/build.mjs                 # once: the library, the golden database, its manifest
 node tools/contract/run.mjs                   # the suite against Navidrome on a fresh copy of it
-node tools/contract/diff.mjs --go-vs-gateway  # Navidrome vs the gateway in front of another Navidrome
+node tools/contract/diff.mjs --go-vs-gateway  # Navidrome vs the Rust server running another Navidrome
+node --test tools/contract/gateway.test.mjs   # what only the Rust server decides: the sign-in limit, what Navidrome never sees
 ```
 
 ## Running the suite
@@ -22,7 +23,7 @@ node tools/contract/diff.mjs --go-vs-gateway  # Navidrome vs the gateway in fron
 | Command | Against |
 |---|---|
 | `node tools/contract/run.mjs` | the frozen Navidrome on a fresh copy of the golden database (started, then stopped and removed) |
-| `node tools/contract/run.mjs --through-gateway` | the same, behind the Rust gateway (`cargo run` in `server/`) |
+| `node tools/contract/run.mjs --through-gateway` | the Rust server (`cargo run` in `server/`) running the frozen Navidrome on a fresh copy of the golden database, as its image does: it checks the sign-ins |
 | `node tools/contract/run.mjs --base <url> --manifest <file>` | a server that runs already (the Rust server, later) |
 | `node tools/contract/run.mjs --demo` | the demo server (`tools/demo-server`), with `manifests/demo.json` |
 
@@ -41,7 +42,7 @@ Navidrome does); `run.mjs` prints them and skips them.
 | File | Covers |
 |---|---|
 | `basics` | `ping` (and `ping.view`), `getOpenSubsonicExtensions` without signing in, `getScanStatus`, CORS on `/rest` and the browser sign-in |
-| `auth` | `t`/`s`, `p`, `p=enc:`; wrong password 40, unknown user 40, no `u` 10, `u` alone 40, missing parameters 10 (and 70 for `getAlbum`/`getSong` without an id); `apiKey` with `tokenInfo`, 43 with `u`/`p`/`t`, 44 unknown; the two-step user: account password 40 (all three ways), app password as `p`, `enc:` and token, with or without dashes |
+| `auth` | `t`/`s`, `p`, `p=enc:`, the name in any case; wrong password 40, unknown user 40, `enc:` that is not hex 40, no `u` 10, `u` alone 40, no `v` or `c` 10 whatever the password, `p` checked when `p` and `t` both come, missing parameters 10 (and 70 for `getAlbum`/`getSong` without an id); `apiKey` with `tokenInfo`, 43 with `u`/`p`/`t` and for mixed credentials before any is checked, 44 unknown; an app password as an API key; `tokenInfo` after a password sign-in; CORS on a refusal; the two-step user: account password 40 (all three ways, and as an API key 44), app password as `p`, `enc:` and token, with or without dashes |
 | `library` | `getAlbumList2` paged (alphabeticalByName, the same in pages of 3) and its other types; `search3` with the empty query paging the whole library (each song once, the same in pages of 4) and with words; `getAlbum` (disc and track order), `getSong`; the fields the clients map (`web/src/api/subsonic.js`, `src/Sonus.Core`) |
 | `fixtures` | the library's hard cases (`tools/fixtures/README.md`): exact text in every format, several artists, compilations, two discs, one album name by two artists, CJK and accents in search, the Turkish I in `sortName`, missing tags, ReplayGain, MusicBrainz ids, the original date, several genres, audio properties |
 | `playlists` | `getPlaylists` (own, another user's public one, a smart playlist), `getPlaylist`, `createPlaylist` (new, and overwrite with `playlistId`), `updatePlaylist` (rename, comment, add, remove several, public), `deletePlaylist`; another user's playlist: read-only, 50 on change |
@@ -58,16 +59,33 @@ Navidrome does); `run.mjs` prints them and skips them.
   ffmpeg versions anyway.
 - What Sonus does not use (roadmap, decision 1): XML, JSONP, `getArtists`/`getIndexes`, sharing, radio, bookmarks,
   downloads; the native `/api` (only used to build the database).
-- Limits and timers: sign-in rate limits (off in the test settings), Connect's 30 s ping and 75 s timeout, its 32-device
-  cap and close code 4000, a device sign-in's 10-minute expiry and 200-at-a-time cap.
+- Limits and timers: Connect's 30 s ping and 75 s timeout, its 32-device cap and close code 4000, a device sign-in's
+  10-minute expiry and 200-at-a-time cap. The sign-in rate limit is off in the suite's settings; `gateway.test.mjs`
+  (below) checks it with servers of its own.
 - Two-step verification's web side beyond what the build does (recovery codes, turning it off, an admin's reset) and
   the web sign-in itself (`/auth/login`, used by the device-login tests to approve).
 - `getNowPlaying`, `reportPlayback`, `startScan`, `setRating` (the database build uses it; the writes corpus compares it).
 
+## What only the Rust server decides: `gateway.test.mjs`
+
+```sh
+node --test tools/contract/gateway.test.mjs
+```
+
+Four tests that need servers of their own, each started on a fresh copy of the golden database: Navidrome alone, and
+the Rust server running its own Navidrome, with the same settings.
+
+| Test | Shows |
+|---|---|
+| failed sign-ins are limited the same way | with `AuthRequestLimit=3` and a 5 s window: three failures (by GET, by form post, by HEAD), then the right password refused (40), the name in capitals too, another user and an API key not; three unknown keys, then the right key refused (44), mixed credentials still 43, a password user not limited by keys; a window later both sign in again. The sixteen answers are the same from both servers |
+| Navidrome never sees what the Rust server refused | with Navidrome's log at debug level (it logs every request with its query): six refused requests are not in the log of the Navidrome behind the Rust server, three accepted ones are, without any `p`, `t`, `s` or `apiKey` parameter, and it logged no "Invalid login"; Navidrome alone logs all nine and refuses the six itself |
+| signed in by the gateway, a request is to Navidrome what it was with credentials | the player cookie's name (after the user name as typed) and attributes, the player in `getNowPlaying`, the user's last access written, no user created by an unknown name |
+| a client cannot name itself a user | `Remote-User`, `X-Sonus-User`, `X-Sonus-User-000…` sent by a client: 10 without credentials, 40 with a wrong password, and beside the listener's own sign-in the request is still the listener's; the web UI's page signs nobody in |
+
 ## The differential runner
 
 ```sh
-node tools/contract/diff.mjs --go-vs-gateway [--corpus <file>]   # A: Navidrome; B: the gateway in front of another Navidrome
+node tools/contract/diff.mjs --go-vs-gateway [--corpus <file>]   # A: Navidrome; B: the Rust server running another Navidrome
 node tools/contract/diff.mjs --go-vs-go [--corpus <file>]        # two Navidromes: what differs between two runs (should be nothing)
 node tools/contract/diff.mjs --a <url> --b <url> --manifest <file> [--corpus <file>]
 ```
@@ -76,14 +94,20 @@ Each side gets its own copy of the golden database. Options: `--only <text>` (re
 `--json <file>` (the whole report). It exits with 1 when anything differs. `node --test tools/contract/diff.test.mjs`
 tests the runner itself.
 
-Results so far (Navidrome 0.64.2-sonus.10): `corpus/read-only.json`, 116 requests, and `corpus/writes.json`, 34, come
-out identical between Navidrome and Navidrome behind the gateway (`main`'s `server/`), and between two Navidromes.
+Results so far (Navidrome 0.64.2-sonus.10): `corpus/read-only.json`, 169 requests, and `corpus/writes.json`, 34, come
+out identical between Navidrome and the Rust server checking sign-ins in front of its own Navidrome, and between two
+Navidromes.
+
+`--go-vs-gateway` and `--through-gateway` run the Rust server as its image runs it (`startGatewayOnGolden` in
+`diff.mjs`): `cargo run`, which starts Navidrome itself (`SONUS_NAVIDROME_BIN`) with the golden settings, so Navidrome
+believes the gateway's user header and nobody else's. `startGateway(url)` is the other way, the gateway in front of a
+server that runs on its own: then it only passes requests through.
 
 ### The corpora
 
 | File | |
 |---|---|
-| `corpus/read-only.json` | every sign-in and its errors, extensions, scan status; album lists (every type but random), `search3` (the empty query whole and paged, words in every script); `getAlbum`, `getSong` for every fixture case; playlists, the play queue, stars; lyrics, similar songs, artist info; cover art (as is, resized), `stream` (every format, ranges, errors); two device sign-in calls |
+| `corpus/read-only.json` | every sign-in and every way it fails: in JSON, XML and JSONP (compared byte for byte, with `Accept-Encoding: identity`), in the query and as a form, by every HTTP method, mixed credentials, missing `v`/`c`, `tokenInfo`, a CORS preflight, queries Go refuses; extensions, scan status; album lists (every type but random), `search3` (the empty query whole and paged, words in every script); `getAlbum`, `getSong` for every fixture case; playlists, the play queue, stars; lyrics, similar songs, artist info; cover art (as is, resized), `stream` (every format, ranges, errors); two device sign-in calls |
 | `corpus/writes.json` | stars, ratings, plays, the play queue, changing and deleting a playlist; each followed by the reads that show it |
 
 ### Normalizing
@@ -110,7 +134,13 @@ To a corpus: a request (`diff.mjs`'s header has the format):
 { "name": "stream Range", "method": "stream", "params": { "id": "{{track.flac}}" }, "headers": { "Range": "bytes=0-99" } }
 { "name": "an app password", "method": "ping", "auth": { "user": "secure", "as": "appPassword" } }
 { "name": "device poll", "path": "/auth/device/poll", "httpMethod": "POST", "json": { "deviceCode": "x" } }
+{ "name": "a form by PUT", "path": "/rest/ping", "httpMethod": "PUT", "form": "u=x&p=y&f=json" }
+{ "name": "XML", "method": "ping", "params": { "f": null }, "headers": { "Accept-Encoding": "identity" } }
 ```
+
+A parameter set to `null` is left out (`"v": null`: no `v`). Answers that are not JSON are compared by their bytes and
+`Content-Length`: ask for them uncompressed (`Accept-Encoding: identity`), since Navidrome compresses and the Rust
+server's own answers are not compressed.
 
 Run `--go-vs-go` first: a field that differs between two Navidromes is volatile (list it, say why) or the golden
 database is not settled yet (fix the build). Requests that make something with a random id (`createPlaylist`) do not

@@ -1,8 +1,10 @@
 //! The real `sonus-server` binary running a fake Navidrome: what Navidrome is told, and what happens when it stops.
 //!
 //! The fake Navidrome is this test binary, started again by the gateway with `FAKE_NAVIDROME_OUT` set: then
-//! `fake_navidrome` below plays Navidrome (records what it got, answers HTTP on its port, exits when told) and every
-//! other test returns at once.
+//! `fake_navidrome` below plays Navidrome (records what it got, makes its database, answers HTTP on its port, exits
+//! when told) and every other test returns at once.
+
+mod common;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -33,6 +35,12 @@ fn fake_navidrome() {
     if let Ok(code) = std::env::var("FAKE_NAVIDROME_EXIT") {
         std::process::exit(code.parse().unwrap());
     }
+    // its database, migrated before it listens: in DataFolder (here the working directory), with one user
+    let version = std::env::var("FAKE_NAVIDROME_SCHEMA").ok().map(|v| v.parse().unwrap()).unwrap_or(sonus_server::db::SCHEMA_VERSION);
+    let keys = sonus_server::secrets::Keys::new(&std::env::var("ND_PASSWORDENCRYPTIONKEY").unwrap_or_default());
+    let conn = common::database::create_at_version(std::path::Path::new("navidrome.db"), version);
+    common::database::add_user(&conn, &keys, "alice", "sesame");
+    drop(conn);
     // Navidrome's server: answers with the request's headers, until asked to stop
     let address = format!("{}:{}", std::env::var("ND_ADDRESS").unwrap(), std::env::var("ND_PORT").unwrap());
     let listener = TcpListener::bind(address).unwrap();
@@ -51,7 +59,12 @@ fn fake_navidrome() {
             }
             head.push_str(&line);
         }
-        let body = head.to_ascii_lowercase();
+        // every Subsonic answer starts the same way; anything else is answered with the request itself
+        let body = if head.starts_with("GET /rest/getOpenSubsonicExtensions") {
+            r#"{"subsonic-response":{"status":"ok","version":"1.16.1","type":"navidrome","serverVersion":"0.64.2-fake","openSubsonic":true}}"#.to_string()
+        } else {
+            head.to_ascii_lowercase()
+        };
         let reply = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
         stream.write_all(reply.as_bytes()).unwrap();
         drop(stream);
@@ -186,7 +199,7 @@ fn navidrome_is_told_the_gateways_decisions_and_its_exit_is_the_gateways() {
     assert!(env["ND_CONFIGFILE"].ends_with("navidrome.toml"), "Navidrome reads the same file");
 
     // the gateway listens on the port from the file, and Navidrome answers behind it
-    let (status, body) = run.get("/rest/ping.view?u=a", &[("X-Real-IP", "203.0.113.1"), ("X-Auth-User", "admin")]);
+    let (status, body) = run.get("/api/song?u=a", &[("X-Real-IP", "203.0.113.1"), ("X-Auth-User", "admin")]);
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(header_value(&body, "x-real-ip"), Some("127.0.0.1"), "{body}");
     assert_eq!(header_value(&body, "x-auth-user"), None, "127.0.0.1 is not a trusted proxy here: {body}");
@@ -218,6 +231,49 @@ fn without_a_trusted_proxy_nobody_can_send_navidromes_user_header() {
     assert_eq!(header_value(&body, "remote-user"), None, "{body}");
     let _ = run.get("/exit/0", &[]);
     assert_eq!(run.wait().code(), Some(1), "Navidrome stopping by itself is a failure, even with 0");
+}
+
+#[test]
+fn sign_ins_are_checked_before_navidrome_and_the_user_named_in_the_gateways_header() {
+    if as_fake_navidrome() {
+        return;
+    }
+    let mut run = Run::start("sign-ins", None, &[("ND_ADDRESS", "127.0.0.1"), ("ND_PORT", "{port}"), ("ND_PASSWORDENCRYPTIONKEY", "a key of the test's")]);
+    let secret = run.navidrome_env()["ND_EXTAUTH_USERHEADER"].clone();
+
+    // the right password: Navidrome gets the request without it, and with the user in the header only it is told
+    let (status, body) = run.get("/rest/ping?u=alice&p=sesame&v=1.16.1&c=test&f=json", &[]);
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(body.starts_with("get /rest/ping?u=alice&v=1.16.1&c=test&f=json http/1.1"), "{body}");
+    assert_eq!(header_value(&body, &secret), Some("alice"), "{body}");
+    assert!(!body.contains("sesame"), "{body}");
+
+    // a wrong one: answered here, as Navidrome answers it
+    let (status, body) = run.get("/rest/ping?u=alice&p=wrong&v=1.16.1&c=test&f=json", &[]);
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_eq!(
+        body,
+        r#"{"subsonic-response":{"status":"failed","version":"1.16.1","type":"navidrome","serverVersion":"0.64.2-fake","openSubsonic":true,"error":{"code":40,"message":"Wrong username or password"}}}"#
+    );
+
+    // nobody names a user from outside
+    let (_, body) = run.get("/rest/ping?u=alice&p=wrong&v=1.16.1&c=test&f=json", &[(&secret, "alice"), ("Remote-User", "alice")]);
+    assert!(body.contains(r#""code":40"#), "{body}");
+    let _ = run.get("/exit/0", &[]);
+    run.wait();
+}
+
+#[test]
+fn a_database_of_another_schema_stops_the_server() {
+    if as_fake_navidrome() {
+        return;
+    }
+    let vars = [("ND_ADDRESS", "127.0.0.1"), ("ND_PORT", "{port}"), ("FAKE_NAVIDROME_SCHEMA", "20270101000000")];
+    let mut run = Run::start("other-schema", None, &vars);
+    assert_eq!(run.wait().code(), Some(1));
+    let log = run.log();
+    assert!(log.contains("schema version 20270101000000") && log.contains("20260922230428"), "{log}");
+    assert!(!log.contains("Subsonic sign-ins are checked here"), "{log}");
 }
 
 #[test]

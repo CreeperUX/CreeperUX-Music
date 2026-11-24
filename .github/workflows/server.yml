@@ -43,6 +43,27 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
 
+  # On pull requests the image is built for both architectures and thrown away: a Dockerfile or dependency change
+  # that breaks the cross build shows before it is merged, not after.
+  image-check:
+    name: Image builds
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: server
+          file: server/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          pull: true
+          build-args: |
+            SONUS_GIT_SHA=${{ github.event.pull_request.head.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   image:
     name: Image
     needs: test

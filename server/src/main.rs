@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use hyper::Uri;
 use sonus_server::config::Config;
 use sonus_server::gateway::{self, Gateway, Settings};
+use sonus_server::startup;
 use sonus_server::supervisor::Navidrome;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -60,13 +61,37 @@ async fn main() -> ExitCode {
         },
         None => None,
     };
-    if navidrome.is_some() {
-        tokio::spawn(watch_until_ready(config.upstream.clone(), ready.clone()));
+    // Sign-ins are checked here only in front of the Navidrome this server runs itself: that one is told to believe
+    // the gateway's user header and nobody else's, and shares its settings and its database.
+    let checks_sign_ins = navidrome.is_some();
+    if !checks_sign_ins {
+        info!("in front of a Navidrome that runs on its own (SONUS_NAVIDROME_URL): everything passes through, sign-ins are Navidrome's to check");
     }
-
-    let settings =
-        Settings { upstream: config.upstream, trusted: config.trusted, user_header: config.user_header, upstream_user_header: config.upstream_user_header };
-    let gateway = Gateway::new(settings, ready);
+    let settings = Settings {
+        upstream: config.upstream.clone(),
+        trusted: config.trusted,
+        user_header: config.user_header,
+        upstream_user_header: config.upstream_user_header,
+        base_path: config.base_path.clone(),
+        checks_sign_ins,
+    };
+    let gateway = Gateway::new(settings, ready.clone());
+    let (failed_tx, mut failed_rx) = tokio::sync::mpsc::channel::<String>(1);
+    if navidrome.is_some() {
+        let (gateway, upstream, base_path, shared) = (gateway.clone(), config.upstream.clone(), config.base_path.clone(), config.shared.clone());
+        tokio::spawn(async move {
+            watch_until_ready(upstream.clone(), ready).await;
+            match startup::subsonic(&shared, &upstream, &base_path).await {
+                Ok(subsonic) => {
+                    gateway.set_subsonic(subsonic);
+                    info!("Subsonic sign-ins are checked here");
+                }
+                Err(e) => {
+                    let _ = failed_tx.send(e).await;
+                }
+            }
+        });
+    }
     let (stop_tx, mut stop_rx) = watch::channel(false);
     let server = tokio::spawn(gateway::serve(listener, gateway, async move {
         let _ = stop_rx.wait_for(|stop| *stop).await;
@@ -79,6 +104,14 @@ async fn main() -> ExitCode {
                 navidrome.stop(Duration::from_secs(30)).await;
             }
             ExitCode::SUCCESS
+        }
+        Some(reason) = failed_rx.recv() => {
+            error!("{reason}");
+            error!("cannot run on this database: stopping");
+            if let Some(navidrome) = navidrome.as_mut() {
+                navidrome.stop(Duration::from_secs(30)).await;
+            }
+            ExitCode::from(1)
         }
         status = wait(navidrome.as_mut()) => {
             match status {

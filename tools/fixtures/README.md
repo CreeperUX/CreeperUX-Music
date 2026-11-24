@@ -27,7 +27,9 @@ Navidrome: `--navidrome <exe>`, else `NAVIDROME_EXE`, else the one built before 
 builds again.
 
 `node tools/fixtures/serve.mjs [--port <n>]` runs Navidrome on a fresh copy of the golden database (with the settings it
-was made with) until Ctrl+C. Tests use the same thing from code: `serveGolden()`.
+was made with) until Ctrl+C. Tests use the same thing from code: `serveGolden()`, with `env` for settings over the
+golden ones (a sign-in limit, a log level). `goldenCopy()` only makes the copy and gives the settings, for a server
+that runs Navidrome itself (the Rust server: `tools/contract/diff.mjs`, `startGatewayOnGolden`).
 
 ## The settings
 

@@ -1,12 +1,13 @@
 //! The gateway: every request goes to Navidrome as it came, streamed both ways (songs, uploads, server-sent events),
 //! WebSockets included (Sonus Connect, the Jellyfin API). Only what a proxy must change changes: hop-by-hop headers,
-//! and who the client is (trust.rs). Parts of the API move out of Navidrome by being answered here instead.
+//! and who the client is (trust.rs). Parts of the API move out of Navidrome by being answered or checked here instead:
+//! `routes.rs` lists them. So far: Subsonic sign-ins (`subsonic`).
 
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -24,6 +25,8 @@ use hyper_util::server::graceful::GracefulShutdown;
 use tokio::net::TcpListener;
 use tracing::{debug, warn};
 
+use crate::routes::{self, Local};
+use crate::subsonic::{self, Subsonic};
 use crate::trust::{TrustList, client_ip};
 
 pub type Body = BoxBody<Bytes, hyper::Error>;
@@ -36,6 +39,11 @@ pub struct Settings {
     pub user_header: Option<HeaderName>,
     /// The header Navidrome takes the user from (see `Config::upstream_user_header`): set by the gateway alone.
     pub upstream_user_header: HeaderName,
+    /// `BaseURL`'s path (`/music`), empty when none: the routes answered here are under it, as Navidrome's are.
+    pub base_path: String,
+    /// The gateway checks Subsonic sign-ins itself (`subsonic`), once `Gateway::set_subsonic` has given it the means;
+    /// until then those requests wait (503). False: they are Navidrome's, as everything else.
+    pub checks_sign_ins: bool,
 }
 
 /// Headers the gateway sets or removes itself, whatever the client sent: none of them can be the user header.
@@ -59,9 +67,10 @@ pub struct Gateway {
 
 struct Inner {
     settings: Settings,
-    client: Client<HttpConnector, Incoming>,
+    client: Client<HttpConnector, Body>,
     /// Whether Navidrome has answered yet: until then a refused connection is "starting" (503), afterwards "down" (502).
     ready: Arc<AtomicBool>,
+    subsonic: OnceLock<Arc<Subsonic>>,
 }
 
 impl Gateway {
@@ -70,7 +79,13 @@ impl Gateway {
         connector.set_nodelay(true);
         connector.set_connect_timeout(Some(Duration::from_secs(5)));
         let client = Client::builder(TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).pool_timer(TokioTimer::new()).build(connector);
-        Gateway { inner: Arc::new(Inner { settings, client, ready }) }
+        Gateway { inner: Arc::new(Inner { settings, client, ready, subsonic: OnceLock::new() }) }
+    }
+
+    /// Gives the gateway what it checks Subsonic sign-ins with (the database is open and is the schema it knows).
+    /// Once: a second call changes nothing.
+    pub fn set_subsonic(&self, subsonic: Subsonic) {
+        let _ = self.inner.subsonic.set(Arc::new(subsonic));
     }
 
     pub async fn handle(&self, mut req: Request<Incoming>, peer: IpAddr) -> Response<Body> {
@@ -89,15 +104,7 @@ impl Gateway {
 
         let (parts, body) = req.into_parts();
         // Navidrome's address and the request's own path, as it came (a BaseURL path included)
-        let path_and_query = parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-        let uri = match settings.upstream.authority() {
-            Some(authority) => Uri::builder().scheme("http").authority(authority.clone()).path_and_query(path_and_query).build(),
-            None => return text(StatusCode::INTERNAL_SERVER_ERROR, "No upstream address"),
-        };
-        let uri: Uri = match uri {
-            Ok(uri) => uri,
-            Err(_) => return text(StatusCode::BAD_REQUEST, "Bad request target"),
-        };
+        let mut path_and_query = parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/").to_string();
 
         let mut headers = parts.headers;
         if !headers.contains_key(header::HOST) {
@@ -117,7 +124,7 @@ impl Gateway {
         headers.insert("x-forwarded-for", client_value);
         // Anyone could claim to be signed in by a proxy: only a trusted proxy's claim reaches Navidrome, under the
         // name Navidrome reads, which nobody else can set. Navidrome reads the first value, as here.
-        let user = match &settings.user_header {
+        let mut user = match &settings.user_header {
             Some(name) if settings.trusted.contains(peer) => headers.get(name).cloned(),
             _ => None,
         };
@@ -125,6 +132,50 @@ impl Gateway {
             headers.remove(name);
         }
         headers.remove(&settings.upstream_user_header);
+
+        // What is answered or checked here instead of by Navidrome (routes.rs). A user a trusted proxy names is
+        // Navidrome's to look up, as before.
+        let local = if user.is_none() { routes::find(&parts.method, parts.uri.path(), &headers, &settings.base_path) } else { None };
+        let body: Body = match local {
+            Some(Local::Subsonic(subsonic_method)) if settings.checks_sign_ins => {
+                let Some(subsonic) = self.inner.subsonic.get() else {
+                    // not before the database is known to be the one this server understands
+                    return starting();
+                };
+                let request = subsonic::Request {
+                    method: subsonic_method,
+                    http_method: &parts.method,
+                    path: parts.uri.path(),
+                    query: parts.uri.query(),
+                    headers: &headers,
+                    client,
+                };
+                match subsonic.check(request, body).await {
+                    subsonic::Outcome::Respond(response) => {
+                        debug!(%method, path, status = response.status().as_u16(), ms = started.elapsed().as_millis() as u64, %client, "answered here");
+                        return response;
+                    }
+                    subsonic::Outcome::Untouched(body) => body,
+                    subsonic::Outcome::SignedIn { path_and_query: stripped, body, content_length, user: signed_in } => {
+                        path_and_query = stripped;
+                        if let Some(length) = content_length {
+                            headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+                        }
+                        user = Some(signed_in);
+                        body
+                    }
+                }
+            }
+            _ => body.boxed(),
+        };
+        let uri = match settings.upstream.authority() {
+            Some(authority) => Uri::builder().scheme("http").authority(authority.clone()).path_and_query(path_and_query.as_str()).build(),
+            None => return text(StatusCode::INTERNAL_SERVER_ERROR, "No upstream address"),
+        };
+        let uri: Uri = match uri {
+            Ok(uri) => uri,
+            Err(_) => return text(StatusCode::BAD_REQUEST, "Bad request target"),
+        };
         if let Some(user) = user {
             headers.insert(settings.upstream_user_header.clone(), user);
         }
@@ -144,13 +195,7 @@ impl Gateway {
             Err(e) => {
                 let ready = self.inner.ready.load(Ordering::Relaxed);
                 warn!(%method, path, error = %e, "Navidrome did not answer");
-                return if ready {
-                    text(StatusCode::BAD_GATEWAY, "The music server (Navidrome) did not answer")
-                } else {
-                    let mut r = text(StatusCode::SERVICE_UNAVAILABLE, "The music server is starting");
-                    r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
-                    r
-                };
+                return if ready { text(StatusCode::BAD_GATEWAY, "The music server (Navidrome) did not answer") } else { starting() };
             }
         };
         let status = response.status();
@@ -251,6 +296,12 @@ fn strip_hop_by_hop(headers: &mut HeaderMap) {
     for name in HOP_BY_HOP {
         headers.remove(name);
     }
+}
+
+fn starting() -> Response<Body> {
+    let mut r = text(StatusCode::SERVICE_UNAVAILABLE, "The music server is starting");
+    r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+    r
 }
 
 fn text(status: StatusCode, message: &'static str) -> Response<Body> {

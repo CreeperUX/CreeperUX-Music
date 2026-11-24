@@ -4,8 +4,8 @@
 //                                                            (tools/fixtures/build.mjs makes it; stopped afterwards)
 //   node tools/contract/run.mjs --base <url> --manifest <file>   a server that runs already
 //   node tools/contract/run.mjs --demo                       the demo server (tools/demo-server), started for the run
-//   node tools/contract/run.mjs --through-gateway            the golden Navidrome behind the Rust gateway (cargo run
-//                                                            in server/)
+//   node tools/contract/run.mjs --through-gateway            the Rust server (cargo run in server/) running the golden
+//                                                            Navidrome behind it, as its image does: it checks sign-ins
 //   … [--only <name pattern>] [test file names…]
 //
 // The tests run one file at a time: some change the user's state (stars, the play queue) and put it back.
@@ -56,19 +56,20 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     base = demo.url;
     manifest ??= join(here, 'manifests', 'demo.json');
     what = ' (the demo server)';
+  } else if (!base && values['through-gateway']) {
+    const { MANIFEST } = await import('../fixtures/serve.mjs');
+    const { startGatewayOnGolden } = await import('./diff.mjs');
+    console.log('Starting the Rust server (cargo run in server/)…');
+    const gw = await startGatewayOnGolden(); stops.push(gw.stop);
+    base = gw.url;
+    manifest ??= MANIFEST;
+    what = ` (the Rust server, running Navidrome ${gw.manifest.server.serverVersion} behind it, golden database)`;
   } else if (!base) {
     const { serveGolden, MANIFEST } = await import('../fixtures/serve.mjs');
     const go = await serveGolden(); stops.push(go.stop);
     base = go.url;
     manifest ??= MANIFEST;
     what = ` (Navidrome ${go.manifest.server.serverVersion}, golden database)`;
-    if (values['through-gateway']) {
-      const { startGateway } = await import('./diff.mjs');
-      console.log('Starting the gateway (cargo run in server/)…');
-      const gw = await startGateway(go.url); stops.push(gw.stop);
-      base = gw.url;
-      what = ` (the gateway, in front of Navidrome ${go.manifest.server.serverVersion} at ${go.url}, golden database)`;
-    }
   }
   if (!manifest) throw new Error('--manifest is needed with --base');
   console.log(`Contract suite against ${base}${what}`);

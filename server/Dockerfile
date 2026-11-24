@@ -4,16 +4,22 @@
 #   docker build --build-arg SONUS_GIT_SHA=$(git rev-parse HEAD) -t sonus-server server
 ARG NAVIDROME_IMAGE=ghcr.io/creeperux/navidrome:latest
 
-# Built on the build machine for the target's architecture: the dependencies are pure Rust, so rust-lld links a static
-# musl binary by itself, with no C toolchain for the target and no emulation (QEMU).
+# Built on the build machine for the target's architecture, with no emulation (QEMU): rust-lld links a static musl
+# binary by itself. One dependency is C, SQLite (rusqlite's bundled copy, so it has FTS5 whatever the image's own
+# SQLite has): clang compiles it for the target, against the target's own musl headers, which apk installs into
+# /sysroot from Alpine's packages for that architecture (signed, checked with Alpine's keys for it).
 FROM --platform=$BUILDPLATFORM rust:1-alpine AS build
 ARG TARGETARCH
 RUN case "$TARGETARCH" in \
-        amd64) echo x86_64-unknown-linux-musl ;; \
-        arm64) echo aarch64-unknown-linux-musl ;; \
+        amd64) echo x86_64 ;; \
+        arm64) echo aarch64 ;; \
         *) echo "no Rust target for $TARGETARCH" >&2; exit 1 ;; \
-    esac > /rust-target && \
-    rustup target add "$(cat /rust-target)"
+    esac > /arch && \
+    echo "$(cat /arch)-unknown-linux-musl" > /rust-target && \
+    rustup target add "$(cat /rust-target)" && \
+    apk add --no-cache clang llvm musl-dev && \
+    apk add --no-cache --root /sysroot --initdb --arch "$(cat /arch)" --keys-dir "/usr/share/apk/keys/$(cat /arch)" \
+        --repositories-file /etc/apk/repositories musl-dev
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
@@ -21,8 +27,9 @@ COPY src ./src
 ARG SONUS_GIT_SHA=""
 # rust-lld only when the target is not the build machine's own: set for that one too, it would also link the build's
 # proc macros (host libraries, which need the system's linker and libc), and fail.
-RUN target="$(cat /rust-target)" && host="$(rustc -vV | sed -n 's/^host: //p')" && \
+RUN target="$(cat /rust-target)" && host="$(rustc -vV | sed -n 's/^host: //p')" && under="$(echo "$target" | tr '-' '_')" && \
     if [ "$target" != "$host" ]; then export "CARGO_TARGET_$(echo "$target" | tr 'a-z-' 'A-Z_')_LINKER=rust-lld"; fi && \
+    export "CC_$under=clang" "AR_$under=llvm-ar" "CFLAGS_$under=--target=$(cat /arch)-alpine-linux-musl --sysroot=/sysroot" && \
     SONUS_GIT_SHA="$SONUS_GIT_SHA" cargo build --release --locked --target "$target" && \
     cp "target/$target/release/sonus-server" /sonus-server
 

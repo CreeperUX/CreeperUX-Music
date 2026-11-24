@@ -204,6 +204,15 @@ public sealed class SessionService : IDisposable
         _ = _client.DeviceAsync(v, m);
     }
 
+    /// <summary>The app is closing or signing out: what plays here is paused first, so the other devices see it stop where
+    /// it is at once (a connection that just drops stops it after the grace period, rule 7).</summary>
+    public async Task LeaveAsync()
+    {
+        if (_disposed || !IsConnected || !IsActiveHere || !Session.Playing) return;
+        try { await _client.CommandAsync("pause").WaitAsync(TimeSpan.FromSeconds(1)); }
+        catch (TimeoutException) { Log.Write("[session] pause on leaving: no answer"); }
+    }
+
     public void Dispose()
     {
         if (_disposed) return;

@@ -19,14 +19,15 @@ export async function readManifest(file = MANIFEST) {
 let runs = 0;
 /**
  * A fresh copy of the golden database in a folder of its own, and the settings Navidrome serves it with (all but its
- * port): { folder, manifest, env, remove }.
+ * port): { folder, manifest, env, remove }. `empty`: no database at all, so Navidrome starts as a new server without
+ * users (with the same settings and music folder).
  */
-export async function goldenCopy({ data } = {}) {
+export async function goldenCopy({ data, empty = false } = {}) {
   const manifest = await readManifest();
   const folder = data ?? join(WORK, 'runs', `${process.pid}-${Date.now()}-${runs++}`);
   await rm(folder, { recursive: true, force: true });
   await mkdir(folder, { recursive: true });
-  await copyFile(join(GOLDEN, 'navidrome.db'), join(folder, 'navidrome.db'));
+  if (!empty) await copyFile(join(GOLDEN, 'navidrome.db'), join(folder, 'navidrome.db'));
   const env = { ...manifest.server.env, ND_DATAFOLDER: folder, ND_CACHEFOLDER: join(folder, 'cache'), ND_SCANNER_SCANONSTARTUP: 'false' };
   // Windows lets go of a stopped server's files a moment after it is gone
   const remove = () => rm(folder, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
@@ -34,8 +35,8 @@ export async function goldenCopy({ data } = {}) {
 }
 
 /** Starts Navidrome on a copy of the golden database: { url, stop, data, manifest }. `env`: settings over the golden ones. */
-export async function serveGolden({ port, data, navidrome, env = {} } = {}) {
-  const copy = await goldenCopy({ data });
+export async function serveGolden({ port, data, navidrome, env = {}, empty = false } = {}) {
+  const copy = await goldenCopy({ data, empty });
   const { manifest, folder } = copy;
   const p = port ?? await freePort();
   const nd = await startNavidrome(navidrome ?? manifest.server.navidrome, { ...copy.env, ...env, ND_PORT: String(p) });

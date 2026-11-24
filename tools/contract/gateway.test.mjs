@@ -121,12 +121,15 @@ test('Navidrome never sees what the Rust server refused, nor the credentials of 
   const rustLog = rust.log();
   for (const params of refused) assert.ok(!rustLog.includes(params.mark), `Navidrome never saw ${params.mark}`);
   for (const params of accepted) assert.ok(rustLog.includes(params.mark), `Navidrome answered ${params.mark}`);
-  assert.equal(count(rustLog, 'API: Invalid login'), 0, 'Navidrome refused no sign-in: none reached it');
+  // (but for the one the Rust server tries itself when it starts, as nobody, to have Navidrome open its user store)
+  const refusedByNavidrome = rustLog.split(String.fromCharCode(10)).filter(line => line.includes('API: Invalid login') && !line.includes('sonus-server-start-probe'));
+  assert.equal(refusedByNavidrome.length, 0, 'Navidrome refused no sign-in: none reached it');
   assert.equal(count(rustLog, 'Invalid API key'.concat('"')), 0);
   for (const s of secrets) {
     assert.ok(!rustLog.includes(s) && !rustLog.includes(encodeURIComponent(s)), 'no credential is in Navidrome’s log, nor in the gateway’s');
   }
-  assert.ok(!/[?&](p|t|s|apiKey)=/.test(rustLog), 'no credential parameter reached Navidrome');
+  const fromClients = rustLog.split(String.fromCharCode(10)).filter(line => !line.includes('sonus-server-start-probe')).join(' ');
+  assert.ok(!/[?&](p|t|s|apiKey)=/.test(fromClients), 'no credential parameter reached Navidrome');
   assert.ok(count(rustLog, 'Subsonic: invalid sign-in') >= 3, 'the Rust server refused them, and says so');
 });
 

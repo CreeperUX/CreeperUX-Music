@@ -11,6 +11,7 @@ pub mod gateway;
 pub mod gotime;
 pub mod id;
 pub mod jwt;
+pub mod library;
 pub mod routes;
 pub mod secrets;
 pub mod startup;

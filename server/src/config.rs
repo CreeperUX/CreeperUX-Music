@@ -71,6 +71,62 @@ pub struct Shared {
     pub enable_gravatar: bool,
     /// `DevAutoLoginUsername`, empty when unset: Navidrome's development setting that signs everyone in as this user.
     pub dev_auto_login_username: String,
+    /// The settings that change what the library's answers look like (`library`).
+    pub library: LibraryOptions,
+}
+
+/// Navidrome's settings that change the answers of the library methods answered here (`library`), with Navidrome's
+/// defaults (`conf/configuration.go`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LibraryOptions {
+    /// `Subsonic.AppendSubtitle` (default on): a song's title is followed by its subtitle tag.
+    pub append_subtitle: bool,
+    /// `Subsonic.AppendAlbumVersion` (default on): an album's name is followed by its version tag.
+    pub append_album_version: bool,
+    /// `Subsonic.EnableAverageRating` (default on): `averageRating` is part of the answers.
+    pub enable_average_rating: bool,
+    /// `Subsonic.ArtistParticipations` (default off): an artist's albums include those they only appear on.
+    pub artist_participations: bool,
+    /// `Subsonic.LegacyClients` (default `DSub`): clients that get no OpenSubsonic fields.
+    pub legacy_clients: String,
+    /// `Subsonic.MinimalClients` (default `SubMusic`): clients that get a song's id and title only.
+    pub minimal_clients: String,
+    /// `PreferSortTags` (default off): sort tags come before the names made for ordering, in `sortName` and in lists.
+    pub prefer_sort_tags: bool,
+    /// `EnableNaturalSorting` (default off): numbers inside names sort by their value.
+    pub enable_natural_sorting: bool,
+    /// `RecentlyAddedByModTime` (default off): "created" and the newest list go by a file's change time.
+    pub recently_added_by_mod_time: bool,
+    /// `AlbumPlayCountMode` is `normalized` (default `absolute`): an album's play count is divided by its songs.
+    pub normalized_album_play_count: bool,
+    /// `EnableMediaFileCoverArt` (default on): a song with a picture of its own shows it.
+    pub enable_media_file_cover_art: bool,
+    /// `IgnoredArticles` (default `The El La Los Las Le Les Os As O A`).
+    pub ignored_articles: String,
+    /// `Search.Backend` is `legacy` (default `fts`), and `Search.FullString` (default off).
+    pub legacy_search: bool,
+    pub search_full_string: bool,
+}
+
+impl Default for LibraryOptions {
+    fn default() -> Self {
+        LibraryOptions {
+            append_subtitle: true,
+            append_album_version: true,
+            enable_average_rating: true,
+            artist_participations: false,
+            legacy_clients: "DSub".into(),
+            minimal_clients: "SubMusic".into(),
+            prefer_sort_tags: false,
+            enable_natural_sorting: false,
+            recently_added_by_mod_time: false,
+            normalized_album_play_count: false,
+            enable_media_file_cover_art: true,
+            ignored_articles: "The El La Los Las Le Les Os As O A".into(),
+            legacy_search: false,
+            search_full_string: false,
+        }
+    }
 }
 
 impl std::fmt::Debug for Shared {
@@ -87,6 +143,7 @@ impl std::fmt::Debug for Shared {
             .field("session_timeout", &self.session_timeout)
             .field("enable_gravatar", &self.enable_gravatar)
             .field("dev_auto_login_username", &self.dev_auto_login_username)
+            .field("library", &self.library)
             .finish()
     }
 }
@@ -104,6 +161,7 @@ impl Default for Shared {
             session_timeout: DEFAULT_SESSION_TIMEOUT,
             enable_gravatar: false,
             dev_auto_login_username: String::new(),
+            library: LibraryOptions::default(),
         }
     }
 }
@@ -248,6 +306,31 @@ impl Config {
                 None => defaults.enable_gravatar,
             },
             dev_auto_login_username: nd.get("devautologinusername")?.unwrap_or_default(),
+            library: {
+                let d = defaults.library;
+                LibraryOptions {
+                    append_subtitle: nd.get_bool("subsonic.appendsubtitle")?.unwrap_or(d.append_subtitle),
+                    append_album_version: nd.get_bool("subsonic.appendalbumversion")?.unwrap_or(d.append_album_version),
+                    enable_average_rating: nd.get_bool("subsonic.enableaveragerating")?.unwrap_or(d.enable_average_rating),
+                    artist_participations: nd.get_bool("subsonic.artistparticipations")?.unwrap_or(d.artist_participations),
+                    legacy_clients: nd.get("subsonic.legacyclients")?.unwrap_or(d.legacy_clients),
+                    minimal_clients: nd.get("subsonic.minimalclients")?.unwrap_or(d.minimal_clients),
+                    prefer_sort_tags: nd.get_bool("prefersorttags")?.unwrap_or(d.prefer_sort_tags),
+                    enable_natural_sorting: nd.get_bool("enablenaturalsorting")?.unwrap_or(d.enable_natural_sorting),
+                    recently_added_by_mod_time: nd.get_bool("recentlyaddedbymodtime")?.unwrap_or(d.recently_added_by_mod_time),
+                    // Navidrome compares the value as written: anything but "normalized" counts plays as they are
+                    normalized_album_play_count: nd.get("albumplaycountmode")?.is_some_and(|mode| mode == "normalized"),
+                    enable_media_file_cover_art: nd.get_bool("enablemediafilecoverart")?.unwrap_or(d.enable_media_file_cover_art),
+                    ignored_articles: nd.get("ignoredarticles")?.unwrap_or(d.ignored_articles),
+                    // Navidrome: trimmed and lowercased; anything but "legacy" is the FTS5 search
+                    legacy_search: nd.get("search.backend")?.is_some_and(|backend| backend.trim().eq_ignore_ascii_case("legacy")),
+                    search_full_string: match nd.get_bool("search.fullstring")? {
+                        Some(v) => v,
+                        // the option's old name, which Navidrome still reads when the new one is set nowhere
+                        None => nd.get_bool("searchfullstring")?.unwrap_or(d.search_full_string),
+                    },
+                }
+            },
         };
 
         let (upstream, navidrome, upstream_user_header) = match get(var, "SONUS_NAVIDROME_URL") {
@@ -491,6 +574,36 @@ mod tests {
 
     fn env(c: &Config) -> HashMap<String, String> {
         c.navidrome.as_ref().unwrap().env.iter().cloned().collect()
+    }
+
+    #[test]
+    fn the_librarys_settings_are_navidromes() {
+        let defaults = load(&[], &[], None).unwrap().shared.library;
+        assert_eq!(defaults, LibraryOptions::default());
+        assert!(defaults.append_subtitle && defaults.append_album_version && defaults.enable_average_rating && defaults.enable_media_file_cover_art);
+        assert!(
+            !defaults.prefer_sort_tags && !defaults.enable_natural_sorting && !defaults.recently_added_by_mod_time && !defaults.normalized_album_play_count
+        );
+        assert_eq!((defaults.legacy_clients.as_str(), defaults.minimal_clients.as_str()), ("DSub", "SubMusic"));
+        // from the file (a table, or dotted), and the environment over it
+        let file = "PreferSortTags = true\nAlbumPlayCountMode = 'normalized'\nSearchFullString = true\n[Subsonic]\nAppendSubtitle = false\n\
+                    LegacyClients = 'A,B'\n[Search]\nBackend = ' Legacy '";
+        let env = [
+            ("ND_SUBSONIC_APPENDALBUMVERSION", "false"),
+            ("ND_ENABLENATURALSORTING", "1"),
+            ("ND_RECENTLYADDEDBYMODTIME", "true"),
+            ("ND_SUBSONIC_LEGACYCLIENTS", "C"),
+        ];
+        let set = load(&env, &[], Some(file)).unwrap().shared.library;
+        assert!(set.prefer_sort_tags && set.normalized_album_play_count && set.enable_natural_sorting && set.recently_added_by_mod_time);
+        assert!(!set.append_subtitle && !set.append_album_version);
+        assert_eq!(set.legacy_clients, "C", "the environment outranks the file");
+        assert!(set.legacy_search, "trimmed and in any case, as Navidrome reads it");
+        assert!(set.search_full_string, "the option's old name still counts");
+        // anything but "normalized" counts plays as they are; a yes-or-no setting must be one
+        assert!(!load(&[("ND_ALBUMPLAYCOUNTMODE", "Normalized")], &[], None).unwrap().shared.library.normalized_album_play_count);
+        assert!(load(&[("ND_PREFERSORTTAGS", "maybe")], &[], None).is_err());
+        assert!(!load(&[("ND_SEARCH_FULLSTRING", "false")], &[], Some("SearchFullString = true")).unwrap().shared.library.search_full_string);
     }
 
     #[test]

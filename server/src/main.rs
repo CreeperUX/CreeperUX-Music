@@ -71,7 +71,7 @@ async fn main() -> ExitCode {
         upstream: config.upstream.clone(),
         trusted: config.trusted,
         user_header: config.user_header,
-        upstream_user_header: config.upstream_user_header,
+        upstream_user_header: config.upstream_user_header.clone(),
         base_path: config.base_path.clone(),
         checks_sign_ins,
     };
@@ -79,14 +79,16 @@ async fn main() -> ExitCode {
     let (failed_tx, mut failed_rx) = tokio::sync::mpsc::channel::<String>(1);
     if navidrome.is_some() {
         let (gateway, upstream, base_path, shared) = (gateway.clone(), config.upstream.clone(), config.base_path.clone(), config.shared.clone());
+        let user_header = config.upstream_user_header.clone();
         tokio::spawn(async move {
             watch_until_ready(upstream.clone(), ready).await;
-            match startup::local(&shared, &upstream, &base_path).await {
+            match startup::local(&shared, &upstream, &base_path, &user_header).await {
                 Ok(local) => {
                     gateway.set_connect(local.connect);
+                    gateway.set_library(local.library);
                     gateway.set_subsonic(local.subsonic);
                     gateway.set_auth(local.auth);
-                    info!("Subsonic sign-ins are checked here, and /auth and Sonus Connect version 2 are answered here");
+                    info!("Subsonic sign-ins are checked here; /auth, Sonus Connect version 2 and the library reads are answered here");
                 }
                 Err(e) => {
                     let _ = failed_tx.send(e).await;

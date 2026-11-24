@@ -12,6 +12,8 @@
   },
   "knownDifferences": [
     { "test": "CORS preflight", "why": "the demo does not answer OPTIONS preflights" },
+    { "test": "getAlbumList2 random: a pass over its pages", "why": "the demo shuffles anew for every request, so the pages of one pass do not fit together" },
+    { "test": "getAlbumList2 says how many albums the whole list has", "why": "the demo sends no X-Total-Count" },
     { "test": "a user without a password or token is error 40", "why": "the demo answers 10 (a missing parameter); Navidrome checks it as a wrong password" },
     { "test": "a missing parameter of a method is error 10", "why": "the demo answers 70 (not found) for a missing id" },
     { "test": "the user name signs in in any case", "why": "the demo's user names are case-sensitive" },

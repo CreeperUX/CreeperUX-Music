@@ -112,6 +112,17 @@
 
 ### 阶段 3：曲库读取（L）
 
+第 1 部分已完成（2026-11-25）：响应的基础（Go 的 JSON 写法、专辑和歌曲的字段、按用户的收藏和播放数据、每个用户能看到的范围、会改变输出的配置项），以及 `ping`、`getSong`、`getAlbum`、`getAlbumList2` 四个接口。做了什么、哪些请求仍交给 Go 及原因、测了什么，见 `server/README.md` 的 “The library's reads”；安全上的说明见 `server/SECURITY.md`。
+
+- **已定的做法**（第 1 部分）：
+  - **只做 JSON**：要 XML 或 JSONP 的请求照旧交给 Go（已由网关核对过登录）。
+  - **拿不准就交给 Go**：Sonus 客户端不发的参数（`musicFolderId`）、设了强制转码的播放器、Go 要向操作系统查询类型的文件后缀、Rust 读法可能与 Go 不同的数据行、读库出错，一律原样转给 Go，不做近似。
+  - **播放器登记仍归 Go**（到阶段 4 再搬）：Rust 回答一个请求前，先以该用户的身份向 Go 发一次 `ping`，带上客户端名、Cookie、`User-Agent` 和客户端地址，由 Go 按自己的规则找到或新建播放器，Rust 把 Go 回的 Cookie 原样交给客户端。结果每个客户端每分钟记一次（Go 自己也是每分钟最多写一次播放器），播放器的设置（如 `ReportRealPath`）每次请求都重新读库。所以 Go 的日志里，一个客户端的读取只表现为每分钟一次 `ping`。
+  - **最后访问时间**：Rust 回答的请求由 Rust 写，频率和 Go 一样（每个用户每分钟最多一次）。
+  - **随机专辑列表**：种子存在 Rust 的内存里，规则和 Go 一样（从头取就换一个新顺序，同一轮翻页彼此衔接）；顺序本身和 Go 的不同（两边都是随机）。
+  - **证明是 Rust 回答的**：调试版在回复里加 `X-Sonus-Answered: rust` 头，差分工具逐条核对；正式镜像不带这个头。
+- **实测**（冻结版 Navidrome 0.64.2-sonus.10）：差分 249 条请求全部一致，其中 124 条由 Rust 自己回答；契约测试 131 项全过；把 Go 的日志开到 debug，被接管的请求在 Go 的日志里没有任何痕迹，只有一次登记用的 `ping`。
+- **还没做的**：第 2 部分（`search3`、`getStarred2`、歌单、`getPlayQueue`）、第 3 部分（`getLyricsBySongId`、`getCoverArt` 的读取、`getScanStatus`）；正式数据库副本上的差分；Windows 客户端对着 Rust 服务器的验收（三部分都完成后跑）。
 - **要接管的接口**：`ping`、`getScanStatus`、`getAlbumList2`、`getAlbum`、`getSong`、`search3`、`getPlaylists`/`getPlaylist`、`getPlayQueue`、`getStarred2`、`getLyricsBySongId`，以及 `getCoverArt` 的读取部分（Rust 没命中时交回 Go）。
 - **`search3`**：既要支持空查询分页（客户端靠它同步整个曲库），也要移植 FTS5 搜索。
 - **智能歌单**：两种做法。
@@ -174,7 +185,7 @@
 - **两个进程写同一个 SQLite**：Go 的接口、Go 的扫描子进程和 Rust 同时写。照阶段 2 的连接规则来；扫描期间写入会排队等待。
 - **Rust 依赖 SQLite 的两个功能**：Rust 必须带 FTS5 和 JSON1。没有 FTS5，任何写曲目、专辑、艺人表的操作都会因触发器而失败。阶段 0 先确认 rusqlite 自带的 SQLite 包含 FTS5。
 - **逐字节一致**：时间戳格式（Go 的写法是 `2006-01-02 15:04:05.999999999-07:00`，按字符串比较）、ID 编码、排序规则、搜索语法。都靠差分测试兜住。
-- **Go 的缓存**：Go 可能缓存了 Rust 会写的表，这一点还没确认，要在阶段 3 前查清。
+- **Go 的缓存**：Go 可能缓存了 Rust 会写的表，这一点还没确认。阶段 3 只读不写（除了最后访问时间，Go 不缓存它），所以推迟到阶段 4 前查清。
 - **许可证**：照着 Navidrome 逻辑移植的 Rust 代码，属于 Navidrome（GPL-3.0）的衍生作品。
   - GPL-3.0 和 AGPL-3.0 允许合在一起（两份许可证的第 13 条），但这类文件要保留 Navidrome 的版权说明。
   - 只参考协议文档、从头写的部分不受此限。

@@ -12,7 +12,7 @@ pub const MAX_FORM_BYTES: usize = 10 << 20;
 /// far: requests with one are Navidrome's to check.)
 pub const CREDENTIALS: [&str; 4] = ["p", "t", "s", "apiKey"];
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Params {
     /// Decoded, in order: the form's, then the query's.
     pairs: Vec<(Vec<u8>, Vec<u8>)>,
@@ -36,6 +36,11 @@ impl Params {
 
     pub fn has(&self, name: &str) -> bool {
         !self.get(name).is_empty()
+    }
+
+    /// Whether the parameter is there at all, with a value or without (Go: `r.URL.Query()[name]`).
+    pub fn names(&self, name: &str) -> bool {
+        self.pairs.iter().any(|(key, _)| key == name.as_bytes())
     }
 }
 

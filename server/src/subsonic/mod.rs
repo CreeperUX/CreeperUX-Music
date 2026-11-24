@@ -184,8 +184,9 @@ pub enum Outcome {
     Respond(Response<Body>),
     /// Navidrome's to decide, as the request came.
     Untouched(Body),
-    /// Signed in: on to Navidrome as `user`, with this target and body (the credentials removed).
-    SignedIn { path_and_query: String, body: Body, content_length: Option<usize>, user: HeaderValue },
+    /// Signed in: on to Navidrome as `user`, with this target and body (the credentials removed). `who` and `params`
+    /// are for the methods answered here instead (library/mod.rs).
+    SignedIn { path_and_query: String, body: Body, content_length: Option<usize>, user: HeaderValue, who: SignedIn, params: Params },
 }
 
 /// Why `identify` names no user.
@@ -286,9 +287,9 @@ impl Subsonic {
             Some(form) => {
                 let stripped = params::without(&form, &CREDENTIALS);
                 let length = stripped.len();
-                Outcome::SignedIn { path_and_query, body: full(Bytes::from(stripped)), content_length: Some(length), user: user_header }
+                Outcome::SignedIn { path_and_query, body: full(Bytes::from(stripped)), content_length: Some(length), user: user_header, who: user, params }
             }
-            None => Outcome::SignedIn { path_and_query, body, content_length: None, user: user_header },
+            None => Outcome::SignedIn { path_and_query, body, content_length: None, user: user_header, who: user, params },
         }
     }
 
@@ -426,7 +427,7 @@ impl Subsonic {
     }
 
     /// As Navidrome's `UpdateLastAccessMiddleware` does for every signed-in request it answers.
-    async fn touch_last_access(&self, user_id: &str) {
+    pub async fn touch_last_access(&self, user_id: &str) {
         {
             let mut written = self.last_access.lock().expect("the last-access lock");
             let now = Instant::now();

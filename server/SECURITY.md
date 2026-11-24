@@ -280,6 +280,59 @@ their row goes with them (`ON DELETE CASCADE`).
 **Origins.** No `Origin` check: the WebSocket is opened with credentials in its URL, not with cookies, so a page of
 another origin has nothing to ride on (the same as the Subsonic API's open CORS).
 
+## The library's reads
+
+`src/library/`; what is answered is in `README.md`, "The library's reads". Read-only: the only write is the user's
+last access, as for `tokenInfo`.
+
+**Who reads.** Only a request the sign-in check let through gets here (`Outcome::SignedIn`), as the user it signed in
+as; a refused request is answered before anything is read (`tests/library.rs`). A session token (`jwt`) and a trusted
+proxy's user are still Navidrome's, as for every Subsonic method.
+
+**What a user can read: what Navidrome would show them, and nothing else.**
+
+- **Libraries.** The queries carry Navidrome's own two filters (`query.rs`): the libraries granted to the user
+  (`user_library`), and for anyone but an admin who is not granted every library, the subquery over `user_library`.
+  With one library (decision 4) that is: an admin sees it, anyone else sees it when it is granted. A user without it
+  gets 70 for a song or an album and empty lists (`tests/library.rs`).
+- **Other users' state.** Stars, ratings, play counts and bookmarks are joined for the signed-in user's id only, which
+  comes from the sign-in check, never from the request.
+- **By id.** `getSong` and `getAlbum` answer by id whatever the item is: an item marked missing is shown, as Navidrome
+  shows it (lists leave missing ones out, as Navidrome's do).
+- **The user's row is read again** for every request (admin or not, the libraries): a change in Navidrome counts at
+  the next request. A user deleted since the sign-in check gets Navidrome's answer.
+
+**The queries.** Their text is built from constants: the list types, the sort keys and the settings choose among
+fixed fragments, and no part of a request is ever pasted into SQL. Everything a request brings is bound as an
+argument: ids, years, the genre. The genre is matched with LIKE, as Navidrome matches it, so `%` and `_` in it are
+wildcards: over genre names only, of albums the user may see anyway.
+
+**The registration at Navidrome.** For a request answered here the server sends Navidrome a `ping` under the
+gateway's own user header (`player.rs`): only after the sign-in check, with the name that check produced, to
+`127.0.0.1` only. It forwards the client's `Cookie` and `User-Agent` (what Navidrome finds the player by) and the
+client address the gateway decided; never the credentials, which are not part of it. The cookie Navidrome answers
+with is handed to the client and remembered for a minute under the user's name, the client name, the `User-Agent` and
+the cookies sent: a request by another user never matches that entry, and the remembered player is used only while
+its row is still that user's and that client's. The cookie itself is Navidrome's (`HttpOnly`, `SameSite=Strict`): it
+names a player, and signs nobody in.
+
+**What the answers reflect.** Text from the database (tags, names) and, in errors, a parameter's value (`type 'x'
+not implemented`, `expected integer, got 'x'`), always inside JSON strings written with Go's escaping (`<`, `>`, `&`
+as `\u003c`…), with `Content-Type: application/json` and `nosniff`. JSONP and XML are not made here.
+
+**Who answered** is marked on the answer (`X-Sonus-Answered: rust`) in debug builds only, for the tests. A release
+build, which is what the image holds, sends Navidrome's headers and nothing more.
+
+**Cost.** A list is at most 500 albums, or all of them for a `size` of 0 or less, as in Navidrome; the random list
+reads every visible album's id first. Each request is one blocking database task, as a sign-in check is; nothing caps
+their number, as nothing does in Navidrome. Answers are compressed (gzip) for clients that ask, in memory, after they
+are made. Remembered players: at most 4,096 entries, each a few hundred bytes, dropped when older than a minute.
+Random seeds: one number per user who asked for a random list, until the server stops. Only signed-in users reach any
+of it.
+
+**When this server is not sure**, it does not answer: the request goes to Navidrome, signed in, as before this phase
+(the list is in the README). That path adds nothing: it is the path every method took until now.
+
 ## Secrets
 
 - **Passwords are stored reversibly**, by Navidrome's design: Subsonic's token sign-in (`t` = md5(password ‖ salt))
@@ -299,7 +352,7 @@ another origin has nothing to ride on (the same as the Subsonic API's open CORS)
 ## The database
 
 - Opened read-write. Written: an app password's `last_used_at`/`last_used_by` (as Navidrome notes it), a user's
-  `last_access_at` for `tokenInfo` and `last_login_at` at a web sign-in, at start the key hash of app passwords made
+  `last_access_at` for `tokenInfo` and for the library's reads answered here, and `last_login_at` at a web sign-in, at start the key hash of app passwords made
   before API keys existed, the first admin (a `user` row and its `user_library` rows), and the fork's own tables
   (`sonus_two_factor`, `sonus_recovery_code`, `sonus_app_password`). Each write is one short `BEGIN IMMEDIATE`
   transaction; every statement is parameterized.
@@ -307,6 +360,8 @@ another origin has nothing to ride on (the same as the Subsonic API's open CORS)
   `sonus_connect_session` (a user's Connect session, as JSON). Sonus Connect reads `media_file`, `user` and
   `user_library` and writes only its own table. What it stores came from the user's own devices and is read back as
   data: parsed as JSON, checked for shape and size, and a row that does not pass starts an empty session.
+- The library's reads (above) read `album`, `media_file`, `annotation`, `bookmark`, `item_artwork`, `album_tags`,
+  `tag`, `library`, `user`, `user_library` and `player`, and write none of them.
 - No change to Navidrome's schema, ever, and no VACUUM; the schema is checked at start and the server refuses any
   other. The server's own tables are additive (`CREATE TABLE IF NOT EXISTS`); a `sonus_connect_session` row refers to
   its user (`ON DELETE CASCADE`), which adds one indexed lookup to Navidrome's deleting of a user and nothing else.
@@ -323,7 +378,7 @@ another origin has nothing to ride on (the same as the Subsonic API's open CORS)
 
 ## The answers given here
 
-- On `/rest`: errors and `tokenInfo` only, in Navidrome's bytes. Reflected input: the `callback` of a JSONP answer, accepted only
+- On `/rest`: errors, `tokenInfo`, and the library's reads (their own section above), in Navidrome's bytes. Reflected input: the `callback` of a JSONP answer, accepted only
   when it matches Navidrome's own pattern (`^[a-zA-Z_$][a-zA-Z0-9_$.]*$`), else a JSON error; the missing parameter's
   name, which is one of three constants; the user name in `tokenInfo`, from the database, escaped as Go's JSON and XML
   encoders escape it.
@@ -352,7 +407,7 @@ another origin has nothing to ride on (the same as the Subsonic API's open CORS)
 
 `README.md`, "Sign-ins" and "The `/auth` routes", list them: constant-time comparison; an undecryptable password
 matches nothing; both keys tried for passwords; a user name that is not UTF-8 refused here; a malformed
-`Content-Type` answered after the sign-in check instead of before; the gateway's own answers uncompressed; key hashes
+`Content-Type` answered after the sign-in check instead of before; the gateway's own sign-in answers uncompressed; key hashes
 filled at start; one first admin when several are asked for at once; the QR code's pixels; a simpler title-casing of
 the first admin's display name; 413 for a body cut off at the limit. None widens what signs in: each either refuses
 more or changes nothing about who is accepted, except the second key, which only opens what was sealed with the
@@ -365,6 +420,10 @@ own: that Navidrome has its own settings and database, and the gateway cannot kn
 gateway alone. Everything passes through, as in phase 0; only the 4 MiB limit on bodies to `/api` applies.
 
 ## Not covered by tests
+
+- The library's reads: settings other than the defaults against the real Navidrome (unit and integration tests
+  only); a scan writing while lists are read; a database of production's size; `ReportRealPath` answered here against
+  the real Navidrome (Linux only: the checks ran on Windows, where such requests go to Navidrome).
 
 - The image and Linux builds are built by CI, not run by these tests; the checks ran on Windows.
 - `BaseURL` with a path in front of the real Navidrome (tested with the fake one).

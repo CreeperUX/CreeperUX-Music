@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "server": {
+    "kind": "demo",
+    "deviceApproval": "demo-hook",
+    "deviceApprover": "demo"
+  },
+  "primaryUser": "demo",
+  "users": {
+    "demo": { "username": "demo", "password": "demo" },
+    "friend": { "username": "friend", "password": "friend" }
+  },
+  "knownDifferences": [
+    { "test": "CORS preflight", "why": "the demo does not answer OPTIONS preflights" },
+    { "test": "a user without a password or token is error 40", "why": "the demo answers 10 (a missing parameter); Navidrome checks it as a wrong password" },
+    { "test": "a missing parameter of a method is error 10", "why": "the demo answers 70 (not found) for a missing id" },
+    { "test": "a body that is not JSON, or a revoke without a key, is 422", "why": "the demo answers a revoke without a key with 404" },
+    { "test": "getSimilarSongs2 of an artist", "why": "the demo only knows songs similar to a song" },
+    { "test": "as long as the song’s size", "why": "the demo's sizes are made up; it streams a generated WAV of another size" },
+    { "test": "a suffix Range", "why": "the demo does not answer bytes=-N" },
+    { "test": "makes a playlist public", "why": "the demo's updatePlaylist ignores public" },
+    { "test": "star and unstar an album and an artist", "why": "the demo stars songs only" },
+    { "test": "scrobble’s time is when the song was played", "why": "the demo takes the time it received the scrobble" }
+  ]
+}

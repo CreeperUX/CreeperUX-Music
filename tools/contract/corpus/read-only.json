@@ -1,0 +1,75 @@
+{
+  "description": "Read-only requests on the golden database: what Sonus clients read, every sign-in, the fixture library's hard cases, errors. Nothing here changes the database (app-password and API-key use only notes when they were last used).",
+  "volatile": [
+    "subsonic-response.serverVersion"
+  ],
+  "unordered": [
+    "subsonic-response.**.artist.*.roles"
+  ],
+  "requests": [
+    { "name": "ping", "method": "ping" },
+    { "name": "ping (form post)", "method": "ping", "post": true },
+    { "name": "ping with the password", "method": "ping", "auth": { "user": "listener", "as": "password" } },
+    { "name": "ping with enc:", "method": "ping", "auth": { "user": "listener", "as": "enc" } },
+    { "name": "ping with a wrong password", "method": "ping", "auth": "none", "params": { "u": "{{user.listener}}", "p": "wrong" } },
+    { "name": "ping without u", "method": "ping", "auth": "none", "params": { "p": "x" } },
+    { "name": "ping with u alone", "method": "ping", "auth": "none", "params": { "u": "{{user.listener}}" } },
+    { "name": "ping as the two-step user with the account password", "method": "ping", "auth": { "user": "secure", "as": "password" } },
+    { "name": "ping as the two-step user with an app password", "method": "ping", "auth": { "user": "secure", "as": "appPassword" } },
+    { "name": "tokenInfo with an API key", "method": "tokenInfo", "auth": { "user": "secure", "as": "apiKey" } },
+    { "name": "ping with an API key and u", "method": "ping", "auth": { "user": "secure", "as": "apiKey" }, "params": { "u": "{{user.secure}}" } },
+    { "name": "ping with an unknown API key", "method": "ping", "auth": "none", "params": { "apiKey": "no-such-key" } },
+    { "name": "getOpenSubsonicExtensions without signing in", "method": "getOpenSubsonicExtensions", "auth": "none" },
+    { "name": "getScanStatus", "method": "getScanStatus" },
+
+    { "name": "getAlbumList2 alphabeticalByName", "method": "getAlbumList2", "params": { "type": "alphabeticalByName", "size": 500 } },
+    { "name": "getAlbumList2 alphabeticalByName, a page", "method": "getAlbumList2", "params": { "type": "alphabeticalByName", "size": 3, "offset": 3 } },
+    { "name": "getAlbumList2", "method": "getAlbumList2", "params": { "type": "{{$}}", "size": 50 }, "for": ["newest", "alphabeticalByArtist", "starred", "frequent", "recent", "highest"] },
+    { "name": "getAlbumList2 byYear", "method": "getAlbumList2", "params": { "type": "byYear", "fromYear": 2015, "toYear": 2020 } },
+    { "name": "getAlbumList2 byGenre", "method": "getAlbumList2", "params": { "type": "byGenre", "genre": "Pop" } },
+
+    { "name": "search3 empty query, everything", "method": "search3", "params": { "query": "", "songCount": 500, "songOffset": 0, "albumCount": 0, "artistCount": 0 } },
+    { "name": "search3 empty query, a page", "method": "search3", "params": { "query": "", "songCount": 4, "songOffset": 8, "albumCount": 0, "artistCount": 0 } },
+    { "name": "search3 empty query (form post)", "method": "search3", "post": true, "params": { "query": "", "songCount": 500, "albumCount": 0, "artistCount": 0 } },
+    { "name": "search3", "method": "search3", "params": { "query": "{{$}}", "songCount": 200, "albumCount": 60, "artistCount": 30 }, "for": ["Light", "Greatest Hits", "ete", "uber", "夜行", "雨の日", "별빛", "ince", "Işık", "kenji", "lumi"] },
+
+    { "name": "getAlbum", "method": "getAlbum", "params": { "id": "{{{{$}}}}" }, "for": ["album.normal", "album.compilation", "album.twoDiscs", "album.sameName.aurora", "album.sameName.kenji", "album.cjk", "album.accented", "album.turkish"] },
+    { "name": "getAlbum unknown", "method": "getAlbum", "params": { "id": "no-such-album" } },
+    { "name": "getSong", "method": "getSong", "params": { "id": "{{{{$}}}}" }, "for": ["track.flac", "track.embeddedCoverOverFolder", "track.syncedLyrics", "track.mp3", "track.feat", "track.artistsTag", "track.unsyncedLyrics", "track.m4a", "track.disc2", "track.m4aCover", "track.ogg", "track.opus", "track.cjk", "track.japanese", "track.korean", "track.accented", "track.umlaut", "track.tilde", "track.turkish", "track.dotlessI", "track.upperI", "track.noAlbum", "track.noArtist", "track.noTags"] },
+    { "name": "getSong unknown", "method": "getSong", "params": { "id": "no-such-song" } },
+
+    { "name": "getPlaylists", "method": "getPlaylists" },
+    { "name": "getPlaylist", "method": "getPlaylist", "params": { "id": "{{{{$}}}}" }, "for": ["playlist.own", "playlist.otherUser", "playlist.smart"] },
+    { "name": "getPlaylist unknown", "method": "getPlaylist", "params": { "id": "no-such-playlist" } },
+    { "name": "getPlayQueue", "method": "getPlayQueue" },
+    { "name": "getStarred2", "method": "getStarred2" },
+
+    { "name": "getLyricsBySongId", "method": "getLyricsBySongId", "params": { "id": "{{{{$}}}}" }, "for": ["track.syncedLyrics", "track.lrcSidecar", "track.unsyncedLyrics", "track.m4a"] },
+    { "name": "getLyricsBySongId unknown", "method": "getLyricsBySongId", "params": { "id": "no-such-song" } },
+    { "name": "getLyrics embedded", "method": "getLyrics", "params": { "artist": "Aurora Lane", "title": "Magnetic Field" } },
+    { "name": "getLyrics beside the file", "method": "getLyrics", "params": { "artist": "Aurora Lane", "title": "First Light" } },
+    { "name": "getLyrics nobody's", "method": "getLyrics", "params": { "artist": "Nobody", "title": "Nothing" } },
+    { "name": "getSimilarSongs2 of a song", "method": "getSimilarSongs2", "params": { "id": "{{track.flac}}", "count": 10 }, "unordered": ["subsonic-response.similarSongs2.song"] },
+    { "name": "getArtistInfo2", "method": "getArtistInfo2", "params": { "id": "{{{{$}}}}" }, "for": ["artist.aurora", "artist.cjk"] },
+    { "name": "getArtistInfo2 unknown", "method": "getArtistInfo2", "params": { "id": "no-such-artist" } },
+    { "name": "missing id", "method": "{{$}}", "params": {}, "for": ["getPlaylist", "star", "scrobble", "getLyricsBySongId", "stream"] },
+
+    { "name": "getCoverArt album (folder cover), as is", "method": "getCoverArt", "params": { "id": "al-{{album.folderCover}}" } },
+    { "name": "getCoverArt album, 600", "method": "getCoverArt", "params": { "id": "al-{{album.folderCover}}", "size": 600 } },
+    { "name": "getCoverArt album, 64", "method": "getCoverArt", "params": { "id": "al-{{album.compilation}}", "size": 64 } },
+    { "name": "getCoverArt song (embedded), as is", "method": "getCoverArt", "params": { "id": "mf-{{track.embeddedCover}}" } },
+    { "name": "getCoverArt song with its own cover over the folder's", "method": "getCoverArt", "params": { "id": "mf-{{track.embeddedCoverOverFolder}}" } },
+    { "name": "getCoverArt m4a cover, 512", "method": "getCoverArt", "params": { "id": "mf-{{track.m4aCover}}", "size": 512 } },
+
+    { "name": "stream", "method": "stream", "params": { "id": "{{{{$}}}}" }, "for": ["track.mp3", "track.flac", "track.m4a", "track.ogg", "track.opus", "track.wav"] },
+    { "name": "stream Range bytes=0-99", "method": "stream", "params": { "id": "{{track.mp3}}" }, "headers": { "Range": "bytes=0-99" } },
+    { "name": "stream Range bytes=1000-", "method": "stream", "params": { "id": "{{track.flac}}" }, "headers": { "Range": "bytes=1000-" } },
+    { "name": "stream Range bytes=-50", "method": "stream", "params": { "id": "{{track.flac}}" }, "headers": { "Range": "bytes=-50" } },
+    { "name": "stream Range past the end", "method": "stream", "params": { "id": "{{track.opus}}" }, "headers": { "Range": "bytes=99999999-" } },
+    { "name": "stream format=raw", "method": "stream", "params": { "id": "{{track.ogg}}", "format": "raw" } },
+    { "name": "stream unknown", "method": "stream", "params": { "id": "no-such-song" } },
+
+    { "name": "device sign-in: poll an unknown code", "path": "/auth/device/poll", "httpMethod": "POST", "json": { "deviceCode": "no-such-device-code" } },
+    { "name": "device sign-in: revoke without a key", "path": "/auth/device/revoke", "httpMethod": "POST", "json": {} }
+  ]
+}

@@ -8,9 +8,9 @@
 
 从 GitHub 的 [Releases](https://github.com/CreeperUX/CreeperUX-Music/releases) 下载这台电脑架构的安装程序（`Sonus-<版本>-x64-setup.exe` 或 `-ARM64-setup.exe`）运行即可：只为当前用户安装，不需要管理员权限，装在 `%LOCALAPPDATA%\Programs\Sonus`。升级时再运行新版本的安装程序，登录和设置保留。
 
-程序自己会检查更新（和 Lumen 同样的做法）：启动后每天查一次 GitHub 的 Release，有新版本时右上角出现「新版本」，点它看版本说明，下载安装程序（按 GitHub 记录的 SHA-256 校验）后关闭程序、打开安装程序。仓库是私有的，所以要在「设置 › 更新」里填一个只读的 GitHub 令牌：在 GitHub 新建 fine-grained token，Repository access 只选 CreeperUX/CreeperUX-Music，权限只给 Contents: Read-only。令牌存在 Windows 凭据管理器的 `Sonus:github`。
+程序自己会检查更新（和 Lumen 同样的做法）：启动后每天查一次 GitHub 的 Release，有新版本时右上角出现「新版本」，点它看版本说明，下载安装程序（按 GitHub 记录的 SHA-256 校验）后关闭程序、打开安装程序。仓库是公开的，检查和下载都不用登录，也不用填令牌（GitHub 对不登录的请求每个网络地址每小时限 60 次，每天查一次绰绰有余）。0.5.0 及更早的版本为私有仓库保存的 GitHub 令牌（凭据管理器里的 `Sonus:github`）在新版本第一次启动时删掉。
 
-从 0.3（CreeperUX Music）升级：在旧版本里点「新版本」，或直接运行新的安装程序，都会替换旧版本（同一个 MSI 的升级）。Sonus 第一次启动时把旧的数据目录 `%LOCALAPPDATA%\CreeperUX Music` 搬到 `%LOCALAPPDATA%\Sonus`，把凭据管理器里的 `CreeperUXMusic:server`、`CreeperUXMusic:github` 改存为 `Sonus:server`、`Sonus:github`，所以不用重新登录、也不用重填令牌。开始菜单的快捷方式换成「Sonus」；固定在任务栏上的旧图标指向已删除的旧程序，需要重新固定。程序对服务器报的客户端名也从 `CreeperUX Music (<电脑名>)` 变成 `Sonus (<电脑名>)`，Navidrome 会把它记成一个新播放器（旧的那条可以在 Navidrome 的「播放器」里删掉）。
+从 0.3（CreeperUX Music）升级：在旧版本里点「新版本」，或直接运行新的安装程序，都会替换旧版本（同一个 MSI 的升级）。Sonus 第一次启动时把旧的数据目录 `%LOCALAPPDATA%\CreeperUX Music` 搬到 `%LOCALAPPDATA%\Sonus`，把凭据管理器里的 `CreeperUXMusic:server` 改存为 `Sonus:server`，所以不用重新登录（旧的 `CreeperUXMusic:github` 令牌已经用不上，直接删掉）。开始菜单的快捷方式换成「Sonus」；固定在任务栏上的旧图标指向已删除的旧程序，需要重新固定。程序对服务器报的客户端名也从 `CreeperUX Music (<电脑名>)` 变成 `Sonus (<电脑名>)`，Navidrome 会把它记成一个新播放器（旧的那条可以在 Navidrome 的「播放器」里删掉）。
 
 ## 先看演示
 
@@ -121,8 +121,8 @@ npm run check:web                               # 网页版客户端
 
 `npm run check`（`tools/e2e/acceptance.mjs`）和 Lumen 的 tools/e2e 用同样的做法，**全程静默**：
 
-- 测试实例有自己的数据目录和凭据条目 `Sonus-test:server`、`Sonus-test:github`，不碰你自己的程序和登录。测试从旧名字升级时用的是 `CreeperUXMusic-test:*`，也不碰你自己的 `CreeperUXMusic:*`。
-- 检查更新连的是本地的假 GitHub（`tools/e2e/fake-github.mjs`），测试实例下载并校验安装程序后不会运行它。
+- 测试实例有自己的数据目录和凭据条目 `Sonus-test:server`，不碰你自己的程序和登录。测试从旧名字升级时用的是 `CreeperUXMusic-test:*`，也不碰你自己的 `CreeperUXMusic:*`。
+- 检查更新连的是本地的假 GitHub（`tools/e2e/fake-github.mjs`），测试实例只在点「检查更新」时才查（启动时不自动查），下载并校验安装程序后不会运行它。
 - 窗口被 DWM 隐藏（照常渲染，但不显示、不进任务栏、不抢焦点）。所有操作都通过命名管道走程序内的测试通道，按无障碍名称找控件，不移动鼠标、不按键盘。
 - 截图由程序自己渲染（RenderTargetBitmap），保存在 `tools/e2e/.work/shots/acc-*.png`。每一轮结束都检查测试窗口仍然隐藏，并且没有成为前台窗口。
 
@@ -132,7 +132,7 @@ npm run check:web                               # 网页版客户端
 
 验收里还有一项“播放时打开别的专辑，封面照样马上去取”：XAML 自带的图片下载走 WinINet，和从同一台服务器传来的音频流共用很少的几个连接，播放期间封面会一直加载不出来。现在封面由程序自己下载（`Controls/Covers.cs`，.NET HttpClient，同一地址只请求一次，最近用过的放在 48 MB 的内存缓存里），并按它在屏幕上实际占的像素（尺寸 × 显示缩放 × 界面缩放）向服务器要 64 / 128 / 256 / 512 / 1024 中够用的一档，不会把小图放大显示。
 
-验收分十四轮：首次启动与登录、每个页面（含可访问性审查和切换 60 次页面后的内存检查）、播放（暂停、拖动、计播放次数、无缝切歌、队列、电台、DSD 转码、错误、回放增益、歌词）、歌单增删改、搜索、第二台设备接着听、跨设备控制（两台设备互相看见、遥控暂停和播放、把播放转过来）、窄窗口、服务器断开与恢复、系统媒体控制、重启与退出登录、检查更新（令牌错误、正式版和测试版、下载并校验安装程序）、从 CreeperUX Music 升级（旧名字下的登录和令牌搬过来，不用重新登录）、在浏览器中登录（允许、拒绝、取消，重启后用保存的 API 密钥登录，退出时把密钥还给服务器）。功能检查都会回读服务器状态来确认。
+验收分十四轮：首次启动与登录、每个页面（含可访问性审查和切换 60 次页面后的内存检查）、播放（暂停、拖动、计播放次数、无缝切歌、队列、电台、DSD 转码、错误、回放增益、歌词）、歌单增删改、搜索、第二台设备接着听、跨设备控制（两台设备互相看见、遥控暂停和播放、把播放转过来）、窄窗口、服务器断开与恢复、系统媒体控制、重启与退出登录、检查更新（不用令牌、请求不带凭据，正式版和测试版，下载并校验安装程序）、从 CreeperUX Music 升级（旧名字下的登录搬过来，不用重新登录；用不上的 GitHub 令牌删掉）、在浏览器中登录（允许、拒绝、取消，重启后用保存的 API 密钥登录，退出时把密钥还给服务器）。功能检查都会回读服务器状态来确认。
 演示服务器是按 Subsonic / OpenSubsonic 文档写的，**不是 Navidrome 本身**。
 
 ## 已知限制

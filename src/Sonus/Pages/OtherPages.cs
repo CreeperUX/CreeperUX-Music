@@ -355,7 +355,7 @@ public sealed class SettingsPage : View
 
     /// <summary>
     /// 设置 › 更新, as Lumen's 设置 › 关于: where things stand, 检查更新 / 安装更新, the daily check and test versions, and
-    /// the read-only GitHub token the private repository needs.
+    /// where updates come from (the public repository's releases, nothing to sign in with).
     /// </summary>
     private void AddUpdates(StackPanel section, Updates.UpdateService updates)
     {
@@ -372,48 +372,27 @@ public sealed class SettingsPage : View
         var auto = new ToggleSwitch { Header = "启动时自动检查（每天一次）", IsOn = settings.AutoCheckUpdates };
         var pre = new ToggleSwitch { Header = "接收测试版", IsOn = settings.UpdatePrerelease };
 
-        var box = new PasswordBox { Header = "GitHub 令牌", MinWidth = 320 };
-        var save = new Button { Content = "保存", Style = Ui.Style("PillButtonStyle"), VerticalAlignment = VerticalAlignment.Bottom };
-        AutomationProperties.SetName(save, "保存 GitHub 令牌");
-        var remove = new Button { Content = "移除", Style = Ui.Style("PillButtonStyle"), VerticalAlignment = VerticalAlignment.Bottom };
-        AutomationProperties.SetName(remove, "移除 GitHub 令牌");
-        var tokenRow = new Grid { ColumnSpacing = 8 };
-        foreach (var w in new[] { new GridLength(1, GridUnitType.Star), GridLength.Auto, GridLength.Auto }) tokenRow.ColumnDefinitions.Add(new ColumnDefinition { Width = w });
-        box.MaxWidth = 440; box.HorizontalAlignment = HorizontalAlignment.Stretch;
-        tokenRow.Children.Add(box);
-        Grid.SetColumn(save, 1); tokenRow.Children.Add(save);
-        Grid.SetColumn(remove, 2); tokenRow.Children.Add(remove);
-        var tokenNote = Ui.Note(Glyphs.Info, $"Sonus 的仓库是私有的，检查和下载更新需要一个只读的 GitHub 令牌：在 GitHub 新建 fine-grained token，Repository access 只选 {Core.Updates.GitHubUpdates.Repository}，权限只给 Contents: Read-only。令牌保存在 Windows 凭据管理器中。");
-        var link = new HyperlinkButton { Content = "在 GitHub 新建令牌", NavigateUri = new Uri("https://github.com/settings/personal-access-tokens/new"), Padding = new Thickness(0), Margin = new Thickness(22, -6, 0, 0) };
+        string repository = Core.Updates.GitHubUpdates.Repository;
+        var sourceNote = Ui.Note(Glyphs.Info, $"更新来自 GitHub 上 Sonus 的公开仓库（{repository}）的发布版，不用登录。");
+        var link = new HyperlinkButton { Content = "在 GitHub 上查看所有版本", NavigateUri = new Uri($"https://github.com/{repository}/releases"), Padding = new Thickness(0), Margin = new Thickness(22, -6, 0, 0) };
 
         string current = Updates.UpdateService.CurrentText;
         void Sync(string? message = null)
         {
-            bool has = updates.HasToken;
-            box.PlaceholderText = has ? "已保存（输入新的令牌可替换）" : "粘贴 GitHub 令牌（github_pat_…）";
-            remove.Visibility = has ? Visibility.Visible : Visibility.Collapsed;
-            check.IsEnabled = has;
             var available = updates.Available;
             install.Visibility = available is null ? Visibility.Collapsed : Visibility.Visible;
             string last = settings.LastUpdateCheck is { } at ? $"上次检查：{at.ToLocalTime():yyyy-MM-dd HH:mm}。" : "";
             status.Text = message ?? (available is { } r ? $"当前版本 {current}，发现新版本 {r.DisplayVersion}{(r.IsPrerelease ? "（测试版）" : "")}。"
-                : has ? $"当前版本 {current}。{last}" : $"当前版本 {current}。填写 GitHub 令牌后可以检查更新。");
+                : $"当前版本 {current}。{last}");
         }
         check.Click += async (_, _) =>
         {
             check.IsEnabled = false; ring.IsActive = true;
             try { Sync((await updates.CheckAsync()) is null ? $"当前版本 {current}，已是最新版本。" : null); }
             catch (Core.Updates.UpdateException ex) { Sync(ex.Message); }
-            finally { ring.IsActive = false; check.IsEnabled = updates.HasToken; }
+            finally { ring.IsActive = false; check.IsEnabled = true; }
         };
         install.Click += async (_, _) => { if (updates.Available is { } r) await Updates.UpdateDialog.ShowAsync(XamlRoot, updates, r); };
-        save.Click += (_, _) =>
-        {
-            if (string.IsNullOrWhiteSpace(box.Password)) return;
-            try { updates.SaveToken(box.Password.Trim()); box.Password = ""; Sync("令牌已保存，可以检查更新了。"); }
-            catch (InvalidOperationException ex) { Sync(ex.Message); }
-        };
-        remove.Click += (_, _) => { updates.RemoveToken(); Sync(); };
         auto.Toggled += (_, _) => { settings.AutoCheckUpdates = auto.IsOn; settings.Save(); };
         pre.Toggled += (_, _) => { settings.UpdatePrerelease = pre.IsOn; settings.Save(); };
         void OnAvailable() => Sync();
@@ -424,8 +403,7 @@ public sealed class SettingsPage : View
         section.Children.Add(Ui.Row(12, check, install, ring));
         section.Children.Add(auto);
         section.Children.Add(pre);
-        section.Children.Add(tokenRow);
-        section.Children.Add(tokenNote);
+        section.Children.Add(sourceNote);
         section.Children.Add(link);
     }
 

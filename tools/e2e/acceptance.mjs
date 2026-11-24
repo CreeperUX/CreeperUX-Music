@@ -8,7 +8,7 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { build, startDemoServer, TestApp, sleep, work, exeFor, credentialKept, forgetCredential, mediaSessions, formerCredentialKept, forgetFormerCredential, writeFormerCredential } from './e2e.mjs';
+import { build, startDemoServer, TestApp, sleep, work, exeFor, credentialKept, forgetCredential, mediaSessions, formerCredentialKept, forgetFormerCredential, writeFormerCredential, writeCredential } from './e2e.mjs';
 import { startFakeGitHub } from './fake-github.mjs';
 
 const args = process.argv.slice(2);
@@ -599,22 +599,17 @@ try {
   if (want('updates')) {
     round('updates', '第 11 轮：检查更新（本地的假 GitHub）');
     const statusLine = async re => (await app.texts()).find(t => re.test(t));
-    await check('设置 › 更新：没有 GitHub 令牌时说明要先填写', async () => {
+    await check('设置 › 更新：不用填任何东西，说明更新来自公开仓库', async () => {
       await app.send('nav settings');
-      await until(async () => statusLine(/填写 GitHub 令牌后可以检查更新/), 'no-token status');
+      await until(async () => statusLine(/^当前版本 \d+\.\d+\.\d+。/), 'status');
+      assert((await app.texts()).some(t => t.startsWith('更新来自 GitHub 上 Sonus 的公开仓库')), '没有说明更新从哪里来');
+      assert(!(await hasName('GitHub 令牌')) && !(await hasName('保存 GitHub 令牌')), '还有填写 GitHub 令牌的地方');
     });
-    await check('令牌不对：说明原因', async () => {
-      await app.send('set GitHub 令牌=wrong-token'); await app.invoke('保存 GitHub 令牌');
-      assert(credentialKept('github'), '令牌没有存进凭据管理器');
-      await app.invoke('检查更新');
-      await until(async () => statusLine(/GitHub 令牌无效/), 'bad-token message');
-    });
-    await check('令牌正确：找到正式版 9.9.0（不提示测试版和草稿），右上角出现“新版本”', async () => {
-      await app.send('set GitHub 令牌=gh-token'); await app.invoke('保存 GitHub 令牌');
+    await check('检查更新：找到正式版 9.9.0（不提示测试版和草稿），右上角出现“新版本”；请求不带任何凭据', async () => {
       await app.invoke('检查更新');
       await until(async () => statusLine(/发现新版本 9\.9\.0。$/), '9.9.0 found');
       await until(async () => hasName('更新到 Sonus 9.9.0'), 'the top bar pill');
-      assert(github.log.requests.some(r => r.path.endsWith('/releases') && r.auth === 'Bearer gh-token'), '列表请求没有带令牌');
+      assert(github.log.requests.some(r => r.path.endsWith('/releases')) && !github.log.authSent, '列表请求带了凭据（仓库是公开的，不该带）');
       await app.send('scroll 62'); await sleep(300);
       await shot('settings-update');
     });
@@ -635,7 +630,7 @@ try {
       await until(async () => readFileSync(logFile, 'utf8').includes(`installer not started (${name})`), 'downloaded and checked', 20000);
       const file = join(app.data, 'update', name);
       assert(createHash('sha256').update(readFileSync(file)).digest('hex') === github.sha256(name), '下载的文件和 GitHub 上的不一样');
-      assert(!github.log.tokenLeaked, '令牌被发给了下载地址（应只发给 GitHub 的 API）');
+      assert(!github.log.authSent, '请求带了凭据（仓库是公开的，不该带）');
       await until(async () => statusLine(/^下载完成，已校验。/), 'done status');
       await shot('update-downloaded');
       await app.invoke('以后再说');
@@ -646,26 +641,28 @@ try {
 
   // ---------------------------------------------------------------- 12. the former name (CreeperUX Music, up to 0.3)
   if (want('former')) {
-    round('former', '第 12 轮：从 CreeperUX Music（0.3）升级：登录和令牌搬到新名字下');
-    await check('旧名字下的登录和 GitHub 令牌：启动时改存为 Sonus 的，不用重新登录', async () => {
+    round('former', '第 12 轮：从 CreeperUX Music（0.3）升级：登录搬到新名字下，不再需要的 GitHub 令牌删掉');
+    await check('旧名字下的登录：启动时改存为 Sonus 的，不用重新登录；旧版本留下的 GitHub 令牌（两个名字下）删掉', async () => {
       await app.stop();
       forgetAll();
       const salt = 'former01';
       writeFormerCredential('server', 'demo', JSON.stringify({ server: server.url, user: 'demo', salt, token: md5('demo' + salt) }));
       writeFormerCredential('github', 'github', 'gh-token');
-      assert(formerCredentialKept('server') && formerCredentialKept('github'), '没写进旧名字的测试条目');
+      writeCredential('github', 'github', 'gh-token');
+      assert(formerCredentialKept('server') && formerCredentialKept('github') && credentialKept('github'), '没写进测试条目');
       app = await new TestApp('former', { demo: server.url, exe, env: appEnv }).start();
       await until(async () => (await app.send('ready')) === 'yes', 'signed in with the former sign-in', 30000);
-      assert(credentialKept() && credentialKept('github'), '新名字（Sonus-test）下没有登录或令牌');
+      assert(credentialKept(), '新名字（Sonus-test）下没有登录');
+      assert(!credentialKept('github'), 'Sonus-test:github 还在（更新已经不用令牌）');
       assert(!formerCredentialKept('server') && !formerCredentialKept('github'), '旧名字（CreeperUXMusic-test）的条目还在');
       const logText = readFileSync(join(app.data, 'app.log'), 'utf8');
-      assert(logText.includes('[former name] CreeperUXMusic-test:server → Sonus-test:server') && !logText.includes('gh-token') && !logText.includes(md5('demo' + salt)), '日志里没有迁移记录，或写进了密钥');
+      assert(logText.includes('[former name] CreeperUXMusic-test:server → Sonus-test:server') && logText.includes('[credentials] Sonus-test:github deleted') && !logText.includes('gh-token') && !logText.includes(md5('demo' + salt)), '日志里没有迁移记录，或写进了密钥');
       assert((await state()).title === '首页 · Sonus', (await state()).title);
     });
-    await check('搬过来的令牌直接能检查更新', async () => {
+    await check('没有令牌照样能检查更新', async () => {
       await app.send('nav settings');
       await app.invoke('检查更新');
-      await until(async () => (await app.texts()).some(t => /发现新版本 9\.9\.0。$/.test(t)), '9.9.0 found with the adopted token');
+      await until(async () => (await app.texts()).some(t => /发现新版本 9\.9\.0。$/.test(t)), '9.9.0 found without a token');
     });
     quiet(app);
   }

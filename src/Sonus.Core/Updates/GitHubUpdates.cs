@@ -8,7 +8,7 @@ namespace Sonus.Core.Updates;
 
 public sealed class UpdateException(string message, Exception? inner = null) : Exception(message, inner);
 
-/// <param name="ApiUrl">The asset's API address (downloads as application/octet-stream, with the token).</param>
+/// <param name="ApiUrl">The asset's API address (downloads as application/octet-stream).</param>
 /// <param name="Sha256">Lower-case hex digest GitHub computed on upload, or null.</param>
 public sealed record ReleaseAsset(string Name, long Size, string ApiUrl, string? Sha256);
 
@@ -26,11 +26,11 @@ public sealed record AppRelease(string Tag, Version Version, bool IsPrerelease, 
 }
 
 /// <summary>
-/// Sonus's releases on GitHub (CreeperUX/CreeperUX-Music, a private repository: every call carries the
-/// user's read-only token), as Lumen reads its own. Lists them, picks the newest one this app should move to, and
-/// downloads its installer, checked against the SHA-256 GitHub keeps for it.
+/// Sonus's releases on GitHub (CreeperUX/CreeperUX-Music, a public repository: read without signing in), as Lumen
+/// reads its own. Lists them, picks the newest one this app should move to, and downloads its installer, checked
+/// against the SHA-256 GitHub keeps for it. Unsigned calls get 60 an hour per address, plenty for a daily check.
 /// </summary>
-public sealed class GitHubUpdates(HttpClient http, string token, Uri? apiBase = null)
+public sealed class GitHubUpdates(HttpClient http, Uri? apiBase = null)
 {
     public const string Repository = "CreeperUX/CreeperUX-Music";
     public static readonly Uri DefaultApi = new("https://api.github.com/");
@@ -120,8 +120,7 @@ public sealed class GitHubUpdates(HttpClient http, string token, Uri? apiBase = 
         string temp = path + ".part";
         try
         {
-            // GitHub answers with a redirect to its storage; the token is dropped on the way (HttpClient doesn't carry
-            // Authorization across redirects), as the signed address needs none.
+            // GitHub answers with a redirect to its storage (a signed address)
             using var request = Request(new Uri(asset.ApiUrl), "application/octet-stream");
             using var response = await SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
             long total = response.Content.Headers.ContentLength ?? asset.Size;
@@ -158,7 +157,6 @@ public sealed class GitHubUpdates(HttpClient http, string token, Uri? apiBase = 
     {
         var request = new HttpRequestMessage(HttpMethod.Get, uri);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(accept));
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         request.Headers.TryAddWithoutValidation("X-GitHub-Api-Version", "2022-11-28");
         if (!request.Headers.UserAgent.Any()) request.Headers.UserAgent.ParseAdd("Sonus"); // GitHub refuses requests without one
         return request;
@@ -175,12 +173,10 @@ public sealed class GitHubUpdates(HttpClient http, string token, Uri? apiBase = 
         {
             throw new UpdateException(response.StatusCode switch
             {
-                HttpStatusCode.Unauthorized => "GitHub 令牌无效或已过期，请在「设置 › 更新」里重新填写。",
                 HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests
                     when response.Headers.TryGetValues("X-RateLimit-Remaining", out var left) && left.FirstOrDefault() == "0"
-                    => "GitHub 的请求次数暂时用完了，请过一会儿再试。",
-                HttpStatusCode.Forbidden => "GitHub 令牌没有读取 Sonus 仓库的权限。",
-                HttpStatusCode.NotFound => $"找不到 {Repository}：令牌需要授权这个仓库的 Contents 读取权限。",
+                    => "GitHub 的请求次数暂时用完了（每个网络地址每小时 60 次），请过一会儿再试。",
+                HttpStatusCode.NotFound => $"GitHub 上找不到 {Repository} 的版本列表。",
                 _ => string.Format(CultureInfo.InvariantCulture, "GitHub 返回 {0}。", (int)response.StatusCode),
             });
         }

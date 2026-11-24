@@ -1,19 +1,16 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Sonus.Core.Updates;
-using Sonus.Interop;
 
 namespace Sonus.Updates;
 
 /// <summary>
 /// A newer Sonus on GitHub, found as Lumen finds its own: checked once a day after starting (and from
 /// 设置 › 更新), installed by downloading the installer for this architecture, checking it against GitHub's SHA-256,
-/// then running it while the app closes. CreeperUX/CreeperUX-Music is private, so every call carries the user's
-/// read-only token, kept in Credential Manager beside the sign-in. UI thread only.
+/// then running it while the app closes. CreeperUX/CreeperUX-Music is public: nothing to sign in with. UI thread only.
 /// </summary>
 public sealed class UpdateService(AppSettings settings)
 {
-    private const string TokenSecret = "github";
     private static readonly TimeSpan CheckInterval = TimeSpan.FromHours(23); // "once a day", whatever time the app starts
     private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(8);  // once the library has settled
     private static readonly TimeSpan ListTimeout = TimeSpan.FromSeconds(20);
@@ -34,10 +31,6 @@ public sealed class UpdateService(AppSettings settings)
     public static string Architecture => RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.Arm64 ? "ARM64" : "x64";
 
     public AppSettings Settings => settings;
-
-    public bool HasToken => !string.IsNullOrEmpty(Credentials.ReadSecret(TokenSecret));
-    public void SaveToken(string token) => Credentials.WriteSecret(TokenSecret, token, "Sonus: read-only GitHub token for updates");
-    public void RemoveToken() => Credentials.DeleteSecret(TokenSecret);
 
     /// <summary>The newer version the last check found; null when up to date or not checked yet.</summary>
     public AppRelease? Available { get; private set; }
@@ -62,10 +55,13 @@ public sealed class UpdateService(AppSettings settings)
         return newest;
     }
 
-    /// <summary>The once-a-day check after starting (设置 › 更新 › 启动时自动检查). Quiet when it can't check.</summary>
+    /// <summary>
+    /// The once-a-day check after starting (设置 › 更新 › 启动时自动检查). Quiet when it can't check. A test instance checks
+    /// only when asked (检查更新): no test reaches the real GitHub, and no update shows up in the middle of other tests.
+    /// </summary>
     public async void CheckOnStartup()
     {
-        if (!settings.AutoCheckUpdates || !HasToken) return;
+        if (!settings.AutoCheckUpdates || AppPaths.IsTestInstance) return;
         if (settings.LastUpdateCheck is { } last && DateTime.UtcNow - last < CheckInterval) return;
         await Task.Delay(StartupDelay);
         try { await CheckAsync(); }
@@ -100,8 +96,5 @@ public sealed class UpdateService(AppSettings settings)
         if (App.MainWindow is { } window) await window.CloseAppAsync();
     }
 
-    private static GitHubUpdates Client() =>
-        Credentials.ReadSecret(TokenSecret) is { Length: > 0 } token
-            ? new GitHubUpdates(Http, token, Api)
-            : throw new UpdateException("需要 GitHub 令牌才能检查更新（Sonus 的仓库是私有的），请在「设置 › 更新」里填写。");
+    private static GitHubUpdates Client() => new(Http, Api);
 }

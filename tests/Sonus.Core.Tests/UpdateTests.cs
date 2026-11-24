@@ -81,21 +81,22 @@ public sealed class UpdateTests : IDisposable
     }
 
     [Fact]
-    public async Task TheListIsAskedForWithTheToken()
+    public async Task TheListIsAskedForWithoutSigningIn()
     {
         var fake = new FakeGitHub(_ => Ok(Listing));
-        await new GitHubUpdates(new HttpClient(fake), "gh-token").ReleasesAsync();
+        await new GitHubUpdates(new HttpClient(fake)).ReleasesAsync();
         var request = Assert.Single(fake.Requests);
-        Assert.Equal("Bearer gh-token", request.Headers.Authorization?.ToString());
+        Assert.Null(request.Headers.Authorization); // the repository is public
+        Assert.Contains(request.Headers.Accept, a => a.MediaType == "application/vnd.github+json");
         Assert.Equal("https://api.github.com/repos/CreeperUX/CreeperUX-Music/releases?per_page=30", request.RequestUri?.ToString());
         Assert.NotEmpty(request.Headers.UserAgent);
     }
 
     [Theory]
-    [InlineData(HttpStatusCode.Unauthorized, null, "令牌无效")]
-    [InlineData(HttpStatusCode.NotFound, null, "Contents 读取权限")]
+    [InlineData(HttpStatusCode.NotFound, null, "找不到 CreeperUX/CreeperUX-Music")]
     [InlineData(HttpStatusCode.Forbidden, "0", "请求次数")]
-    [InlineData(HttpStatusCode.Forbidden, "42", "没有读取")]
+    [InlineData(HttpStatusCode.TooManyRequests, "0", "请求次数")]
+    [InlineData(HttpStatusCode.Forbidden, "42", "403")]
     [InlineData(HttpStatusCode.BadGateway, null, "502")]
     public async Task WhatWentWrongIsSaid(HttpStatusCode status, string? remaining, string expected)
     {
@@ -105,7 +106,7 @@ public sealed class UpdateTests : IDisposable
             if (remaining is not null) response.Headers.Add("X-RateLimit-Remaining", remaining);
             return response;
         });
-        var ex = await Assert.ThrowsAsync<UpdateException>(() => new GitHubUpdates(new HttpClient(fake), "t").ReleasesAsync());
+        var ex = await Assert.ThrowsAsync<UpdateException>(() => new GitHubUpdates(new HttpClient(fake)).ReleasesAsync());
         Assert.Contains(expected, ex.Message);
     }
 
@@ -116,7 +117,7 @@ public sealed class UpdateTests : IDisposable
         var asset = GitHubUpdates.Parse(Listing).First(r => r.Tag == "v0.4.0").SetupFor("x64")!;
         string path = Path.Combine(_dir, "setup.exe");
         var seen = new List<double>();
-        await new GitHubUpdates(new HttpClient(fake), "t").DownloadAsync(asset, path, new SyncProgress(seen.Add));
+        await new GitHubUpdates(new HttpClient(fake)).DownloadAsync(asset, path, new SyncProgress(seen.Add));
         Assert.Equal(Setup, File.ReadAllBytes(path));
         Assert.Equal("application/octet-stream", Assert.Single(fake.Requests).Headers.Accept.ToString());
         Assert.Equal(1.0, seen[^1]);
@@ -129,7 +130,7 @@ public sealed class UpdateTests : IDisposable
         var fake = new FakeGitHub(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Setup) });
         var release = GitHubUpdates.Parse("[" + Release("v0.4.0", version: "0.4.0", digest: new string('0', 64)) + "]")[0];
         string path = Path.Combine(_dir, "setup.exe");
-        var ex = await Assert.ThrowsAsync<UpdateException>(() => new GitHubUpdates(new HttpClient(fake), "t").DownloadAsync(release.SetupFor("x64")!, path));
+        var ex = await Assert.ThrowsAsync<UpdateException>(() => new GitHubUpdates(new HttpClient(fake)).DownloadAsync(release.SetupFor("x64")!, path));
         Assert.Contains("校验不一致", ex.Message);
         Assert.False(File.Exists(path));
         Assert.False(File.Exists(path + ".part"));

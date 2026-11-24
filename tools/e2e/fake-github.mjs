@@ -1,12 +1,11 @@
-// A fake GitHub for the update checks (as Lumen's tools/e2e/FakeServers): the releases API of the private
-// CreeperUX/CreeperUX-Music, answering only with the token "gh-token". It lists 9.9.0, a test version 9.10.0-beta.1 and
-// a draft; each installer is a few hundred KB of bytes whose SHA-256 the listing carries ("digest", as GitHub's).
-// An asset's API address answers with a redirect to its storage, as GitHub's does, and the storage must not see the
-// token. Nothing here is a real installer: test instances only download and check it.
+// A fake GitHub for the update checks (as Lumen's tools/e2e/FakeServers): the releases API of the public
+// CreeperUX/CreeperUX-Music, read without signing in (a request that carries credentials anyway is noted: authSent).
+// It lists 9.9.0, a test version 9.10.0-beta.1 and a draft; each installer is a few hundred KB of bytes whose SHA-256
+// the listing carries ("digest", as GitHub's). An asset's API address answers with a redirect to its storage, as
+// GitHub's does. Nothing here is a real installer: test instances only download and check it.
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 
-export const TOKEN = 'gh-token';
 const REPO = '/repos/CreeperUX/CreeperUX-Music';
 
 /** The bytes of a fake installer (different for every name). */
@@ -18,7 +17,7 @@ export function fakeSetup(name) {
 const sha256 = b => createHash('sha256').update(b).digest('hex');
 
 export async function startFakeGitHub() {
-  const log = { requests: [], tokenLeaked: false };
+  const log = { requests: [], authSent: false };
   let assets = [];
   const release = (tag, version, { prerelease = false, draft = false } = {}) => ({
     tag_name: tag, name: `Sonus ${tag.slice(1)}`, draft, prerelease, published_at: '2026-11-20T08:00:00Z',
@@ -34,15 +33,10 @@ export async function startFakeGitHub() {
   const server = createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
     log.requests.push({ path: url.pathname, auth: req.headers.authorization ?? null, accept: req.headers.accept ?? null });
+    if (req.headers.authorization) log.authSent = true;
     if (url.pathname.startsWith('/storage/')) {
-      // the signed storage address: no token wanted, and none must arrive
-      if (req.headers.authorization) log.tokenLeaked = true;
       const name = decodeURIComponent(url.pathname.slice('/storage/'.length));
       res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(fakeSetup(name));
-      return;
-    }
-    if (req.headers.authorization !== `Bearer ${TOKEN}`) {
-      res.writeHead(401, { 'content-type': 'application/json' }).end('{"message":"Bad credentials"}');
       return;
     }
     if (url.pathname === `${REPO}/releases`) {

@@ -63,7 +63,7 @@
                                 </Grid.ColumnDefinitions>
                                 <local:KitGlyph Icon="download" VerticalAlignment="Top" HorizontalAlignment="Left" Margin="0,1,0,0" />
                                 <TextBlock Grid.Column="1" Style="{StaticResource BodyText}"
-                                           Text="有新版本时在程序里提示，下载并校验后打开安装程序升级（在「设置 › 更新」里填一个只读的 GitHub 令牌）。" />
+                                           Text="有新版本时在程序里提示，下载并校验后打开安装程序升级（从 GitHub 上的公开仓库下载，不用登录）。" />
                             </Grid>
                             <Grid Margin="0,12,0,0">
                                 <Grid.ColumnDefinitions>

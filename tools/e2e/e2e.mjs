@@ -122,7 +122,8 @@ export class TestApp {
   }
 }
 
-// the test instances' Credential Manager entries: the sign-in ("server") and the GitHub token for updates ("github")
+// the test instances' Credential Manager entries: the sign-in ("server"; up to 0.5.0 also "github", the token updates
+// needed while the repository was private, which the app now deletes)
 export const TEST_CREDENTIAL = 'Sonus-test:server';
 const testCredential = name => `Sonus-test:${name}`;
 export const credentialKept = (name = 'server') => { try { return execFileSync('cmdkey', ['/list'], { encoding: 'utf8' }).includes(`target=${testCredential(name)}`); } catch { return false; } };
@@ -133,7 +134,10 @@ const formerCredential = name => `CreeperUXMusic-test:${name}`;
 export const formerCredentialKept = name => { try { return execFileSync('cmdkey', ['/list'], { encoding: 'utf8' }).includes(`target=${formerCredential(name)}`); } catch { return false; } };
 export const forgetFormerCredential = name => { try { execFileSync('cmdkey', [`/delete:${formerCredential(name)}`], { stdio: 'ignore' }); } catch { /* none */ } };
 /** Saves a test entry as CreeperUX Music did (a generic credential, the value as UTF-16), with CredWrite as the app does. */
-export function writeFormerCredential(name, user, value) {
+export const writeFormerCredential = (name, user, value) => writeEntry(formerCredential(name), user, value);
+/** The same under the test instances' own name (Sonus-test:<name>), as an earlier version left it. */
+export const writeCredential = (name, user, value) => writeEntry(testCredential(name), user, value);
+function writeEntry(target, user, value) {
   const script = `$ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 using System; using System.Runtime.InteropServices;
@@ -152,7 +156,7 @@ try {
   $c.BlobSize = $bytes.Length; $c.Blob = $blob
   if (-not [FormerCred]::CredWrite([ref]$c, 0)) { throw "CredWrite: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
 } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($blob) }`;
-  execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, FORMER_TARGET: formerCredential(name), FORMER_USER: user, FORMER_VALUE: value }, stdio: ['ignore', 'ignore', 'pipe'] });
+  execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, FORMER_TARGET: target, FORMER_USER: user, FORMER_VALUE: value }, stdio: ['ignore', 'ignore', 'pipe'] });
 }
 
 /** Windows' media control sessions (read-only): "AppUserModelId|title" per line. */

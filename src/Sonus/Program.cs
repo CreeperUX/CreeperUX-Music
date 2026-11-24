@@ -42,11 +42,12 @@ public static partial class Program
     }
 
     /// <summary>Before 0.4 the app was CreeperUX Music: its data folder and its Credential Manager entries become Sonus's,
-    /// once (later starts find nothing left to take).</summary>
+    /// once (later starts find nothing left to take). The GitHub token earlier versions kept for updates is deleted.</summary>
     private static void TakeOverFormerName()
     {
         if (AppPaths.FormerDataDirectory is { } former && Core.AppName.AdoptFolder(former, AppPaths.DataDirectory) is { } moved) Log.Write($"[former name] {moved}");
         foreach (string entry in Interop.Credentials.AdoptFormer()) Log.Write($"[former name] {entry}");
+        foreach (string entry in Interop.Credentials.DropRetired()) Log.Write($"[credentials] {entry}");
     }
 
     private static bool RedirectToRunningInstance()

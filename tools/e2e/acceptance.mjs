@@ -25,10 +25,15 @@ const results = [];
 let current = '';
 const log = (...a) => console.log(...a);
 
+/** Thrown by a check that finds this server cannot give it what it needs (never against the demo server). */
+class Skip extends Error {}
 async function check(name, fn) {
   const t0 = Date.now();
   try { await fn(); results.push({ round: current, name, ok: true }); log(`  ✓ ${name} (${Date.now() - t0} ms)`); }
-  catch (e) { results.push({ round: current, name, ok: false, error: e.message.split('\n')[0] }); log(`  ✗ ${name}: ${e.message.split('\n')[0]}`); }
+  catch (e) {
+    if (e instanceof Skip && !server.demo) { skip(name, e.message); return; }
+    results.push({ round: current, name, ok: false, error: e.message.split('\n')[0] }); log(`  ✗ ${name}: ${e.message.split('\n')[0]}`);
+  }
 }
 /** A check this server cannot give the data for (never against the demo server): reported, not failed. */
 function skip(name, reason) { results.push({ round: current, name, ok: true, skipped: reason }); log(`  – ${name}：跳过（${reason}）`); }
@@ -259,7 +264,9 @@ try {
       // cached one needs no request (asked for by the album's coverArt: the album's own id on the demo server)
       const big = c => Number(c.size) >= 512;
       const seen = new Set((await server.log()).covers.filter(big).map(c => c.id));
-      const album = (await api('getAlbumList2', { type: 'alphabeticalByName', size: 500 })).albumList2.album.filter(a => a.coverArt).find(a => !seen.has(a.coverArt));
+      const albums = (await api('getAlbumList2', { type: 'alphabeticalByName', size: 500 })).albumList2.album.filter(a => a.coverArt);
+      const album = albums.find(a => !seen.has(a.coverArt));
+      if (!album && !server.demo) throw new Skip(`服务器只有 ${albums.length} 张有封面的专辑，大封面在前面几轮都已经取过（有缓存就不再请求）`);
       assert(album, '每张专辑的大封面都已经取过了');
       const t0 = Date.now();
       await app.send(`nav album:${album.id}`);
@@ -327,10 +334,12 @@ try {
         // the seed, then the songs the server answered, in its order (what the recording proxy saw: a server may pick
         // them at random each time); with none, songs of the same artist or genre from the library
         const answer = (await server.log()).similar.filter(x => x.id === cat.radio.id).at(-1)?.songs?.filter(id => id !== cat.radio.id);
+        // the state's queue: the songs after the one playing, hand-queued ones first (at most 20 listed)
+        const after = s.queue.slice(s.manual ?? 0);
         assert(answer, '没有看到 getSimilarSongs2 的回应');
-        assert(s.queue[0] === cat.radio.id && s.queue.length >= 2 && new Set(s.queue).size === s.queue.length, `电台：${JSON.stringify(s.queue)}`);
-        if (answer.length) assert(JSON.stringify(s.queue.slice(1)) === JSON.stringify(answer.slice(0, s.queue.length - 1)), `电台不是服务器给的那些歌：${JSON.stringify(s.queue.slice(1, 4))} / ${JSON.stringify(answer.slice(0, 3))}`);
-        log(`    服务器给了 ${answer.length} 首相似的歌${answer.length ? '' : '（电台用同一艺人或流派的歌）'}，电台 ${s.queue.length} 首（状态里最多列 20 首）`);
+        assert(after.length >= 1 && !after.includes(cat.radio.id) && new Set(after).size === after.length, `电台：${JSON.stringify(after)}`);
+        if (answer.length) assert(JSON.stringify(after) === JSON.stringify(answer.slice(0, after.length)), `电台不是服务器给的那些歌：${JSON.stringify(after.slice(0, 3))} / ${JSON.stringify(answer.slice(0, 3))}`);
+        log(`    服务器给了 ${answer.length} 首相似的歌${answer.length ? '' : '（电台用同一艺人或流派的歌）'}，电台里接下来 ${after.length} 首（状态里最多列 20 首）`);
       }
     });
     const dsd = await api('search3', { query: '', songCount: 500 }).then(r => r.searchResult3.song?.find(x => x.suffix === 'dsf'), () => null);

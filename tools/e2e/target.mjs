@@ -181,10 +181,11 @@ async function discover(t, cleanup) {
   else for (const s of songs.filter(s => usable(s) && s.duration >= 45).slice(0, 120)) { const l = await lyricsOf(s.id); if (l) { lyricsId = s.id; firstTime = shown(l); break; } }
   const lyricsSong = lyricsId ? songs.find(s => s.id === lyricsId) : null;
 
-  // an album page (five songs or more: "play next" takes the fifth, as on the demo's al0), another album, and the artist
-  // with the most songs (of an album: the app's artist pages are album artists)
+  // an album page (five songs or more, of half a minute or more: "play next" plays the fifth, as on the demo's al0),
+  // another album, and the artist with the most songs (of an album: the app's artist pages are album artists)
   const whole = a => songsOf(a.id).every(usable);
-  const browse = albums.find(a => a.id !== playableId && whole(a) && songsOf(a.id).length >= 5) ?? albums.find(a => a.id !== playableId && songsOf(a.id).length >= 2) ?? albums[0];
+  const browse = albums.find(a => a.id !== playableId && whole(a) && songsOf(a.id).length >= 5 && songsOf(a.id).every(s => s.duration >= 30)) ??
+    albums.find(a => a.id !== playableId && whole(a) && songsOf(a.id).length >= 5) ?? albums.find(a => a.id !== playableId && songsOf(a.id).length >= 2) ?? albums[0];
   const secondAlbum = albums.find(a => a.id !== browse.id && a.id !== playableId && whole(a) && songsOf(a.id).length) ?? albums.find(a => a.id !== browse.id) ?? browse;
   const songCount = new Map();
   for (const a of albums) if (a.artistId) songCount.set(a.artistId, (songCount.get(a.artistId) ?? 0) + songsOf(a.id).length);

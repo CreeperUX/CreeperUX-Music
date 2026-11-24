@@ -562,13 +562,12 @@ public sealed class MusicService : IDisposable
 
     /// <summary>The user's action as a command for the session (true: done that way). Without a connection the active
     /// device does what its engine can do by itself (<paramref name="engineOffline"/>: pause, play, seek; false: the
-    /// caller does it, and the reports tell the server later); anything else waits for the connection.</summary>
+    /// caller does it, and the reports tell the server later); anything else waits a moment for the connection.</summary>
     private bool Command(string action, object? fields = null, bool engineOffline = false)
     {
         if (Session is not { } s) return false;
-        if (s.IsConnected) { s.Send(action, fields); return true; }
-        if (engineOffline && s.IsActiveHere) return false;
-        s.SayOffline();
+        if (!s.IsConnected && engineOffline && s.IsActiveHere) return false;
+        s.Send(action, fields);
         return true;
     }
 

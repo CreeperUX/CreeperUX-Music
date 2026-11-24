@@ -116,6 +116,7 @@ public sealed partial class SessionClient : IAsyncDisposable
     private Task? _loop;
     private long _offset; // server clock − ours, ms
     private int _refs;
+    private CancellationTokenSource _wake = new(); // cuts the wait between two attempts short
 
     /// <param name="deviceId">This device's own id, made once per installation and kept (<see cref="NewDeviceId"/>).</param>
     /// <param name="name">How the other devices list this one ("书房电脑").</param>
@@ -163,6 +164,9 @@ public sealed partial class SessionClient : IAsyncDisposable
     public event Action<string, string>? Failed;
 
     public void Start() => _loop ??= Task.Run(() => RunAsync(_stop.Token));
+
+    /// <summary>Tries again now rather than after the backoff (the server is reachable again, or the user wants something).</summary>
+    public void ReconnectNow() { try { _wake.Cancel(); } catch (ObjectDisposedException) { } }
 
     /// <summary>A command (any device): its action and fields, as in connect.md. Answers when the server applied or
     /// refused it (code "offline" without a connection, "timeout" without an answer).</summary>
@@ -235,9 +239,11 @@ public sealed partial class SessionClient : IAsyncDisposable
                 foreach (var w in _waiting.Values) w.TrySetResult(new SessionReply(false, Session.Rev, "offline", "连接断开了。"));
                 if (IsConnected) { IsConnected = false; ConnectionChanged?.Invoke(false); }
             }
-            try { await Task.Delay(wait, stop).ConfigureAwait(false); }
+            var wake = _wake;
+            using var waiting = CancellationTokenSource.CreateLinkedTokenSource(stop, wake.Token);
+            try { await Task.Delay(wait, waiting.Token).ConfigureAwait(false); wait = TimeSpan.FromSeconds(Math.Min(30, wait.TotalSeconds * 2)); }
+            catch (OperationCanceledException) when (!stop.IsCancellationRequested) { _wake = new(); wake.Dispose(); wait = TimeSpan.FromSeconds(1); } // woken
             catch (OperationCanceledException) { break; }
-            wait = TimeSpan.FromSeconds(Math.Min(30, wait.TotalSeconds * 2));
         }
     }
 

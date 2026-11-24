@@ -44,6 +44,7 @@ public sealed class SessionService : IDisposable
         _client.Failed += (code, message) => _ui.TryEnqueue(() => OnError(code, message));
         music.AttachSession(this);
         music.PlayerChanged += SayVolume;
+        music.ConnectionChanged += OnServerReachable;
         _client.Start();
     }
 
@@ -120,13 +121,23 @@ public sealed class SessionService : IDisposable
     }
 
     // ---------------------------------------------------------------- what this device does: commands
-    /// <summary>A command for the session; a refusal comes back as a toast.</summary>
-    public void Send(string action, object? fields = null)
+    /// <summary>A command for the session; a refusal comes back as a toast. While the connection is down it is tried again
+    /// at once and the command waits a few seconds for it.</summary>
+    public async void Send(string action, object? fields = null)
     {
         if (_disposed) return;
-        if (!IsConnected) { SayOffline(); return; }
+        if (!IsConnected)
+        {
+            _client.ReconnectNow();
+            for (int i = 0; i < 60 && !IsConnected && !_disposed; i++) await Task.Delay(50);
+            if (_disposed) return;
+            if (!IsConnected) { SayOffline(); return; }
+        }
         _ = _client.CommandAsync(action, fields);
     }
+
+    /// <summary>The server answers again (MusicService's requests): the session's connection is tried at once too.</summary>
+    private void OnServerReachable() { if (!_disposed && _music.IsOnline && !IsConnected) _client.ReconnectNow(); }
 
     public void SayOffline() => _music.RaiseToast(new("正在重新连接服务器，稍后再试。", true));
 
@@ -218,6 +229,7 @@ public sealed class SessionService : IDisposable
         if (_disposed) return;
         _disposed = true;
         _music.PlayerChanged -= SayVolume;
+        _music.ConnectionChanged -= OnServerReachable;
         _ = _client.DisposeAsync().AsTask();
     }
 }

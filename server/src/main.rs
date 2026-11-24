@@ -15,8 +15,11 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // SONUS_LOG=debug: one line per request; the HTTP library's own debug lines (its connection pool) only when named
+    let filter = std::env::var("SONUS_LOG").ok().filter(|f| !f.trim().is_empty()).unwrap_or_else(|| "info".into());
+    let filter = if filter.contains("hyper") { filter } else { format!("{filter},hyper=info,hyper_util=info") };
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_env("SONUS_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(EnvFilter::try_new(&filter).unwrap_or_else(|_| EnvFilter::new("info")))
         .with_target(false)
         .with_ansi(std::io::stdout().is_terminal())
         .init();

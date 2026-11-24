@@ -1,8 +1,12 @@
 // Acceptance run for Sonus. It starts the demo server (tools/demo-server/demo-server.mjs), signs in through the sign-in
 // page, then: the interface acts and the server's own state is read back through the Subsonic API; playback is checked on
-// the page's real <audio> element; every view is opened in five layouts (themes, densities, widths, 200 % zoom) and
-// checked for console errors, page overflow and axe WCAG 2.1 A/AA; and 50 route changes must not grow the page.
-// Usage: node tools/check-web.mjs [--only=chromium|webkit|edge] [--shots] [--server=https://music.example.com]
+// the page's real <audio> element; the library pages, the phone layout (tabs, mini player, Now playing), the keyboard and
+// the system's media controls; covers from another origin; the browser sign-in against the demo server, and two-step
+// verification, the account pages and the approval page against a stand-in for the Sonus server's /auth routes; every
+// view is opened in seven layouts (themes, densities, widths from a phone up, 200 % zoom) and checked for console
+// errors, page overflow and axe WCAG 2.1 A/AA; and 50 route changes must not grow the page.
+// Usage: node tools/check-web.mjs [--only=chromium|webkit|edge] [--shots] [--grep=words] [--server=https://music.example.com]
+// --grep (while working on one thing): after the sign-in, only the checks whose name matches the pattern, and no layouts.
 // Any test server: SONUS_TEST_SERVER, SONUS_TEST_CREDENTIALS and SONUS_TEST_MANIFEST (tools/e2e/target.mjs, README.md):
 // every check runs, through the recording proxy, with that server's library; one its library cannot give is skipped.
 // --server runs READ-ONLY against a real server: MUSIC_USER and MUSIC_PASSWORD from the environment (use a separate
@@ -24,6 +28,7 @@ const pw = await import(pathToFileURL(load('playwright')).href);
 const { chromium, webkit } = pw.chromium ? pw : pw.default;
 const AXE = load('axe-core/axe.min.js');
 const only = process.argv.find(a => a.startsWith('--only='))?.slice(7), shots = process.argv.includes('--shots');
+const grep = (g => (g ? new RegExp(g, 'i') : null))(process.argv.find(a => a.startsWith('--grep='))?.slice(7));
 const real = process.argv.find(a => a.startsWith('--server='))?.slice(9)?.replace(/\/$/, '');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const md5 = s => createHash('md5').update(s).digest('hex');
@@ -58,11 +63,15 @@ const LAYOUTS = [
   { id: 'laptop-touch', w: 1180, h: 760, q: 'theme=dark&density=touch&panel=queue' },
   { id: 'narrow', w: 700, h: 820, q: 'theme=dark&panel=closed' },
   { id: 'zoom-200', w: 720, h: 450, q: 'theme=light' },
+  { id: 'phone-dark', w: 390, h: 844, q: 'theme=dark' },
+  { id: 'phone-light', w: 390, h: 844, q: 'theme=light' },
 ];
 const e = encodeURIComponent;
+// the library as pages, Now playing as a page, and the account pages (closed: they show their password form)
+const PAGES = ['#/library/playlists', '#/library/albums', '#/library/artists', '#/library/songs', '#/now', '#/account', '#/device'];
 // the demo's al0, pl1, ar5, 夜 and Jazz; another server's own
-const ROUTES = cat ? ['#/', `#/album/${cat.browse.id}`, `#/playlist/${cat.ownPlaylist.id}`, '#/playlist/liked', '#/playlist/library', `#/artist/${cat.artist.id}`, '#/search/', `#/search/${e(cat.search.term)}`, ...(cat.genre ? [`#/genre/${e(cat.genre)}`] : []), '#/shelf/recent', '#/lyrics', '#/settings']
-  : ['#/', '#/album/al0', '#/playlist/pl1', '#/playlist/liked', '#/playlist/library', '#/artist/ar5', '#/search/', '#/search/%E5%A4%9C', '#/genre/Jazz', '#/shelf/recent', '#/lyrics', '#/settings'];
+const ROUTES = cat ? ['#/', `#/album/${cat.browse.id}`, `#/playlist/${cat.ownPlaylist.id}`, '#/playlist/liked', '#/playlist/library', `#/artist/${cat.artist.id}`, '#/search/', `#/search/${e(cat.search.term)}`, ...(cat.genre ? [`#/genre/${e(cat.genre)}`] : []), '#/shelf/recent', '#/lyrics', '#/settings', ...PAGES]
+  : ['#/', '#/album/al0', '#/playlist/pl1', '#/playlist/liked', '#/playlist/library', '#/artist/ar5', '#/search/', '#/search/%E5%A4%9C', '#/genre/Jazz', '#/shelf/recent', '#/lyrics', '#/settings', ...PAGES];
 const engines = [['chromium', () => chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] })], ['webkit', () => webkit.launch()], ['edge', () => chromium.launch({ channel: 'msedge', args: ['--autoplay-policy=no-user-gesture-required'] })]]
   .filter(([n]) => (only ? n === only : n !== 'edge'));
 const settle = page => page.waitForFunction(() => document.getAnimations().every(a => a.playState !== 'running' || a.effect?.getTiming().iterations === Infinity), null, { timeout: 4000 }).catch(() => {});
@@ -79,7 +88,7 @@ for (const [engine, launch] of engines) {
     p.on('console', m => { if (m.type() === 'error' && !/Failed to load resource|status of 404/.test(m.text())) errors.push(m.text()); });
   };
   watch(page);
-  const check = async (name, fn) => { const t0 = Date.now(); try { await fn(); console.log(`  ✓ ${name} (${Date.now() - t0} ms)`); } catch (e) { failed++; console.log(`  ✗ ${name}: ${e.message.split('\n')[0]}`); } };
+  const check = async (name, fn) => { if (grep && !/sign-in page shows|wrong password is refused/.test(name) && !grep.test(name)) return; const t0 = Date.now(); try { await fn(); console.log(`  ✓ ${name} (${Date.now() - t0} ms)`); } catch (e) { failed++; console.log(`  ✗ ${name}: ${e.message.split('\n')[0]}`); } };
   /** A check this server's library cannot give the data for (never against the demo server). */
   const skip = (name, reason) => { skipped++; console.log(`  – ${name}: skipped (${reason})`); };
   const assert = (ok, msg) => { if (!ok) throw new Error(msg); };
@@ -89,6 +98,8 @@ for (const [engine, launch] of engines) {
     if (!(await p.evaluate(() => !!window.axe))) await p.addScriptTag({ path: AXE });
     return p.evaluate(async () => (await axe.run(document, { runOnly: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'] })).violations.map(x => `${x.id} (${x.nodes.length}): ${x.nodes[0].target}`));
   };
+  /** With --shots: a picture of a state the layouts below do not reach (a step of the sign-in, an open account page). */
+  const snap = async (p, name) => { if (shots) { await settle(p); await p.screenshot({ path: join(out, `${engine}-state-${name}.png`) }); } };
   const audio = (p = page) => app(() => { const a = __app.adapter.mediaElement(); return { paused: a.paused, time: a.currentTime, src: a.src, volume: a.volume }; }, undefined, p);
   const barTitle = (p = page) => p.locator('.ui-pb-title').textContent();
   async function signIn(p, password = account.password) {
@@ -342,12 +353,300 @@ for (const [engine, launch] of engines) {
       await until(async () => (await audio()).src.includes(`id=${last}`), 'audio on the last');
       await app(() => __app.adapter.pause());
     });
+
+    // ---------------------------------------------------------------- the library pages, the keyboard, the system's media controls
+    await check('the library pages list playlists, albums, artists and songs; a song there plays within the library', async () => {
+      for (const [kind, n] of [['playlists', await app(() => __app.playlists.length)], ['albums', await app(() => __app.lib.albumList.length)], ['artists', await app(() => __app.lib.artistList.length)]]) {
+        await app(k => { location.hash = `#/library/${k}`; }, kind);
+        await until(async () => (await page.locator('.cm-libpage .ui-mcard').count()) > 0 && (await page.locator('.cm-libpage .cm-chip[aria-pressed="true"]').count()) === 1, `${kind} listed`);
+        assert((await page.locator('.cm-libpage .ui-mcard').count()) <= n, `${kind}: more cards than the library has`);
+      }
+      await app(() => { location.hash = '#/library/songs'; });
+      // the first song of the library the server can stream
+      const at = await app(missing => __app.playlist('library').trackIds.findIndex(id => !__app.track(id).unavailable && id !== missing), cat.missing ?? '');
+      await page.locator('.cm-libpage .ui-tracklist .ui-tr:not(.ui-tr-head)').nth(at).dblclick();
+      await until(() => app(i => __app.player.context?.kind === 'playlist' && __app.player.context?.id === 'library' && __app.player.trackId === __app.playlist('library').trackIds[i], at), 'plays that song, in the library');
+      await until(async () => !(await audio()).paused, 'audio playing');
+    });
+    await check('the system media controls show the song and its state; Space pauses and resumes', async () => {
+      const ms = () => app(() => ({ title: navigator.mediaSession?.metadata?.title, state: navigator.mediaSession?.playbackState, want: __app.currentTrack().title, has: 'mediaSession' in navigator }));
+      const m = await ms();
+      if (!m.has) { console.log('    this engine has no Media Session API'); return; }
+      await until(async () => { const x = await ms(); return x.title === x.want && x.state === 'playing'; }, 'media session shows the playing song');
+      await app(() => document.activeElement?.blur?.());
+      await page.keyboard.press('Space');
+      await until(async () => (await audio()).paused && (await ms()).state === 'paused', 'Space pauses');
+      await page.keyboard.press('Space');
+      await until(async () => !(await audio()).paused, 'Space resumes');
+      await app(() => __app.adapter.pause());
+    });
+
+    // ---------------------------------------------------------------- a phone: tabs and a mini player in place of the bar
+    await check('at phone width tabs and a mini player replace the bar; the mini player opens Now playing, which controls playback', async () => {
+      const pp = await context.newPage();
+      watch(pp);
+      await pp.setViewportSize({ width: 390, height: 844 });
+      await pp.goto(`${site}/?theme=dark#/`);
+      await pp.waitForFunction(() => window.__ready === true, null, { timeout: 30000 });
+      assert(await pp.locator('.cm-tabs').isVisible() && !(await pp.locator('.cm-bar').isVisible()), 'the tabs show and the playback bar does not');
+      await app(al => __app.playContext('album', al), album.id, pp);
+      await until(async () => !(await audio(pp)).paused, 'playing', 8000);
+      const first = await app(() => __app.player.trackId, undefined, pp);
+      assert((await pp.locator('.cm-mini-title').textContent()) === (await app(() => __app.currentTrack().title, undefined, pp)), 'the mini player names the song');
+      await pp.locator('.cm-mini-play').click();
+      await until(async () => (await audio(pp)).paused, 'paused from the mini player');
+      await pp.locator('.cm-mini-open').click();
+      await pp.locator('.cm-now-stage').waitFor();
+      assert(!(await pp.locator('.cm-mini').isVisible()), 'no mini player under Now playing');
+      assert((await pp.locator('.cm-now-title').textContent()) === (await app(() => __app.currentTrack().title, undefined, pp)), 'Now playing names the song');
+      await pp.locator('.cm-now-play').click();
+      await until(async () => !(await audio(pp)).paused, 'playing from Now playing');
+      await pp.getByRole('button', { name: '下一首', exact: true }).click();
+      await until(() => app(id => __app.player.trackId !== id, first, pp), 'next song');
+      await pp.locator('.cm-now-toggle').first().click();
+      await until(() => app(() => __app.player.order === 'shuffle-tracks', undefined, pp), 'shuffle from Now playing');
+      await app(() => __app.adapter.setOrder('default'), undefined, pp);
+      await pp.locator('.cm-now-like').click();
+      await until(() => app(() => __app.currentTrack().liked === true, undefined, pp), 'liked from Now playing');
+      await pp.locator('.cm-now-like').click();
+      await until(() => app(() => __app.currentTrack().liked === false, undefined, pp), 'unliked');
+      await snap(pp, 'phone-now-playing');
+      await pp.getByRole('button', { name: '播放队列' }).click();
+      await until(() => pp.locator('.cm-panel-queue .ui-tr').count(), 'the queue opens');
+      await snap(pp, 'phone-queue');
+      await pp.keyboard.press('Escape');
+      await pp.locator('.cm-tabs').getByRole('link', { name: '音乐库' }).click();
+      await until(async () => (await pp.evaluate(() => location.hash)).startsWith('#/library') && (await pp.locator('.cm-tab[aria-current]').textContent()) === '音乐库', 'the Library tab');
+      await pp.locator('.cm-tabs').getByRole('link', { name: '搜索' }).click();
+      await until(async () => (await pp.evaluate(() => location.hash)) === '#/search/', 'the Search tab');
+      await app(() => __app.adapter.pause(), undefined, pp);
+      await pp.close();
+    });
+
+    // ---------------------------------------------------------------- covers from another origin
+    await check('the page and the server on different origins: headers take the cover\'s colour, and nothing is logged', async () => {
+      const other = demo ? await startDemoServer() : null; // a second demo server gives only the page; the first one stays the music server
+      const cx = await browser.newContext({ viewport: { width: 1280, height: 800 } }), p = await cx.newPage();
+      watch(p);
+      try {
+        await p.goto(`${other?.url ?? site}/?theme=dark#/`);
+        await p.locator('.cm-login').waitFor();
+        await signIn(p);
+        await p.waitForFunction(() => window.__ready === true, null, { timeout: 60000 });
+        await app(id => { location.hash = `#/album/${id}`; }, album.id, p);
+        await until(() => p.evaluate(() => { const v = document.querySelector('.cm-view')?.style.getPropertyValue('--cm-tint'); return !!v && v !== '#3a4148'; }), 'the album page is tinted from its cover');
+        await sleep(500);
+      } finally { await cx.close(); other?.stop(); }
+    });
+
+    // ---------------------------------------------------------------- signing in through the browser, two-step verification, the account pages
+    if (!demo) skip('the browser sign-in, two-step verification and the account pages', 'they need the demo server\'s sign-in hook and a stand-in for /auth');
+    else {
+      const hook = async (q = '') => (await fetch(`${server}/__test/device${q}`)).json();
+      const fresh = async (init) => { const cx = await browser.newContext({ viewport: { width: 1280, height: 800 } }); if (init) await cx.addInitScript(init, server); const p = await cx.newPage(); watch(p); return { cx, p }; };
+      const startBrowserSignIn = async p => {
+        await p.goto(`${site}/?theme=dark#/`);
+        await p.locator('.cm-login').waitFor();
+        await p.getByLabel('服务器地址').fill(server);
+        await p.getByRole('button', { name: '在浏览器中登录' }).click();
+        await p.locator('.cm-code').waitFor();
+        return (await p.locator('.cm-code').textContent()).trim();
+      };
+      await check('sign in through the browser: the page shows a code; allowed, it gets a key of its own and no password; signing out gives the key back', async () => {
+        const { cx, p } = await fresh();
+        const code = await startBrowserSignIn(p);
+        assert(/^[A-Z]{4}-[A-Z]{4}$/.test(code), code);
+        assert((await p.locator('a.cm-linkbtn').getAttribute('href')) === `${server}/app/#/device?code=${code}`, 'the link to the approval page');
+        const v = await axe(p); assert(!v.length, v.join(' | '));
+        await snap(p, 'sign-in-browser');
+        await hook(`?code=${code}&decide=allow&u=${account.user}`);
+        await p.waitForFunction(() => window.__ready === true, null, { timeout: 60000 });
+        const login = await app(() => JSON.parse(localStorage.getItem('sonus.login')), undefined, p);
+        assert(login.apiKey && !login.token && !login.salt && login.user === account.user, JSON.stringify(Object.keys(login)));
+        const art = await app(() => __app.lib.albumList.map(a => __app.adapter.artworkNow(a.id)).find(Boolean), undefined, p);
+        assert(art.includes('apiKey=') && !/[?&](u|t|s|p)=/.test(art), 'requests carry the key, and no user name or token');
+        const named = k => k.name.startsWith('Sonus · 浏览器');
+        assert((await hook()).keys.filter(named).length === 1, 'the server made one key for this browser');
+        await app(() => { location.hash = '#/settings'; }, undefined, p); await sleep(600);
+        await p.getByRole('button', { name: '退出登录' }).click();
+        await p.locator('.cm-login').waitFor({ timeout: 10000 });
+        await until(async () => (await hook()).keys.filter(named).length === 0, 'the key is given back');
+        await cx.close();
+      });
+      await check('a browser sign-in that is refused says so, and the sign-in page is back', async () => {
+        const { cx, p } = await fresh();
+        const code = await startBrowserSignIn(p);
+        await hook(`?code=${code}&decide=deny`);
+        await until(async () => (await p.locator('.cm-login-error').count()) && (await p.locator('.cm-login-error').textContent()).includes('被拒绝'), 'refused shown', 8000);
+        assert(await p.getByLabel('用户名').isVisible(), 'the password form is back');
+        await cx.close();
+      });
+
+      // A stand-in for the Sonus server's /auth routes, written from the fork's handlers (server/auth.go,
+      // sonus_twofactor.go, sonus_device.go): the demo server has only the app's half of the browser sign-in. The account
+      // has two-step verification; its account password opens the web session only, and the app password the stand-in
+      // hands out is the demo account's own password, so the Subsonic sign-in that follows is the demo server's real one.
+      const ACCOUNT_PW = 'account-password-2fa', CODE = '246810', JWT = 'stand-in.jwt', SETUP = 'stand-in.setup';
+      const codes = n => Array.from({ length: 10 }, (_, i) => `rc${n}-${String(i).padStart(4, '0')}`);
+      const standIn = async (p, st) => {
+        Object.assign(st, { enabled: true, mode: 'optional', recovery: codes(0), apps: [], n: 0, ...st });
+        await p.route(u => u.href.startsWith(`${server}/auth/`), async route => {
+          const req = route.request(), path = new URL(req.url()).pathname.slice('/auth'.length), m = req.method();
+          if (/^\/device\/(start|poll|revoke)$/.test(path)) return route.fallback(); // the demo server's own
+          const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*', 'Access-Control-Allow-Methods': '*' };
+          const json = (status, data) => route.fulfill({ status, headers: cors, contentType: 'application/json', body: data === undefined ? '' : JSON.stringify(data) });
+          if (m === 'OPTIONS') return json(204);
+          let body = {}; try { body = req.postDataJSON() ?? {}; } catch { /* none */ }
+          const session = req.headers()['x-nd-authorization'] === `Bearer ${JWT}`, payload = { id: 'u1', name: account.user, username: account.user, isAdmin: false, token: JWT };
+          const codeOk = c => c === CODE || (st.recovery.includes(c) && st.recovery.splice(st.recovery.indexOf(c), 1));
+          if (path === '/login' && m === 'POST') {
+            if (body.username !== account.user || body.password !== ACCOUNT_PW) return json(401, { error: 'Invalid username or password' });
+            if (st.enabled && !body.otp) return json(401, { error: 'Verification code required', twoFactor: 'code' });
+            if (st.enabled && !codeOk(body.otp)) return json(401, { error: 'Invalid verification code', twoFactor: 'code' });
+            if (!st.enabled && st.mode === 'required') return json(401, { error: 'Two-step verification must be set up', twoFactor: 'setup', setupToken: SETUP });
+            return json(200, payload);
+          }
+          if (path === '/2fa/setup' && m === 'POST') return body.token === SETUP || session ? json(200, { secret: 'JBSWY3DPEHPK3PXP', uri: 'otpauth://totp/Sonus:demo?secret=JBSWY3DPEHPK3PXP', qr: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', issuer: 'Sonus', account: account.user }) : json(401, { error: 'Not authenticated' });
+          if (path === '/2fa/confirm' && m === 'POST') {
+            if (body.token !== SETUP && !session) return json(401, { error: 'Not authenticated' });
+            if (body.code !== CODE) return json(401, { error: 'Invalid verification code', twoFactor: 'setup' });
+            st.enabled = true; st.recovery = codes(++st.n);
+            return json(200, { ...payload, recoveryCodes: st.recovery });
+          }
+          if (!session) return json(401, { error: 'Not authenticated' });
+          if (path === '/2fa' && m === 'GET') return json(200, { mode: st.mode, enabled: st.enabled, ...(st.enabled ? { enabledAt: new Date(Date.now() - 3 * 86400e3).toISOString() } : {}), recoveryCodesLeft: st.enabled ? st.recovery.length : 0 });
+          if (path === '/2fa/recovery-codes' && m === 'POST') { if (!codeOk(body.code)) return json(401, { error: 'Invalid verification code', twoFactor: 'code' }); st.recovery = codes(++st.n); return json(200, { recoveryCodes: st.recovery }); }
+          if (path === '/2fa/disable' && m === 'POST') { if (st.mode === 'required') return json(403, { error: 'Two-step verification is required on this server' }); if (!codeOk(body.code)) return json(401, { error: 'Invalid verification code', twoFactor: 'code' }); st.enabled = false; return json(204); }
+          if (path === '/app-passwords' && m === 'GET') return json(200, st.apps);
+          if (path === '/app-passwords' && m === 'POST') { const ap = { id: `ap${st.apps.length + 1}`, name: body.name, createdAt: new Date().toISOString() }; st.apps.push(ap); return json(200, { appPassword: ap, password: account.password }); }
+          if (path.startsWith('/app-passwords/') && m === 'DELETE') { const i = st.apps.findIndex(a => a.id === decodeURIComponent(path.slice(15))); if (i < 0) return json(404, { error: 'No such app password' }); st.apps.splice(i, 1); return json(204); }
+          const dev = /^\/device\/([^/]+)(\/approve|\/deny)?$/.exec(path);
+          if (dev) {
+            const code = decodeURIComponent(dev[1]), waiting = (await hook()).pending.find(x => x.userCode === code && x.status === 'pending');
+            if (!waiting) return json(404, { error: 'No sign-in waiting for this code: it may have expired' });
+            if (!dev[2]) return json(200, { userCode: waiting.userCode, client: waiting.client, device: waiting.device, expiresIn: 540 });
+            await hook(`?code=${code}&decide=${dev[2] === '/approve' ? 'allow' : 'deny'}&u=${account.user}`);
+            return json(204);
+          }
+          return json(404, { error: 'not found' });
+        });
+      };
+
+      const st = {};
+      const { cx: cx2, p: p2 } = await fresh();
+      await standIn(p2, st);
+      await check('two-step verification: the password alone is refused for the API; password and code make this browser an app password, kept as a token', async () => {
+        await p2.goto(`${site}/?theme=dark#/`);
+        await p2.locator('.cm-login').waitFor();
+        await signIn(p2, ACCOUNT_PW);
+        await p2.getByRole('heading', { name: '两步验证' }).waitFor({ timeout: 10000 });
+        const v = await axe(p2); assert(!v.length, v.join(' | '));
+        await snap(p2, 'sign-in-code');
+        await p2.getByLabel('验证码').fill('000000');
+        await p2.getByRole('button', { name: '验证', exact: true }).click();
+        await until(async () => (await p2.locator('.cm-login-error:not([hidden])').count()) && (await p2.locator('.cm-login-error:not([hidden])').textContent()).includes('验证码不正确'), 'a wrong code says so');
+        await p2.getByLabel('验证码').fill(CODE);
+        await p2.getByRole('button', { name: '验证', exact: true }).click();
+        await p2.waitForFunction(() => window.__ready === true, null, { timeout: 60000 });
+        const kept = await app(() => ({ ...localStorage }), undefined, p2), login = JSON.parse(kept['sonus.login']);
+        assert(Object.keys(login).sort().join() === 'salt,server,token,user' && login.token.length === 32, JSON.stringify(Object.keys(login)));
+        assert(!JSON.stringify(kept).includes(ACCOUNT_PW) && !JSON.stringify(kept).includes(CODE) && !JSON.stringify(kept).includes(JWT), 'the account password, the code or the session is kept');
+        assert(st.apps.length === 1 && /^Sonus \(浏览器 /.test(st.apps[0].name), `app passwords: ${JSON.stringify(st.apps.map(a => a.name))}`);
+      });
+      await check('account and security: the password and a code open it; app passwords are made, shown once and revoked; recovery codes are replaced', async () => {
+        await app(() => { location.hash = '#/settings'; }, undefined, p2);
+        await p2.getByRole('link', { name: '账号与安全' }).click();
+        await p2.getByRole('heading', { name: '确认是你' }).waitFor();
+        await p2.getByLabel('密码', { exact: true }).fill(ACCOUNT_PW);
+        await p2.getByRole('button', { name: '继续', exact: true }).click();
+        await p2.getByLabel('验证码').fill(CODE);
+        await p2.getByRole('button', { name: '继续', exact: true }).click();
+        await p2.getByRole('heading', { name: '应用专用密码' }).waitFor();
+        await until(async () => (await p2.locator('.cm-state[data-on]').count()) === 1, 'two-step verification shown as on');
+        assert((await p2.locator('.cm-app-row').count()) === 1, 'this browser\'s app password is listed');
+        const v = await axe(p2); assert(!v.length, v.join(' | '));
+        await p2.getByLabel('名称').fill('客厅的播放器');
+        await p2.getByRole('button', { name: '创建', exact: true }).click();
+        await until(async () => (await p2.locator('.cm-made .cm-secret').count()) && (await p2.locator('.cm-app-row').count()) === 2, 'the new password is shown, and listed');
+        assert(st.apps[1]?.name === '客厅的播放器', JSON.stringify(st.apps));
+        await snap(p2, 'account');
+        await p2.getByRole('button', { name: '撤销 客厅的播放器' }).click();
+        await p2.getByRole('alertdialog').getByRole('button', { name: '撤销', exact: true }).click();
+        await until(async () => st.apps.length === 1 && (await p2.locator('.cm-app-row').count()) === 1, 'revoked');
+        const before = [...st.recovery];
+        await p2.getByRole('button', { name: '重新生成恢复代码' }).click();
+        await p2.getByLabel('验证码').fill(before[0]); // a recovery code works in place of a code, once
+        await p2.getByRole('button', { name: '确认', exact: true }).click();
+        await until(async () => (await p2.locator('.cm-codes li').count()) === 10, 'ten new recovery codes');
+        assert((await p2.locator('.cm-codes li').first().textContent()) === st.recovery[0] && st.recovery[0] !== before[0], 'the codes shown are the new ones');
+        await snap(p2, 'account-recovery-codes');
+        await p2.getByRole('button', { name: '我已保存' }).click();
+        await until(async () => (await p2.locator('.cm-state[data-on]').count()) === 1, 'back to the state');
+      });
+      await check('the approval page: another browser\'s sign-in is shown with its code and allowed; that browser is signed in', async () => {
+        const { cx, p } = await fresh();
+        const code = await startBrowserSignIn(p);
+        await app(c => { location.hash = `#/device?code=${c}`; }, code, p2); // the session of the account page is still open
+        await until(async () => (await p2.locator('.cm-device .cm-code').count()) && (await p2.locator('.cm-device .cm-code').textContent()) === code, 'the approval page shows the same code');
+        assert((await p2.locator('.cm-device .cm-facts').textContent()).includes('Sonus'), 'it names the app');
+        const v = await axe(p2); assert(!v.length, v.join(' | '));
+        await snap(p2, 'approval');
+        await p2.getByRole('button', { name: '允许', exact: true }).click();
+        await until(async () => (await p2.locator('.cm-device-done').count()) === 1, 'allowed');
+        await p.waitForFunction(() => window.__ready === true, null, { timeout: 60000 });
+        assert((await app(() => JSON.parse(localStorage.getItem('sonus.login')).apiKey, undefined, p))?.length > 10, 'the other browser got its key');
+        await app(() => __app.adapter.signOut(), undefined, p);
+        await cx.close();
+      });
+      await check('the approval page works without a sign-in kept in this browser: it asks for the password and a code, then refuses when told to', async () => {
+        const { cx, p } = await fresh();
+        const code = await startBrowserSignIn(p);
+        const { cx: cx3, p: p3 } = await fresh(s => { try { localStorage.setItem('sonus.server', JSON.stringify(s)); } catch { /* about:blank */ } });
+        const st3 = {};
+        await standIn(p3, st3);
+        await p3.goto(`${site}/?theme=dark#/device?code=${code}`);
+        await p3.locator('.cm-device-card').waitFor();
+        await p3.getByLabel('用户名').fill(account.user);
+        await p3.getByLabel('密码', { exact: true }).fill(ACCOUNT_PW);
+        await p3.getByRole('button', { name: '继续', exact: true }).click();
+        await p3.getByLabel('验证码').fill(CODE);
+        await p3.getByRole('button', { name: '继续', exact: true }).click();
+        await until(async () => (await p3.locator('.cm-device .cm-code').count()) === 1, 'the request is shown');
+        const v = await axe(p3); assert(!v.length, v.join(' | '));
+        await snap(p3, 'approval-alone');
+        await p3.getByRole('button', { name: '拒绝', exact: true }).click();
+        await until(async () => (await p.locator('.cm-login-error').count()) && (await p.locator('.cm-login-error').textContent()).includes('被拒绝'), 'the other browser is told', 8000);
+        assert(!(await app(() => localStorage.getItem('sonus.login'), undefined, p3)), 'approving kept a sign-in in this browser');
+        await cx3.close(); await cx.close();
+      });
+      await check('a server that requires two-step verification: it is set up from the account page (QR code, a code to confirm, recovery codes)', async () => {
+        Object.assign(st, { enabled: false, mode: 'required' });
+        await app(() => { location.hash = '#/'; }, undefined, p2);
+        await p2.reload();
+        await p2.waitForFunction(() => window.__ready === true, null, { timeout: 60000 });
+        await app(() => { location.hash = '#/account'; }, undefined, p2);
+        await p2.getByRole('heading', { name: '确认是你' }).waitFor();
+        await p2.getByLabel('密码', { exact: true }).fill(ACCOUNT_PW);
+        await p2.getByRole('button', { name: '继续', exact: true }).click();
+        await p2.locator('.cm-qr').waitFor();
+        assert((await p2.locator('.cm-secret').textContent()) === 'JBSWY3DPEHPK3PXP', 'the key to type by hand');
+        const v = await axe(p2); assert(!v.length, v.join(' | '));
+        await snap(p2, 'two-step-setup');
+        await p2.getByLabel('验证码').fill(CODE);
+        await p2.getByRole('button', { name: '确认', exact: true }).click();
+        await until(async () => (await p2.locator('.cm-codes li').count()) === 10, 'recovery codes shown');
+        await p2.getByRole('button', { name: '我已保存' }).click();
+        await until(async () => (await p2.locator('.cm-state[data-on]').count()) === 1, 'two-step verification is on');
+        assert(!(await p2.getByRole('button', { name: '关闭两步验证' }).count()), 'a required two-step verification cannot be turned off');
+      });
+      await cx2.close();
+    }
   }
 
-  // ---------------------------------------------------------------- every view in five layouts
+  // ---------------------------------------------------------------- every view in seven layouts
   const lp = await context.newPage();
   watch(lp);
-  for (const L of LAYOUTS) {
+  for (const L of grep ? [] : LAYOUTS) {
     let bad = 0;
     await lp.setViewportSize({ width: L.w, height: L.h });
     await lp.goto(`${site}/?${L.q}#/`);
@@ -368,8 +667,8 @@ for (const [engine, launch] of engines) {
   const count = () => lp.evaluate(() => ({ nodes: document.getElementsByTagName('*').length, layers: document.querySelectorAll('.ui-portal > *, [data-layer]').length }));
   const tour = async n => { for (let i = 0; i < n; i++) for (const h of ROUTES) { await lp.evaluate(x => { location.hash = x; }, h); await sleep(110); } await lp.evaluate(() => { location.hash = '#/'; }); await sleep(500); };
   await lp.setViewportSize({ width: 1280, height: 800 });
-  await tour(2); const a = await count(); await tour(3); const b = await count();
-  if (b.nodes > a.nodes * 1.05 || b.layers > a.layers) { failed++; console.log(`  ✗ teardown: nodes ${a.nodes} → ${b.nodes}, layers ${a.layers} → ${b.layers}`); }
+  if (!grep) { await tour(2); } const a = await count(); if (!grep) await tour(3); const b = await count();
+  if (grep) { /* not run */ } else if (b.nodes > a.nodes * 1.05 || b.layers > a.layers) { failed++; console.log(`  ✗ teardown: nodes ${a.nodes} → ${b.nodes}, layers ${a.layers} → ${b.layers}`); }
   else console.log(`  ✓ teardown: nodes ${a.nodes} → ${b.nodes}, layers ${a.layers} → ${b.layers}`);
   await lp.close();
 

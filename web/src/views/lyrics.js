@@ -1,7 +1,7 @@
 // Lyrics in the main view, large, on the playing album's colour; the kit's lyrics view follows the song, stops
 // following when the person scrolls, and seeks when a line is chosen.
 import { h } from '../dom.js';
-import { scope, tint } from './common.js';
+import { scope, tint, tintFrom } from './common.js';
 
 export function lyricsView(holder, route, ctx) {
   const t = ctx.t, bag = scope();
@@ -16,7 +16,7 @@ export function lyricsView(holder, route, ctx) {
     if (tr?.id === shownId) return;
     shownId = tr?.id ?? null;
     const al = tr && ctx.lib.albums.get(tr.albumId);
-    tint(holder, al?.color);
+    tint(holder, al?.color); tintFrom(holder, ctx, al?.id);
     head.replaceChildren(...(tr ? [h('span', { class: 'cm-hero-kind' }, t.lyrics), h('h1', {}, tr.title), h('p', {}, tr.artist)] : [h('h1', {}, t.lyrics)]));
     if (!tr) { view.update({ lines: null, state: 'empty' }); return; }
     ctl?.abort(); ctl = new AbortController();

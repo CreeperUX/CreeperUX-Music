@@ -173,6 +173,31 @@
  * @property {{ replayGain?: boolean }} [capabilities]   false hides a control the player cannot change.
  */
 
+// ---------------------------------------------------------------- Connect, version 2 (docs/protocol/connect.md): not implemented yet
+// One playback session per user lives on the server; one device plays it (the active device), the others show it and
+// send commands. For the interface nothing above changes: `player` and `queue` then describe the session, and play,
+// next, queueAdd, setOrder … are commands to it. A client that speaks Connect adds what follows, and the interface
+// shows the devices in the playback bar's device picker (shell/bar.js), next to this browser's own outputs.
+
+/**
+ * @typedef {Object} Device   One of the user's connected players.
+ * @property {string} id
+ * @property {string} name            e.g. '书房电脑', '浏览器 k3x9a2'.
+ * @property {'computer' | 'phone' | 'browser' | 'speaker'} kind
+ * @property {boolean} active         It is the one that plays.
+ * @property {boolean} self           It is this client.
+ * @property {number} volume          0–1: each device's own (rule 8).
+ */
+
+/**
+ * @typedef {Object} ConnectClient   What a MusicClient adds when the server has Connect (capabilities.connect === true).
+ * @property {() => Device[]} devices
+ * @property {(deviceId: string) => Promise<void>} transfer      Moves playback there; the device it leaves stops and becomes a remote.
+ * @property {(deviceId: string, volume: number) => Promise<void>} setDeviceVolume
+ * Events: { type: 'devices', devices: Device[] }. While another device is active, this client's `player` still reports
+ * the session (the position moving), and its own audio stays silent.
+ */
+
 const REQUIRED = ['connect', 'library', 'playlists', 'player', 'queue', 'outputs', 'subscribe', 'play', 'pause', 'resume', 'next', 'previous', 'seek', 'setVolume', 'setMuted', 'setOrder',
   'setStopAfterCurrent', 'setReplayGain', 'setOutput', 'queueAdd', 'queueMove', 'queueRemove', 'queueClear', 'setLiked', 'playlistCreate', 'playlistRename', 'playlistDelete', 'playlistAdd',
   'playlistReorder', 'playlistRemove', 'artwork', 'lyrics', 'search'];

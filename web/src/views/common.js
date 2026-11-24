@@ -1,6 +1,6 @@
 // Parts the views share: the coloured header, the action row, the sticky title bar, track lists, shelves of cards,
 // filter chips, file information and the Properties dialog.
-import { h, ic, playButton, audioSummary, isHiRes, isLossless, fitCount, shade, sampleColor } from '../dom.js';
+import { h, ic, playButton, audioSummary, isHiRes, isLossless, fitCount, shade } from '../dom.js';
 import { orderToBar } from '../api/contract.js';
 
 /** Collects what a view must undo: kit handles, listeners, observers. */
@@ -33,10 +33,13 @@ export function mosaic(sources, key) {
   return resolver;
 }
 
+/** Tints a view with an album's colour once it is known (app.js albumColor: sampled from the cover, once per album). */
+export function tintFrom(holder, ctx, albumId) { if (albumId) ctx.albumColor(albumId).then(c => { if (c && holder.isConnected) tint(holder, c); }); }
+
 export function tint(holder, color) { holder.style.setProperty('--cm-tint', color || '#3a4148'); holder.style.setProperty('--cm-tint-deep', shade(color || '#3a4148', -0.55)); }
 
 // ---------------------------------------------------------------- header
-export function hero(holder, ctx, bag, { kind, title, art, meta = [], description, placeholder, round = false, banner = false, onColor }) {
+export function hero(holder, ctx, bag, { kind, title, art, meta = [], description, placeholder, round = false, banner = false, tintAlbum }) {
   const artBox = h('div', { class: 'cm-hero-art' });
   const titleEl = h('h1', { class: 'cm-hero-title', 'data-len': title.length > 26 ? 'long' : title.length > 14 ? 'mid' : 'short' }, title);
   const el = h('header', { class: 'cm-hero', 'data-round': round || null, 'data-banner': banner || null },
@@ -47,9 +50,10 @@ export function hero(holder, ctx, bag, { kind, title, art, meta = [], descriptio
       description ? h('p', { class: 'cm-hero-desc' }, description) : null,
       meta.filter(Boolean).length ? h('p', { class: 'cm-hero-meta' }, meta.filter(Boolean).map((m, i) => [i ? h('span', { class: 'cm-dot', 'aria-hidden': 'true' }, '•') : null, m])) : null));
   if (!banner) {
-    // onColor: the artwork's colour once it has loaded, for a header whose colour was not known (real covers)
-    const im = bag.add(ctx.P.createImage(artBox, { src: art ?? null, alt: '', lazy: false, placeholder: placeholder || 'album', shape: round ? 'circle' : 'rounded',
-      onLoad: onColor ? () => { const c = sampleColor(artBox.querySelector('img')); if (c) { tint(holder, c); onColor(c); } } : undefined }, ctx.S));
+    // tintAlbum: the header takes that album's colour. It is read from a copy of the cover asked for with CORS, never
+    // from the picture shown here: that one is loaded without it, and reading it across origins taints the canvas.
+    const im = bag.add(ctx.P.createImage(artBox, { src: art ?? null, alt: '', lazy: false, placeholder: placeholder || 'album', shape: round ? 'circle' : 'rounded' }, ctx.S));
+    tintFrom(holder, ctx, tintAlbum);
     if (placeholder && !art) im.root.dataset.special = placeholder;
   }
   holder.append(el);

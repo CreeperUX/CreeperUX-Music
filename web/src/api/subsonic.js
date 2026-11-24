@@ -17,10 +17,14 @@
 //
 // Sign-in: Subsonic token authentication, md5(password + salt). The password is not kept: the salt and token are. In
 // the desktop app they go to Windows Credential Manager (through the window, see host below), in a browser to local
-// storage (sonus.login). The token works like the password for this API, so it is a secret.
+// storage (sonus.login). The token works like the password for this API, so it is a secret. On a Sonus server there are
+// two more ways (views/login.js): with two-step verification on, the password and a code open a web session that makes
+// an app password for this browser, kept as salt and token like any password; and the browser sign-in (OpenSubsonic
+// apiKeyAuthentication), kept as { server, user, apiKey } and given back to the server on signing out.
 import { orderToBar, barToOrder } from './contract.js';
 import { lower, parseLyrics } from './lyrics.js';
 import { md5 } from './md5.js';
+import { createAuthApi } from './sonus.js';
 
 const API_VERSION = '1.16.1', APP = 'Sonus', PAGE = 500;
 const LOGIN_KEY = 'sonus.login', LAST_SERVER_KEY = 'sonus.server';
@@ -52,10 +56,10 @@ export async function loadLogin() {
     try { login = JSON.parse((await host('readLogin')) || 'null'); } catch { login = null; }
     try { deviceName = String(await host('deviceName')); } catch { deviceName = ''; }
   } else login = storage.get(LOGIN_KEY);
-  if (!(login?.server && login?.user && login?.token && login?.salt)) login = null;
+  if (!(login?.server && login?.user && ((login?.token && login?.salt) || login?.apiKey))) login = null;
   return login;
 }
-/** The saved sign-in ({ server, user, salt, token }), or null. */
+/** The saved sign-in ({ server, user, salt, token } or { server, user, apiKey }), or null. */
 export const savedLogin = () => login;
 export const lastServer = () => storage.get(LAST_SERVER_KEY) || '';
 /** Where the sign-in is kept: 'credential-manager' (the desktop app) or 'browser'. */
@@ -66,11 +70,13 @@ async function keepLogin(next) {
   storage.set(LAST_SERVER_KEY, next.server);
 }
 export async function signOut() {
+  // an API key is given back: it stops working at once (without the server it stays listed under app passwords)
+  if (login?.apiKey) await createAuthApi(login.server).deviceRevoke(login.apiKey).catch(() => {});
   login = null;
   if (host) { try { await host('deleteLogin'); } catch { /* already gone */ } } else storage.del(LOGIN_KEY);
 }
 /** The client name the server sees (Navidrome lists it under Players and as who saved the play queue). */
-const clientName = () => {
+export const clientName = () => {
   let id = storage.get('sonus.device');
   if (!id) { id = Math.random().toString(36).slice(2, 8); storage.set('sonus.device', id); }
   return `${APP} (${deviceName || `浏览器 ${id}`})`;
@@ -85,13 +91,14 @@ export function normalizeServer(input) {
 }
 
 const ERRORS = {
+  43: '登录信息有冲突，请重新登录。', 44: '这个登录已被撤销，请重新登录。',
   10: '请求缺少必要的参数。', 20: '服务器的 Subsonic API 版本太旧。', 30: `${APP} 需要更新才能连接这个服务器。`,
   40: '用户名或密码不正确。', 41: '这个账号不能用 token 登录（例如 LDAP 账号）。', 50: '这个账号没有执行这个操作的权限。', 70: '服务器上找不到这项内容。',
 };
 function failure(err) { const e = new Error(ERRORS[err?.code] ?? err?.message ?? '服务器拒绝了请求。'); e.code = err?.code; return e; }
 
 function authParams(login, extra = {}) {
-  const p = new URLSearchParams({ u: login.user, t: login.token, s: login.salt, v: API_VERSION, c: clientName(), f: 'json' });
+  const p = new URLSearchParams(login.apiKey ? { apiKey: login.apiKey, v: API_VERSION, c: clientName(), f: 'json' } : { u: login.user, t: login.token, s: login.salt, v: API_VERSION, c: clientName(), f: 'json' });
   for (const [k, v] of Object.entries(extra)) {
     if (v === undefined || v === null) continue;
     if (Array.isArray(v)) for (const x of v) p.append(k, String(x)); else p.set(k, String(v));
@@ -106,6 +113,12 @@ export async function signIn({ server, user, password }) {
   if (!user) throw new Error('请填写用户名。');
   const salt = Array.from(crypto.getRandomValues(new Uint8Array(8)), b => b.toString(16).padStart(2, '0')).join('');
   const next = { server: base, user: String(user).trim(), salt, token: md5(`${password ?? ''}${salt}`) };
+  await ping(next);
+  await keepLogin(next);
+  return next;
+}
+async function ping(next) {
+  const base = next.server;
   let res;
   try { res = await fetch(`${base}/rest/ping.view?${authParams(next)}`); }
   catch { throw new Error(`连不上 ${base}。检查地址和网络；服务器在外网时需要 HTTPS。`); }
@@ -113,8 +126,20 @@ export async function signIn({ server, user, password }) {
   try { body = (await res.json())['subsonic-response']; } catch { /* not a Subsonic server */ }
   if (!body) throw new Error(`${base} 不像是 Navidrome（没有 Subsonic API 的回应）。`);
   if (body.status !== 'ok') throw failure(body.error);
+}
+/** Keeps an API key the server handed this browser (the browser sign-in), after checking it works. */
+export async function signInWithKey({ server, user, apiKey }) {
+  const next = { server: normalizeServer(server), user: String(user ?? '').trim(), apiKey };
+  await ping(next);
   await keepLogin(next);
   return next;
+}
+/** What a server offers before anyone signs in: its OpenSubsonic extensions by name (an empty set for plain Subsonic, or when it cannot be reached). */
+export async function serverExtensions(server) {
+  try {
+    const r = (await (await fetch(`${normalizeServer(server)}/rest/getOpenSubsonicExtensions.view?v=${API_VERSION}&c=${encodeURIComponent(APP)}&f=json`)).json())['subsonic-response'];
+    return new Set((r?.openSubsonicExtensions ?? []).map(x => x.name));
+  } catch { return new Set(); }
 }
 
 // ---------------------------------------------------------------- the client
@@ -366,11 +391,19 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
       try { ms.metadata = new MediaMetadata({ title: t.title, artist: t.artist, album: t.album, artwork: art ? [{ src: url('getCoverArt', { id: art, size: 512 }), sizes: '512x512' }] : [] }); } catch { /* an older engine */ }
     }
     ms.playbackState = player.state === 'playing' ? 'playing' : player.state === 'paused' ? 'paused' : 'none';
+    mediaPosition();
+  }
+  /** The system's controls draw their own progress from this (set on every change of state, and after a seek). */
+  function mediaPosition() {
+    const d = player.duration;
+    try { if (d > 0 && Number.isFinite(d)) navigator.mediaSession?.setPositionState?.({ duration: d, position: Math.min(d, Math.max(0, player.position || 0)), playbackRate: 1 }); } catch { /* an older engine */ }
   }
   if (navigator.mediaSession) {
     const on = (action, fn) => { try { navigator.mediaSession.setActionHandler(action, fn); } catch { /* not supported */ } };
     on('play', () => api.resume()); on('pause', () => api.pause()); on('nexttrack', () => api.next()); on('previoustrack', () => api.previous());
     on('seekto', e => api.seek(e.seekTime));
+    on('seekbackward', e => api.seek(player.position - (e.seekOffset || 10))); on('seekforward', e => api.seek(player.position + (e.seekOffset || 10)));
+    on('stop', () => api.pause());
   }
 
   // ---------------------------------------------------------------- output devices: what the browser can reach
@@ -440,7 +473,9 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
     outputs: () => outputs.map(o => ({ ...o })),
     subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
     about: () => ({ player: server.version || 'Navidrome', plugin: `Subsonic API ${server.api ?? API_VERSION}${extensions.size ? ' + OpenSubsonic' : ''}` }),
-    account: () => ({ server: base, user: login.user, client: clientName() }),
+    account: () => ({ server: base, user: login.user, client: clientName(), kind: login.apiKey ? 'key' : 'token' }),
+    /** The server's OpenSubsonic extensions by name (known after connect). */
+    extensions: () => new Set(extensions),
     async signOut() { unload(audio[0]); unload(audio[1]); await signOut(); },
     loginStorage,
     refresh,
@@ -468,7 +503,7 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
     async seek(s) {
       const to = Math.max(0, Math.min(player.duration ?? Infinity, s));
       try { el().currentTime = to; } catch { /* not loaded yet */ }
-      player.position = to; emit({ type: 'position', position: to }); saveQueue();
+      player.position = to; emit({ type: 'position', position: to }); saveQueue(); mediaPosition();
       if (to < (player.duration ?? 0) - 20 && preloadId) { unload(audio[1 - cur]); preloadId = null; } // seeking back: load the next one again later
     },
     async setVolume(v) { player.volume = Math.max(0, Math.min(1, v)); if (v > 0) player.muted = false; storage.set('sonus.volume', player.volume); applyVolume(); pushPlayer(); },
@@ -562,7 +597,7 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
     },
 
     // artwork: the server scales it; the URL is the same every time (a fixed salt), so the browser's cache keeps it
-    artworkNow: albumId => { const art = A.get(albumId)?.coverArt; return art ? url('getCoverArt', { id: art, size: 600 }) : null; },
+    artworkNow: (albumId, size = 600) => { const art = A.get(albumId)?.coverArt; return art ? url('getCoverArt', { id: art, size }) : null; },
     artwork(albumId) { return Promise.resolve(api.artworkNow(albumId)); },
     async lyrics(trackId, signal) {
       const t = T.get(trackId); if (!t) return null;

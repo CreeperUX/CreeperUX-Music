@@ -80,7 +80,9 @@ function browse(body, ctx, bag) {
   for (const [g, al] of genres) {
     const art = h('span', { class: 'cm-genre-art', 'aria-hidden': 'true' });
     bag.add(ctx.P.createImage(art, { src: ctx.art(al.id), alt: '' }, ctx.S));
-    grid.append(h('div', { role: 'listitem' }, h('a', { class: 'cm-genre', href: `#/genre/${encodeURIComponent(g)}`, style: { background: shade(al.color, -0.35) } }, h('span', {}, g), art)));
+    const tile = h('a', { class: 'cm-genre', href: `#/genre/${encodeURIComponent(g)}`, style: { background: shade(al.color, -0.35) } }, h('span', {}, g), art);
+    if (!al.color) ctx.albumColor(al.id).then(c => { if (c) tile.style.background = shade(c, -0.35); });
+    grid.append(h('div', { role: 'listitem' }, tile));
   }
   body.append(grid);
 }

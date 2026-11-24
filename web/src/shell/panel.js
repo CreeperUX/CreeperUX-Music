@@ -61,6 +61,7 @@ export function mountPanel(slot, ctx) {
     if (!c) return;
     const al = ctx.lib.albums.get(c.albumId), ar = ctx.lib.artists.get(c.artistId);
     el.style.setProperty('--cm-tint', al?.color ?? '#3a4148');
+    if (al && !al.color) ctx.albumColor(al.id).then(col => { if (col && ctx.player.trackId === c.id) el.style.setProperty('--cm-tint', col); });
     audioBody.replaceChildren(badges(ctx, c), factsList(ctx, c));
     if (shownTrack !== c.id) {
       shownTrack = c.id;

@@ -45,6 +45,7 @@ export function settingsView(holder, route, ctx) {
   // ------------------------------------------------ the account
   const acc = a.account(), accSec = section(s.account, s.accountIntro);
   facts(accSec, [[s.accountServer, acc.server], [s.accountUser, acc.user], [s.storage, a.loginStorage() === 'credential-manager' ? s.storageHost : s.storageBrowser]]);
+  if (a.extensions?.().has('sonusDeviceLogin')) row(accSec).append(h('a', { class: 'cm-linkbtn', href: '#/account' }, ic('lock'), h('span', {}, t.account)));
   bag.add(UI.createButton(row(accSec), { label: s.signOut, icon: 'logout', variant: 'secondary', onClick: async () => { await a.signOut(); location.replace(`${location.pathname}#/`); location.reload(); } }, ctx.S));
 
   // ------------------------------------------------ appearance (this interface)

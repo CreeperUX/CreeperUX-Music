@@ -68,4 +68,13 @@ export function sampleColor(img) {
   } catch { return null; } // another origin's image taints the canvas
 }
 
+/** The colour of an image by its address (asked for with CORS, so the canvas can be read whatever origin serves it); null when it cannot be loaded or read. */
+export async function sampleUrl(url) {
+  if (!url) return null;
+  const img = new Image();
+  img.crossOrigin = 'anonymous'; img.decoding = 'async';
+  try { await new Promise((ok, fail) => { img.onload = ok; img.onerror = fail; img.src = url; }); } catch { return null; }
+  return sampleColor(img);
+}
+
 export function greeting(t, d = new Date()) { const hr = d.getHours(); return hr < 5 ? t.greetNight : hr < 12 ? t.greetMorning : hr < 18 ? t.greetAfternoon : t.greetEvening; }

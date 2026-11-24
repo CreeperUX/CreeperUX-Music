@@ -29,7 +29,14 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
@@ -211,23 +218,23 @@ private fun PhoneShell(nav: Navigator) {
     }
 }
 
+/** The phone's tabs: Material 3's NavigationBar, in the Sonus colours (the selected tab on the raised colour). */
 @Composable
 private fun BottomTabs(nav: Navigator) {
     val c = Sonus.colors
-    Row(
-        Modifier.fillMaxWidth().background(c.window).navigationBarsPadding().height(60.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    NavigationBar(containerColor = c.window, tonalElevation = 0.dp, modifier = Modifier.height(80.dp + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding())) {
         Tab.entries.forEach { t ->
-            val on = nav.tab.value == t
-            Column(
-                Modifier.weight(1f).fillMaxHeight().pressable({ nav.selectTab(t) }, t.label).testTag("tab-${t.name}"),
-                horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
-            ) {
-                KitIcon(t.icon, size = 20.dp, tint = if (on) c.text else c.textQuiet)
-                Spacer(Modifier.height(3.dp))
-                Text(t.label, style = Sonus.type.caption, color = if (on) c.text else c.textQuiet)
-            }
+            NavigationBarItem(
+                selected = nav.tab.value == t,
+                onClick = { nav.selectTab(t) },
+                icon = { KitIcon(t.icon, size = 20.dp, tint = LocalContentColor.current) },
+                label = { Text(t.label, style = Sonus.type.caption) },
+                modifier = Modifier.testTag("tab-${t.name}"),
+                colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = c.text, selectedTextColor = c.text, indicatorColor = c.raised,
+                    unselectedIconColor = c.textQuiet, unselectedTextColor = c.textQuiet,
+                ),
+            )
         }
     }
 }

@@ -25,6 +25,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -132,42 +137,39 @@ fun RoundButton(
     }
 }
 
-/** A filter chip (歌单 / 专辑 / 艺人 …). */
+/** A filter chip (歌单 / 专辑 / 艺人 …): Material 3's FilterChip in the Sonus colours (raised; ink when selected). */
 @Composable
 fun Chip(text: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val c = Sonus.colors
-    Box(
-        modifier
-            .height(32.dp)
-            .clip(RoundedCornerShape(Shapes.chip))
-            .background(if (selected) c.text else c.raised)
-            .pressable(onClick)
-            .padding(horizontal = 14.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(text, style = Sonus.type.bodySmall, color = if (selected) c.panel else c.text, maxLines = 1)
-    }
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = { Text(text, style = Sonus.type.bodySmall, maxLines = 1) },
+        modifier = modifier,
+        shape = RoundedCornerShape(Shapes.chip),
+        colors = FilterChipDefaults.filterChipColors(
+            containerColor = c.raised, labelColor = c.text,
+            selectedContainerColor = c.text, selectedLabelColor = c.panel,
+        ),
+        border = null,
+    )
 }
 
-/** A pill button with text (登录, 重试 …): amber when [primary]. */
+/** A pill button with text (登录, 重试 …): Material 3's Button, amber when [primary], else raised. */
 @Composable
 fun PillButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, primary: Boolean = false, enabled: Boolean = true, icon: String? = null) {
     val c = Sonus.colors
-    Row(
-        modifier
-            .height(44.dp)
-            .clip(RoundedCornerShape(22.dp))
-            .background(if (primary) (if (enabled) c.accent else c.accent.copy(alpha = 0.5f)) else c.raised)
-            .pressable(onClick, enabled = enabled)
-            .padding(horizontal = 20.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
-    ) {
+    val colors = if (primary) {
+        ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent, disabledContainerColor = c.accent.copy(alpha = 0.45f), disabledContentColor = c.onAccent.copy(alpha = 0.6f))
+    } else {
+        ButtonDefaults.buttonColors(containerColor = c.raised, contentColor = c.text, disabledContainerColor = c.raised, disabledContentColor = c.textQuiet)
+    }
+    Button(onClick, modifier.height(44.dp), enabled = enabled, shape = RoundedCornerShape(22.dp), colors = colors, contentPadding = PaddingValues(horizontal = 20.dp)) {
         if (icon != null) {
-            KitIcon(icon, size = 16.dp, tint = if (primary) c.onAccent else c.text)
+            KitIcon(icon, size = 16.dp, tint = LocalContentColor.current)
             Spacer(Modifier.width(8.dp))
         }
-        Text(text, style = Sonus.type.cardTitle, color = if (primary) c.onAccent else c.text, maxLines = 1)
+        Text(text, style = Sonus.type.cardTitle, maxLines = 1)
     }
 }
 

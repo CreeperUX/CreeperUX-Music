@@ -5,8 +5,6 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -20,7 +18,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -34,12 +31,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.SliderState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -55,12 +56,7 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.ProgressBarRangeInfo
-import androidx.compose.ui.semantics.progressBarRangeInfo
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -107,48 +103,41 @@ private fun currentTrack(): Track? {
     return session.lib.track(state.trackId)
 }
 
-/** The position bar with the times under it; tapping or dragging shows where it will go and seeks on release. */
+/**
+ * The position slider with the times under it: Material 3's Slider (its dragging, tapping, keyboard and screen reader
+ * support), drawn in the Sonus colours with a slim track and a small round thumb, as the Windows bar. While it is
+ * dragged it shows where it will go; the song seeks on release.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SeekBar(modifier: Modifier = Modifier, light: Boolean = false) {
     val c = Sonus.colors
     val player = LocalPlayer.current
     val state by player.state.collectAsState()
     val position by player.position.collectAsState()
-    var dragging by remember { mutableStateOf(false) }
-    var drag by remember { mutableFloatStateOf(0f) }
     val duration = state.duration.coerceAtLeast(0.0)
-    val shown = if (dragging) drag.toDouble() else position.coerceIn(0.0, if (duration > 0) duration else 0.0)
+    val range = 0f..(if (duration > 0) duration.toFloat() else 1f)
+    val slider = remember(range) { SliderState(0f, 0, range) }
+    SideEffect {
+        if (!slider.isDragging) slider.value = position.toFloat().coerceIn(range)
+    }
+    val shown = if (slider.isDragging) slider.value.toDouble() else position.coerceIn(0.0, if (duration > 0) duration else 0.0)
     val text = if (light) Color.White else c.text
+    val colors = SliderDefaults.colors(
+        thumbColor = text, activeTrackColor = if (slider.isDragging) c.accent else text, inactiveTrackColor = text.copy(alpha = 0.22f),
+        disabledThumbColor = text.copy(alpha = 0.3f), disabledActiveTrackColor = text.copy(alpha = 0.3f), disabledInactiveTrackColor = text.copy(alpha = 0.12f),
+    )
     Column(modifier) {
-        BoxWithConstraints(
-            Modifier
-                .fillMaxWidth()
-                .height(24.dp)
-                .semantics {
-                    progressBarRangeInfo = ProgressBarRangeInfo(shown.toFloat(), 0f..(if (duration > 0) duration.toFloat() else 1f))
-                    setProgress { v -> player.seek(v.toDouble()); true }
-                }
-                .pointerInput(duration) {
-                    if (duration <= 0) return@pointerInput
-                    detectTapGestures { o -> player.seek((o.x / size.width).coerceIn(0f, 1f) * duration) }
-                }
-                .pointerInput(duration) {
-                    if (duration <= 0) return@pointerInput
-                    fun at(x: Float) = ((x / size.width).coerceIn(0f, 1f) * duration).toFloat()
-                    detectHorizontalDragGestures(
-                        onDragStart = { o -> dragging = true; drag = at(o.x) },
-                        onDragEnd = { player.seek(drag.toDouble()); dragging = false },
-                        onDragCancel = { dragging = false },
-                    ) { change, _ -> drag = at(change.position.x) }
-                }
-                .testTag("seek"),
-            contentAlignment = Alignment.CenterStart,
-        ) {
-            val f = if (duration > 0) (shown / duration).toFloat().coerceIn(0f, 1f) else 0f
-            Box(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).background(text.copy(alpha = 0.22f)))
-            Box(Modifier.fillMaxWidth(f).height(4.dp).clip(RoundedCornerShape(2.dp)).background(if (dragging) c.accent else text))
-            Box(Modifier.offset(x = maxWidth * f - 6.dp).size(12.dp).clip(CircleShape).background(text))
-        }
+        Slider(
+            state = slider,
+            onValueChange = { slider.value = it },
+            onValueChangeFinished = { player.seek(slider.value.toDouble()) },
+            modifier = Modifier.fillMaxWidth().height(24.dp).testTag("seek"),
+            enabled = duration > 0,
+            colors = colors,
+            thumb = { Box(Modifier.size(12.dp).clip(CircleShape).background(if (duration > 0) text else text.copy(alpha = 0.3f))) },
+            track = { s: SliderState -> SliderDefaults.Track(s, Modifier.height(4.dp), colors = colors, drawStopIndicator = null, thumbTrackGapSize = 0.dp) },
+        )
         Row {
             Text(Formats.duration(shown), style = Sonus.type.numbers, color = text.copy(alpha = 0.7f), modifier = Modifier.testTag("position"))
             Spacer(Modifier.weight(1f))

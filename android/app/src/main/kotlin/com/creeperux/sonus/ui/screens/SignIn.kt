@@ -196,15 +196,18 @@ fun SignInScreen(graph: AppGraph, message: String?) {
 @Composable
 private fun BrowserWait(start: DeviceLoginStart, reopen: () -> Unit, cancel: () -> Unit) {
     val c = Sonus.colors
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(c.raised).padding(20.dp)) {
+    // inset on the window colour, so its raised buttons stand out
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(c.window).padding(20.dp)) {
         Text("在浏览器中完成登录", style = Sonus.type.panelHeading, color = c.text)
         Spacer(Modifier.height(8.dp))
         Text("在打开的网页上登录服务器，确认下面的代码和网页上显示的一致，然后允许 Sonus 访问。", style = Sonus.type.bodySmall, color = c.textMuted)
+        Spacer(Modifier.height(6.dp))
+        Text("也可以在其他设备上打开：${start.verificationUrl}", style = Sonus.type.caption, color = c.textQuiet, modifier = Modifier.testTag("verification-url"))
         Spacer(Modifier.height(16.dp))
         Text(start.userCode, style = TextStyle(fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 30.sp, letterSpacing = 2.sp), color = c.text, modifier = Modifier.testTag("user-code"))
         Spacer(Modifier.height(16.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            PillButton("重新打开浏览器", reopen, icon = "external")
+            PillButton("重新打开浏览器", { reopen() }, icon = "external")
             PillButton("取消", cancel)
             CircularProgressIndicator(Modifier.size(18.dp), color = c.accent, strokeWidth = 2.dp)
         }
@@ -240,11 +243,18 @@ private fun Field(
     )
 }
 
-/** The server's approval page, in a Custom Tab (the user's browser, with its own sign-ins), else any browser. */
-private fun openBrowser(context: Context, url: String) {
+/**
+ * The server's approval page, in a Custom Tab (the user's browser, with its own sign-ins), else any browser. False when
+ * there is no browser here: the page then shows the address, to open on another device.
+ */
+private fun openBrowser(context: Context, url: String): Boolean = try {
+    CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(context, url.toUri())
+    true
+} catch (_: Exception) {
     try {
-        CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(context, url.toUri())
-    } catch (_: Exception) {
         context.startActivity(Intent(Intent.ACTION_VIEW, url.toUri()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        true
+    } catch (_: Exception) {
+        false
     }
 }

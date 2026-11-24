@@ -141,9 +141,10 @@ class LocalPlayback(
             load(id, autoplay = true, at = if (status == PlayerStatus.Stopped) 0.0 else position.value)
             return
         }
+        // loading first: play() may report playing at once (from its own call), which must not be overwritten
+        setStatus(PlayerStatus.Loading)
         if (exo.playbackState == Player.STATE_IDLE) exo.prepare()
         exo.play()
-        setStatus(PlayerStatus.Loading)
     }
 
     override fun pause() {
@@ -241,10 +242,11 @@ class LocalPlayback(
         positionFlow.value = at
         val items = listOfNotNull(itemFor(t), nextItem(trackId))
         applyVolume(t)
+        // the state first: the player reports what it does (playing …) from within the calls below
+        stateFlow.update { it.copy(trackId = trackId, duration = t.duration, error = null, status = if (autoplay) PlayerStatus.Loading else PlayerStatus.Paused) }
         exo.setMediaItems(items, 0, (at * 1000).toLong())
         exo.prepare()
         exo.playWhenReady = autoplay
-        stateFlow.update { it.copy(trackId = trackId, duration = t.duration, error = null, status = if (autoplay) PlayerStatus.Loading else PlayerStatus.Paused) }
         if (autoplay) startTicker()
     }
 

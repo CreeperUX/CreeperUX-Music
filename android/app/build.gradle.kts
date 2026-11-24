@@ -16,9 +16,9 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        // the demo server, as the emulator sees the PC (10.0.2.2 is the host's 127.0.0.1); overridden with
-        // -Psonus.testServer=http://… for a phone
-        testInstrumentationRunnerArguments["sonusServer"] = (project.findProperty("sonus.testServer") as String?) ?: "http://10.0.2.2:4533"
+        // the demo server the device tests sign in to: the PC's port 4633, which tools/test-device.ps1 forwards with adb reverse
+        // (the preview ARM64 emulator's apps cannot reach 10.0.2.2); -Psonus.testServer=… for another
+        testInstrumentationRunnerArguments["sonusServer"] = (project.findProperty("sonus.testServer") as String?) ?: "http://127.0.0.1:4633"
     }
 
     buildTypes {
@@ -47,6 +47,12 @@ android {
 
     testOptions {
         unitTests.isIncludeAndroidResources = true
+        unitTests.all {
+            // no native runtime on Windows ARM64 (see src/test/resources/robolectric.properties)
+            it.systemProperty("robolectric.graphicsMode", "LEGACY")
+            it.systemProperty("robolectric.sqliteMode", "LEGACY")
+            it.systemProperty("robolectric.conscryptMode", "OFF")
+        }
         animationsDisabled = true
     }
 

@@ -1,14 +1,14 @@
 // An artist: a banner from their artwork, Play / Shuffle, the most played tracks (play counts from the server),
 // the discography with a filter, and artists of the same genre.
 import { h, playButton } from '../dom.js';
-import { scope, tint, hero, actionRow, stickyBar, trackList, mediaCard, shelf, chips } from './common.js';
+import { scope, tint, tintFrom, hero, actionRow, stickyBar, trackList, mediaCard, shelf, chips } from './common.js';
 
 export function artistView(holder, route, ctx) {
   const t = ctx.t, bag = scope(), a = ctx.lib.artists.get(route.id);
   if (!a) { holder.append(h('p', { class: 'cm-pad' }, t.noResults(route.id))); return null; }
   const albums = a.albumIds.map(id => ctx.lib.albums.get(id)).sort((x, y) => y.year - x.year);
   const ids = albums.flatMap(al => al.trackIds), plays = ids.reduce((s, id) => s + ctx.track(id).playCount, 0);
-  tint(holder, a.color);
+  tint(holder, albums[0]?.color); tintFrom(holder, ctx, albums[0]?.id);
   holder.classList.add('cm-tinted', 'cm-artist');
   // the banner: the newest cover, large and blurred behind the name
   const banner = h('div', { class: 'cm-banner', 'aria-hidden': 'true' });

@@ -1,6 +1,6 @@
 // "Show all" for a home shelf, and a genre page: a virtual grid of cards that scrolls with the main region.
 import { h } from '../dom.js';
-import { scope, tint, mediaCard, trackList, actionRow } from './common.js';
+import { scope, tint, tintFrom, mediaCard, trackList, actionRow } from './common.js';
 import { homeCollections } from './home.js';
 
 function grid(body, ctx, bag, refs, label) {
@@ -14,7 +14,7 @@ export function shelfView(holder, route, ctx) {
   const col = homeCollections(ctx);
   const titles = { recent: t.recent, playlists: t.yourPlaylists, artists: t.topArtists, hires: t.hires, added: t.recentlyAdded, forgotten: t.rediscover };
   const refs = col[route.id] || [];
-  tint(holder, ctx.lib.albums.get(refs.find(r => r.type === 'album')?.id)?.color);
+  tint(holder, ctx.lib.albums.get(refs.find(r => r.type === 'album')?.id)?.color); tintFrom(holder, ctx, refs.find(r => r.type === 'album')?.id);
   holder.classList.add('cm-tinted');
   const body = h('div', { class: 'cm-pad' }, h('h1', { class: 'cm-greeting' }, titles[route.id] || t.home));
   holder.append(body);
@@ -26,7 +26,7 @@ export function genreView(holder, route, ctx) {
   const t = ctx.t, bag = scope(), g = route.id;
   const albums = ctx.lib.albumList.filter(a => a.genre === g);
   const ids = ctx.lib.trackList.filter(x => x.genre === g).sort((a, b) => b.playCount - a.playCount).map(x => x.id);
-  tint(holder, albums[0]?.color);
+  tint(holder, albums[0]?.color); tintFrom(holder, ctx, albums[0]?.id);
   holder.classList.add('cm-tinted');
   const body = h('div', { class: 'cm-pad' }, h('span', { class: 'cm-hero-kind' }, t.kindGenre), h('h1', { class: 'cm-greeting cm-genre-title' }, g));
   holder.append(body);

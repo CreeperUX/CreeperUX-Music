@@ -14,7 +14,7 @@ export function albumView(holder, route, ctx) {
   bag.add(ctx.P.createImage(avatar, { src: ctx.art(artist?.albumIds[0]), alt: '', shape: 'circle', placeholder: 'artist' }, ctx.S));
   const total = tracks.reduce((s, x) => s + x.duration, 0);
   const { titleEl } = hero(holder, ctx, bag, {
-    kind, title: a.title, art: ctx.art(a.id), onColor: a.color ? undefined : c => { a.color = c; },
+    kind, title: a.title, art: ctx.art(a.id), tintAlbum: a.id,
     meta: [h('a', { class: 'cm-meta-strong', href: `#/artist/${a.artistId}` }, avatar, a.artist), a.year ? String(a.year) : null, `${t.nSongs(tracks.length)}，${longDuration(total, t)}`, badges(ctx, first)],
   });
   stickyBar(holder, ctx, bag, titleEl, { title: a.title, kind: 'album', id: a.id });

@@ -1,7 +1,7 @@
 // Home: a greeting, eight quick tiles for what was playing lately, then shelves built from the library's statistics
 // (counted by the server): recently played, your playlists, top artists, the Hi-Res collection, recently added, forgotten.
 import { h, ic, playButton, greeting, isHiRes } from '../dom.js';
-import { scope, tint, shelf, chips } from './common.js';
+import { scope, tint, tintFrom, shelf, chips } from './common.js';
 
 export function homeCollections(ctx) {
   const lib = ctx.lib, last = new Map(), plays = new Map(), added = new Map();
@@ -25,7 +25,7 @@ export function homeView(holder, route, ctx) {
   const t = ctx.t, bag = scope();
   const col = homeCollections(ctx);
   const first = ctx.lib.albums.get(col.recent[0]?.id);
-  tint(holder, first?.color);
+  tint(holder, first?.color); tintFrom(holder, ctx, first?.id);
   holder.classList.add('cm-tinted');
 
   const top = h('div', { class: 'cm-home-top' });
@@ -44,13 +44,14 @@ export function homeView(holder, route, ctx) {
   const tiles = [];
   for (const ref of qrefs) {
     const isAlbum = ref.type === 'album', a = isAlbum ? ctx.lib.albums.get(ref.id) : null, p = isAlbum ? null : ctx.playlist(ref.id);
-    const name = a?.title ?? p?.name ?? '', color = a?.color ?? ctx.playlistColor(p);
+    const name = a?.title ?? p?.name ?? '', color = () => (a ? ctx.lib.albums.get(a.id)?.color : ctx.playlistColor(p));
+    if (a) ctx.albumColor(a.id); // known by the time the pointer gets there
     const artBox = h('span', { class: 'cm-quick-art' });
     const img = bag.add(ctx.P.createImage(artBox, { src: isAlbum ? ctx.art(a.id) : ctx.playlistArt(p), alt: '', placeholder: p?.kind === 'liked' ? 'heart-filled' : p?.kind === 'library' ? 'library' : 'playlist', shape: 'square' }, ctx.S));
     if (p?.kind === 'liked') img.root.dataset.special = 'heart-filled';
     const playing = () => ctx.isContextPlaying(ref.type, ref.id);
     const btn = playButton({ label: playing() ? t.pauseX(name) : t.playX(name), size: 'md', playing: playing(), onClick: () => ctx.togglePlayContext(ref.type, ref.id) });
-    const item = h('div', { class: 'cm-quick-item', role: 'listitem', 'data-current': ctx.isContext(ref.type, ref.id) || null, onMouseenter: () => tint(holder, color), onMouseleave: () => tint(holder, first?.color) },
+    const item = h('div', { class: 'cm-quick-item', role: 'listitem', 'data-current': ctx.isContext(ref.type, ref.id) || null, onMouseenter: () => tint(holder, color() ?? ctx.lib.albums.get(first?.id)?.color), onMouseleave: () => tint(holder, ctx.lib.albums.get(first?.id)?.color) },
       h('a', { class: 'cm-quick-link', href: `#/${ref.type}/${ref.id}` }, artBox, h('span', { class: 'cm-quick-title' }, name), ctx.isContext(ref.type, ref.id) ? h('span', { class: 'cm-eq', 'aria-hidden': 'true' }, h('i'), h('i'), h('i')) : null), btn);
     tiles.push({ item, btn, ref, name, playing });
     quick.append(item);

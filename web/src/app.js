@@ -7,10 +7,13 @@ import * as UI from '../vendor/creeperux-gui/ui/index.js';
 import * as P from '../vendor/creeperux-gui/plus/index.js';
 import * as M from '../vendor/creeperux-gui/media/index.js';
 import { STRINGS } from './strings.js';
-import { createSubsonicClient, loadLogin, savedLogin, signOut } from './api/subsonic.js';
+import { createSubsonicClient, loadLogin, savedLogin, signOut, lastServer } from './api/subsonic.js';
+import { configuredServer } from './api/config.js';
+import { mountDevice } from './views/device.js';
+import { mountPhone } from './shell/phone.js';
 import { mountLogin } from './views/login.js';
 import { assertAdapter } from './api/contract.js';
-import { h } from './dom.js';
+import { h, sampleUrl } from './dom.js';
 import { registerAppIcons } from './icons.js';
 import { mountTopbar } from './shell/topbar.js';
 import { mountLibrary } from './shell/library.js';
@@ -22,7 +25,7 @@ import { createAppMotion } from './motion.js';
 
 // ---------------------------------------------------------------- preferences (layout widths are the person's, D78)
 const PREFS_KEY = 'sonus.prefs';
-const DEFAULTS = { theme: 'dark', density: '', locale: 'zh-CN', startWidth: 300, startOpen: true, endWidth: 340, endOpen: true, panel: 'now', libFilter: null, libSort: 'recent' };
+const DEFAULTS = { theme: 'dark', density: '', locale: 'zh-CN', startWidth: 300, startOpen: true, endWidth: 340, endOpen: true, panel: 'now', libFilter: null, libSort: 'recent', libPage: 'playlists' };
 const prefs = (() => { try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; } catch { return { ...DEFAULTS }; } })();
 const query = new URLSearchParams(location.search);
 for (const k of ['theme', 'density', 'locale']) if (query.has(k)) prefs[k] = query.get(k);
@@ -36,7 +39,15 @@ const root = document.getElementById('app');
 // browser in local storage. ?server=… pre-fills the sign-in page; ?demo=1 offers the local demo server's account.
 const T = STRINGS[prefs.locale] || STRINGS['zh-CN'];
 await loadLogin();
-if (!savedLogin()) await showLogin(); // never resolves: signing in reloads the page
+// (neither resolves: signing in reloads the page) An app's link to the approval page of the browser sign-in works
+// without a sign-in kept here, when the server is known: allowing an app needs a web session, not this client's own.
+if (!savedLogin()) await (parseRoute(location.hash).name === 'device' && (configuredServer() || lastServer()) ? showDevice() : showLogin());
+function showDevice() {
+  applyLook();
+  mountDevice(root, { UI, S: UI.createServices({ root, locale: prefs.locale }), t: T, server: configuredServer() || lastServer(), code: parseRoute(location.hash).query.get('code') || '' });
+  window.addEventListener('hashchange', () => location.reload()); // another code, or on to the sign-in page
+  return new Promise(() => {});
+}
 function showLogin(error = '') {
   applyLook();
   mountLogin(root, { UI, S: UI.createServices({ root, locale: prefs.locale }), t: T, server: query.get('server') || '', demo: query.get('demo'), error });
@@ -69,6 +80,15 @@ ctx.art = albumId => {
   if (adapter.artworkNow) return adapter.artworkNow(albumId);
   if (!artCache.has(albumId)) artCache.set(albumId, signal => adapter.artwork(albumId, signal));
   return artCache.get(albumId);
+};
+// an album's colour, for tinting: sampled once from a small copy of its cover that is asked for with CORS, so the
+// canvas can be read whichever origin serves the covers; null when the server gives no cover or does not allow reading it
+const colors = new Map();
+ctx.albumColor = albumId => {
+  const known = ctx.lib.albums.get(albumId)?.color;
+  if (known || !albumId) return Promise.resolve(known ?? null);
+  if (!colors.has(albumId)) colors.set(albumId, sampleUrl(adapter.artworkNow?.(albumId, 64)));
+  return colors.get(albumId).then(c => { const a = ctx.lib.albums.get(albumId); if (c && a) a.color = c; return c; });
 };
 ctx.kitTrack = (t, { numbered = false } = {}) => t && ({
   id: t.id, title: t.title, artist: t.artist, album: t.album, duration: t.duration, number: numbered ? undefined : t.number, artwork: ctx.art(t.albumId),
@@ -194,6 +214,7 @@ function onRoute() {
 function mountView(r, scrollTop = 0, { enter = false, quiet = false } = {}) {
   try { view?.destroy?.(); } catch (e) { console.error(e); }
   const holder = h('div', { class: 'cm-view', 'data-view': r.name });
+  root.dataset.route = r.name; // the stylesheet lays some pages out differently on a phone (Now playing has no mini player under it)
   ctx.ws.main.replaceChildren(holder);
   view = (VIEWS[r.name] || VIEWS.home)(holder, r, ctx) || null;
   restoreScroll(scrollTop);
@@ -283,7 +304,7 @@ async function start() {
   } catch (err) {
     ws.main.replaceChildren();
     // the server refused the saved sign-in (the password changed): sign in again
-    if (err?.code === 40 || err?.code === 41) { signOut(); root.replaceChildren(); root.classList.remove('cm'); showLogin(err.message); return; }
+    if (err?.code === 40 || err?.code === 41 || err?.code === 44) { signOut(); root.replaceChildren(); root.classList.remove('cm'); showLogin(err.message); return; }
     UI.createEmptyState(ws.main, { title: t.offline, message: err?.message || t.offlineMsg, action: { label: t.retry, onClick: () => location.reload() } }, ctx.S);
     return;
   }
@@ -292,6 +313,7 @@ async function start() {
   mountLibrary(ws.start, ctx);
   mountPanel(ws.end, ctx);
   mountBar(ws.bottom, ctx);
+  mountPhone(ws.bottom, ctx);
   ctx.motion = createAppMotion(ctx, root);
 
   // keys: Space plays or pauses, Ctrl + ← → change track, Ctrl + ↑ ↓ the volume, Ctrl + K searches, Alt + ← → navigate

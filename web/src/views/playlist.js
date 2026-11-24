@@ -14,7 +14,7 @@ export function playlistView(holder, route, ctx) {
   const total = () => p.trackIds.reduce((s, id) => s + (ctx.track(id)?.duration ?? 0), 0);
   const metaText = h('span', {}, `${t.nSongs(p.trackIds.length)}，${t.about(longDuration(total(), t))}`);
   const { titleEl } = hero(holder, ctx, bag, {
-    kind, title: p.name, art: ctx.playlistArt(p), onColor: ['liked', 'library'].includes(p.kind) || ctx.lib.albums.get(ctx.track(p.trackIds[0])?.albumId)?.color ? undefined : () => {}, placeholder: p.kind === 'liked' ? 'heart-filled' : p.kind === 'library' ? 'library' : 'playlist',
+    kind, title: p.name, art: ctx.playlistArt(p), tintAlbum: ['liked', 'library'].includes(p.kind) ? null : ctx.track(p.trackIds[0])?.albumId, placeholder: p.kind === 'liked' ? 'heart-filled' : p.kind === 'library' ? 'library' : 'playlist',
     description: p.description, meta: [h('span', { class: 'cm-meta-strong' }, p.owner ?? ctx.adapter.account().user), metaText],
   });
   if (p.kind === 'auto' && p.query) titleEl.after(h('p', { class: 'cm-query' }, h('span', {}, t.autoplaylistQuery), h('code', { dir: 'ltr' }, p.query)));

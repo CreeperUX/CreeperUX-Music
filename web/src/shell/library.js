@@ -30,6 +30,8 @@ export function mountLibrary(slot, ctx) {
       if (p) ctx.go(`/playlist/${p.id}`);
     } }, ctx.S);
   create.element.classList.add('cm-round');
+  // the whole library as a page (#/library): albums, artists and songs as grids and a list
+  head.append(h('a', { class: 'cm-icon-link cm-lib-open', href: '#/library', 'aria-label': t.openLibrary, title: t.openLibrary }, ic('expand')));
   title.addEventListener('click', () => {
     const rail = ctx.ws.layout.start.width < RAIL;
     ctx.ws.setWidth('start', rail ? (ctx.prefs.startWide || 300) : 72);

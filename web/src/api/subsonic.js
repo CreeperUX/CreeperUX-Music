@@ -570,7 +570,8 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
         try {
           const list = (await call('getLyricsBySongId', { id: trackId }, { signal })).lyricsList?.structuredLyrics ?? [];
           const pick = list.find(l => l.synced && l.line?.length) ?? list.find(l => l.line?.length);
-          if (pick) return pick.synced ? pick.line.map(l => ({ time: (l.start ?? 0) / 1000 + (pick.offset ?? 0) / 1000, text: l.value ?? '' })) : pick.line.map(l => ({ text: l.value ?? '' }));
+          // OpenSubsonic: a positive offset shows the lyrics sooner (as the Windows app reads it)
+          if (pick) return pick.synced ? pick.line.map(l => ({ time: Math.max(0, (l.start ?? 0) / 1000 - (pick.offset ?? 0) / 1000), text: l.value ?? '' })) : pick.line.map(l => ({ text: l.value ?? '' }));
         } catch (err) { if (err?.name === 'AbortError') throw err; }
       }
       const r = await call('getLyrics', { artist: t.artist, title: t.title }, { signal }).catch(err => { if (err?.name === 'AbortError') throw err; return null; });

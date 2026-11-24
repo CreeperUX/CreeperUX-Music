@@ -7,8 +7,9 @@
 //! Reads run in autocommit; every write is one short `BEGIN IMMEDIATE` transaction, so it waits for the write lock
 //! at its start instead of failing halfway. SQLite calls block, so they run on tokio's blocking threads.
 //!
-//! Not here (yet): Navidrome's `SEEDEDRAND` function and `NATSORT` collation, which its connections register.
-//! Nothing this server reads or writes so far touches them.
+//! Navidrome's connections register a collation, `NATSORT`, which its sort orders name when `EnableNaturalSorting`
+//! is on: registered here too (library/natural.rs). Its `SEEDEDRAND` function is not: the random lists are ordered
+//! by this server itself (library/browse.rs).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -73,6 +74,7 @@ impl Db {
         // journal_mode answers with a row; the database is in WAL mode already (Navidrome's connections ask for it)
         conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
         conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL;")?;
+        conn.create_collation("NATSORT", crate::library::natural::compare_fold)?;
         Ok(conn)
     }
 

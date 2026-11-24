@@ -24,6 +24,7 @@ use hyper_util::rt::TokioIo;
 use sonus_server::auth::Auth;
 use sonus_server::connect::Connect;
 use sonus_server::gateway::{self, Gateway, Settings};
+use sonus_server::library::Library;
 use sonus_server::subsonic::Subsonic;
 use sonus_server::trust::TrustList;
 use tokio::net::{TcpListener, TcpStream};
@@ -75,6 +76,8 @@ pub struct GatewaySetup<'a> {
     pub auth: Option<Auth>,
     /// What the gateway answers Sonus Connect version 2 with.
     pub connect: Option<Connect>,
+    /// What the gateway answers the library's reads with.
+    pub library: Option<Library>,
 }
 
 impl Default for GatewaySetup<'_> {
@@ -89,6 +92,7 @@ impl Default for GatewaySetup<'_> {
             subsonic: None,
             auth: None,
             connect: None,
+            library: None,
         }
     }
 }
@@ -115,6 +119,9 @@ pub async fn gateway(upstream: SocketAddr, setup: GatewaySetup<'_>) -> (SocketAd
     }
     if let Some(connect) = setup.connect {
         gateway.set_connect(connect);
+    }
+    if let Some(library) = setup.library {
+        gateway.set_library(library);
     }
     tokio::spawn(gateway::serve(listener, gateway, std::future::pending()));
     (addr, ready)

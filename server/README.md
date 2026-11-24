@@ -9,7 +9,8 @@ Status: phase 0's gateway, phase 2: **Subsonic sign-ins are checked here** ([bel
 routes are answered here** ([below](#the-auth-routes): the web sign-in with two-step verification, app passwords, the
 browser sign-in for apps), on Navidrome's own database, which the server opens beside Navidrome; and phase 1:
 **Sonus Connect version 2 is answered here** ([below](#sonus-connect-version-2): one playback session per user, kept
-in the database). Everything else is still Navidrome's. It reads
+in the database); and phase 3, so far: **the library's reads `ping`, `getSong`, `getAlbum` and `getAlbumList2` are
+answered here** from Navidrome's database ([below](#the-librarys-reads)). Everything else is still Navidrome's. It reads
 Navidrome's own settings (`navidrome.toml`, `ND_*`, the command line), has unit and integration tests, and passes the
 contract suite and the differential corpora of `tools/contract` in front of the real frozen Navidrome
 ([below](#checked-against-the-real-navidrome)). The image `ghcr.io/creeperux/sonus-server` is built by CI
@@ -43,7 +44,12 @@ The gateway reads Navidrome's settings as Navidrome reads them, so a container k
   routes answered here are under it too), `ExtAuth.TrustedSources`, `ExtAuth.UserHeader`, `TLSCert`, `TLSKey`; and for
   what is answered here: `DataFolder` (also `--datafolder`), `DbPath`, `PasswordEncryptionKey`, `AuthRequestLimit`,
   `AuthWindowLength`, `Sonus.TwoFactor`, `HTTPHeaders.FrameOptions`, `SessionTimeout` (also `--sessiontimeout`),
-  `EnableGravatar`, `DevAutoLoginUsername`.
+  `EnableGravatar`, `DevAutoLoginUsername`; and what changes the library's answers
+  ([the table there](#the-librarys-reads)): `Subsonic.AppendSubtitle`, `Subsonic.AppendAlbumVersion`,
+  `Subsonic.EnableAverageRating`, `Subsonic.ArtistParticipations`, `Subsonic.LegacyClients`,
+  `Subsonic.MinimalClients`, `PreferSortTags`, `EnableNaturalSorting`, `RecentlyAddedByModTime`,
+  `AlbumPlayCountMode`, `EnableMediaFileCoverArt`, `IgnoredArticles`, `Search.Backend`, `Search.FullString` (and its
+  old name `SearchFullString`).
 
 | Setting | Default | |
 |---|---|---|
@@ -75,7 +81,7 @@ The gateway refuses to start (exit code 2, with the reason in the log) rather th
   there Navidrome takes them over its environment; write them as `Address`, `Port`, … instead;
 - a user header the gateway sets or removes itself (`X-Real-IP`, `Host`, `Connection`, …), or one that is not a header name;
 - `AuthRequestLimit` that is not a number, `AuthWindowLength` or `SessionTimeout` that is not a duration,
-  `EnableGravatar` that is not true or false, an in-memory `DbPath`;
+  `EnableGravatar` or one of the library's yes-or-no settings that is not true or false, an in-memory `DbPath`;
 - a config file Navidrome could not read either (bad TOML, the same key twice).
 
 ### What Navidrome is told
@@ -167,8 +173,8 @@ Where the gateway differs from Navidrome, knowingly:
 - App passwords made before API keys get their key hash when the server starts (Navidrome: when its store is first
   used, which with sign-ins checked here might be never).
 
-What Navidrome still does for a signed-in request, unchanged: it looks the user up by the header's name (never
-creating one), registers the player (`c`, the `nd-player-…` cookie, named after the user name as the client typed it,
+What Navidrome still does for a signed-in request it answers (all but [the library's reads](#the-librarys-reads)),
+unchanged: it looks the user up by the header's name (never creating one), registers the player (`c`, the `nd-player-…` cookie, named after the user name as the client typed it,
 which is the name the gateway passes on), writes the user's last access, and answers the method. For `tokenInfo`,
 answered here, the gateway writes the last access itself, at most once a minute per user as Navidrome does. An app
 password's use (`last_used_at`, `last_used_by`) is noted here as Navidrome notes it, at most every five minutes per
@@ -227,7 +233,7 @@ answered 413 here, where Navidrome's handler would fail on the truncated JSON.
 - every connection: WAL, `busy_timeout` 15 s, `foreign_keys=ON`, `synchronous=NORMAL`, as Navidrome's;
 - reads in autocommit; every write is one short `BEGIN IMMEDIATE` transaction;
 - SQLite is rusqlite's bundled copy, with FTS5 and the JSON functions (Navidrome's triggers need FTS5 on writes to
-  songs, albums and artists: later phases);
+  songs, albums and artists: later phases), and Navidrome's `NATSORT` collation registered on every connection;
 - calls block, so they run on tokio's blocking threads;
 - the schema stays Navidrome's: checked at start (above), never altered or dropped here, never VACUUMed. The server's
   own tables ([Sonus Connect](#sonus-connect-version-2)) are beside it, in their own namespace with their own version
@@ -241,6 +247,94 @@ Timestamps are written as Navidrome's driver writes them (`src/gotime.rs`: `2006
 AES-256-GCM, key sha256(`PasswordEncryptionKey`), stored as base64(nonce ‖ ciphertext ‖ tag). An API key is found by
 sha256 of the key as typed, lowercased and without dashes and spaces. The unit tests open values Navidrome's own code
 sealed, and Navidrome's code opened what this server sealed (`tests/golden/README.md`).
+
+## The library's reads
+
+`src/library/` (roadmap, phase 3). The Subsonic methods Sonus clients read the library with are answered here, from
+Navidrome's database, as Navidrome answers them: the same JSON, byte for byte, for the same request. Navidrome still
+owns the database and writes it (its scanner too), so everything is read when the request comes and nothing is kept
+between requests. So far, part 1 of 3:
+
+| Method | |
+|---|---|
+| `ping` | the envelope alone, once the player is registered (below) |
+| `getSong` | a song with the signed-in user's star, rating, play count and bookmark; 70 `Song not found` (also without an id) |
+| `getAlbum` | an album and its songs in disc and track order; 70 `Album not found` |
+| `getAlbumList2` | every `type`: `alphabeticalByName`, `alphabeticalByArtist`, `newest`, `recent`, `frequent`, `starred`, `highest`, `byYear` (`fromYear` > `toYear`: newest first), `byGenre`, `random`; `size` (10; at most 500; 0 or less: everything), `offset`; `X-Total-Count`; 10 for a missing `type`, `genre`, `fromYear` or `toYear`, 0 for a year that is not a number or an unknown type, in Navidrome's words |
+
+Each also as `<method>.view`, by GET or as a form post, for any way of signing in the gateway checks.
+
+**How an answer is made.** The queries are Navidrome's own SQL text (`query.rs`; taken from its trace log, statement
+by statement), so SQLite answers with the same rows in the same order: the user's annotations joined in, the user's
+libraries as Navidrome filters them (an admin sees every library, anyone else the ones granted in `user_library`), the
+artwork state from `item_artwork` for the `coverArt` ids (`al-<id>_<hash>`, `mf-<id>`, `dc-<album>:<disc>`). The rows
+become JSON as Go's `encoding/json` writes Navidrome's response structs (`entities.rs`, `json.rs`): the fields in the
+struct's order, left out where `omitempty` leaves them out, times as Go marshals them with the offset they were
+stored with, floats as Go formats them, `<`, `>` and `&` escaped as `\u003c`…
+
+**What goes on to Navidrome all the same**, signed in, as before this phase (the gateway logs why at debug level):
+
+| The request | Why |
+|---|---|
+| asks for XML or JSONP (`f` is not `json`) | the roadmap's decision 1: JSON only |
+| carries `musicFolderId` | Sonus clients do not send it; it changes the list and has an error of its own |
+| `getAlbumList2` with an `offset` and a `size` of 0 or less | Navidrome's query fails there (an OFFSET without a LIMIT), and its answer says so |
+| comes from a player with a transcoding set | songs then carry `transcodedSuffix` and a content type from Go's tables |
+| comes from a player with `ReportRealPath`, on Windows | Go builds the path by Windows' rules there; on Linux (the image) it is answered here |
+| would show a song whose suffix is not in Navidrome's own list of types (`resources/mime_types.yaml`) | Go asks the operating system for its content type |
+| names a parameter that is not UTF-8 text, or a row holds JSON this server does not read as Go's decoders do (a participant's role Navidrome does not know, …) | Navidrome's answer, error or not, is its own |
+| could not be read from the database, or Navidrome registered no player for it, or its user is gone | Navidrome answers, or fails, as it would |
+
+**The player.** Navidrome registers a player for every Subsonic request: it finds it by the `nd-player-…` cookie, else
+by user, client name (`c`) and the browser family it reads from `User-Agent`, else makes one; it writes the player's
+address and last-seen time at most once a minute, and answers with the cookie. A player's settings change a song
+(`ReportRealPath`: the `path`; a forced transcoding). Registering stays Navidrome's until the methods that write a
+player's state move here (phase 4): for a request answered here the server sends Navidrome one `ping` as the
+signed-in user, with the request's client name, cookies, `User-Agent` and client address, and gives the client the
+`Set-Cookie` Navidrome answers with (`player.rs`). So the player is the row Navidrome would have found or made, by
+Navidrome's own rules. That answer is remembered for a minute per user, client name, `User-Agent` and cookies (the
+time Navidrome lets pass between two writes of a player); the player's row is read again at every request, and a row
+that is gone, or no longer this user's and client's, is registered anew. In Navidrome's log a client's reads thus show
+as one `ping` a minute.
+
+**The last access.** Navidrome notes a user's last access at every request it answers, at most once a minute; so does
+the gateway for the requests it answers here (the same code as for `tokenInfo`).
+
+**Navidrome's settings** that change these answers are read as Navidrome reads them ([Settings](#settings)):
+
+| Setting | Default | Changes |
+|---|---|---|
+| `Subsonic.AppendSubtitle`, `Subsonic.AppendAlbumVersion` | on | a song's `title` and an album's `name` (and the made-up `path`) get the subtitle or version tag appended |
+| `Subsonic.EnableAverageRating` | on | `averageRating` |
+| `Subsonic.LegacyClients`, `Subsonic.MinimalClients` | `DSub`, `SubMusic` | which client names get no OpenSubsonic fields, or a song's id and title only |
+| `PreferSortTags` | off | `sortName`, and the order of the lists by name |
+| `EnableNaturalSorting` | off | numbers in names order by value: Navidrome's `NATSORT` collation, registered on this server's connections too (`natural.rs`) |
+| `RecentlyAddedByModTime` | off | `created`, and the `newest` list |
+| `AlbumPlayCountMode` | `absolute` | `normalized`: an album's `playCount` is divided by its songs |
+| `EnableMediaFileCoverArt` | on | whether a song with a picture of its own has a `mf-` cover id |
+| `Subsonic.DefaultReportRealPath` | off | nothing here: Navidrome gives it to a new player, and the player's own setting is what is read |
+
+(`Subsonic.ArtistParticipations`, `IgnoredArticles`, `Search.Backend` and `Search.FullString` are read already, for
+the methods of parts 2 and 3.)
+
+**Headers.** Navidrome's own ([Sign-ins](#sign-ins)), the player's `Set-Cookie`, `X-Total-Count` on album lists, and
+gzip when the client's `Accept-Encoding` names it, as Navidrome compresses every JSON answer. Debug builds add
+`X-Sonus-Answered: rust`, which the tests read to know who answered; a release build (the image) does not send it.
+
+Where it knowingly differs from Navidrome:
+
+- **The random list** (`type=random`) is ordered by this server's own seed, kept per user in memory as Navidrome
+  keeps its own: a new order whenever the list is asked for from its start, and the pages of one pass fit together.
+  The order itself is another than Navidrome's would have been (both are random).
+- **`contributors`** (a song's composers, performers, …) come sorted by role; Go lists the roles from a map, in
+  another order every time.
+- **Compression**: gzip at Navidrome's level, but another encoder's bytes (the same content); a client that takes
+  `deflate` only gets the answer as it is.
+- **Text that is not UTF-8** in the database is written with U+FFFD as the character itself; Go writes the escape
+  `\ufffd`. The same JSON string.
+- **Navidrome's paging shortcut** for offsets above 50,000 (`DevOffsetOptimize`: a `rowid NOT IN` subquery) is not
+  taken: the plain OFFSET gives the same rows.
+- **An error reading the database** hands the request to Navidrome instead of answering "Internal Server Error".
 
 ## Sonus Connect version 2
 
@@ -343,6 +437,20 @@ pushes linux/amd64 and linux/arm64, tagged `latest`, the Cargo version and `sha-
   authenticator codes against RFC 6238's vectors, the QR code, ids, the rate limiter's window arithmetic, JSON bodies
   decoded as Go decodes them;
 - `tests/gateway.rs` also: the 4 MiB limit on bodies to `/api` and `/jellyfin`;
+- `tests/library.rs`: the library's reads through the gateway, on a database with Navidrome's own tables
+  (`tests/common/library.sql`: the statements of a database the fork made) and a fake Navidrome that registers players
+  as the real one does: a song in Navidrome's bytes; that Navidrome sees a client's registration once a minute and
+  nothing else of the requests answered here; everything that stays Navidrome's reaching it signed in and whole (XML,
+  JSONP, `musicFolderId`, a transcoding player, an unknown content type, rows Go would read otherwise, no player);
+  what a user sees (no library: nothing; an admin: everything; each their own stars and counts); every list type's
+  order, paging, `X-Total-Count` and errors; the random list's pages; `EnableNaturalSorting`, `PreferSortTags`,
+  `RecentlyAddedByModTime`, `AlbumPlayCountMode`, `Subsonic.EnableAverageRating`, the legacy and minimal clients, a
+  player's `ReportRealPath`; gzip; the sign-in checked before anything is read;
+- unit tests of the library's pure parts: Go's JSON (floats, strings, omitted fields), songs and albums against
+  answers of the real Navidrome, cover art ids, made-up and real paths, `appendSuffix`, content types, the sort orders
+  with every setting (the ORDER BY clauses Navidrome logs), squirrel's conditions, Go's `toSnakeCase`, the list
+  filters and their errors, the natural collation (the cases of Navidrome's own test), the stored tags and
+  participants, the player cookie;
 - `tests/connect_vectors.rs`: the protocol's shared vectors (`docs/protocol/connect-vectors.json`) replayed on the
   session logic: 14 cases, 157 steps, each compared exactly;
 - `tests/connect.rs`: Sonus Connect version 2 over its real WebSocket through the gateway, with a fake Navidrome that
@@ -367,7 +475,7 @@ node tools/fixtures/build.mjs                         # once: the test library a
 node tools/contract/run.mjs --through-gateway         # the contract suite through this server
 node tools/contract/diff.mjs --go-vs-gateway          # the same requests to Navidrome alone and to this server
 node tools/contract/diff.mjs --go-vs-gateway --corpus tools/contract/corpus/writes.json
-node --test tools/contract/gateway.test.mjs           # the limiter, what Navidrome never sees, Connect across a restart
+node --test tools/contract/gateway.test.mjs           # the limiter, what Navidrome never sees, who answers the library, Connect across a restart
 node --test tools/contract/auth-routes.test.mjs       # /auth on a new server, optional and off, rate limit, body limits
 node tools/contract/web-ui.check.mjs                  # the old web UI, headless (Playwright), through this server
 ```
@@ -376,6 +484,37 @@ These start this server as its image runs it: `cargo run`, which starts Navidrom
 database.
 
 ## Checked against the real Navidrome
+
+### The library's reads (phase 3, part 1), 2026-11-25
+
+On Windows on ARM (the fork's x64 binary, 0.64.2-sonus.10, `fb95b5ce`), this server started as its image starts it
+(`cargo run`, a debug build, which marks its own answers), on copies of the golden database:
+
+- `node tools/contract/diff.mjs --go-vs-gateway`: 249 of 249 the same as Navidrome alone, 124 of them answered by
+  this server itself. The runner now checks who answered every request (`X-Sonus-Answered`): a method taken over
+  must be answered here unless the corpus says why not, and nothing else may be. 80 requests were added for this
+  part: every list type whole and paged, as three users (one who starred, rated and played nothing; the admin); the
+  paging boundaries (the last page, the last album, past the end, sizes 0, -1, 1, 501 and not a number, offsets
+  negative and not a number); `byYear` both ways round, one year, no album, every year; `byGenre` in another case,
+  with LIKE's wildcards, unknown; every error; `.view` and form posts; no id, an empty id, the wrong kind of id; the
+  legacy and minimal client names; XML, JSONP and `musicFolderId` staying Navidrome's. `X-Total-Count` is compared.
+  With `corpus/writes.json`: 34 of 34.
+- `node tools/contract/run.mjs --through-gateway`: 131 of 131 (two added: a random list's pages give every album
+  once and another order on another pass; `X-Total-Count`), and 131 of 131 against Navidrome alone, 8 skipped there.
+- `node --test tools/contract/gateway.test.mjs`: 7 of 7. New: with Navidrome's log at debug level, eight requests to
+  the four methods (errors and a random list among them) are answered by this server with Navidrome's bytes and the
+  player cookie's name, and none of them is in the log of the Navidrome behind it, which shows exactly one `ping` for
+  the client (the registration) and the three requests left to it (XML, `musicFolderId`, another method); the
+  player's row is the same as the one Navidrome alone makes, and the last access is written. And: a player's
+  `ReportRealPath`, turned on in the database while the servers run, changes the next answer on both (on Windows this
+  server leaves such a player's songs to Navidrome: checked that it does).
+- `cargo test`: 230 tests (143 unit, 12 in `tests/library.rs`, 75 in the other integration tests).
+
+Not checked: the image and Linux binaries beyond CI building them, so `ReportRealPath` answered here (Linux only) is
+covered by unit tests and `tests/library.rs` on CI's Linux, not against the real Navidrome; the settings other than
+the defaults against the real Navidrome (`tests/library.rs` and the unit tests check them against Navidrome's logged
+SQL and its code); a library of production's size, and timings; a scan running while lists are read; the real
+clients against this part (the Windows acceptance is run after part 3).
 
 ### Sonus Connect version 2 (phase 1), 2026-11-24
 
@@ -536,6 +675,9 @@ binaries (no Linux here).
 - `src/connect/`: Sonus Connect version 2. `session.rs`, `queue.rs`: the protocol's logic, pure; `mod.rs`: a room per
   user, and the upgrade; `socket.rs`: one connection; `store.rs`: the session in the database, and the library as a
   user sees it; `extensions.rs`: the merge into `getOpenSubsonicExtensions`.
+- `src/library/`: the library's reads. `mod.rs`: what is answered here and what goes on to Navidrome; `browse.rs`: the
+  methods; `query.rs`: Navidrome's queries; `entities.rs`: albums and songs as its JSON; `json.rs`: Go's JSON;
+  `player.rs`: the player, registered by Navidrome; `natural.rs`: the `NATSORT` collation.
 - `src/jwt.rs`: session tokens; `src/id.rs`: ids and the random strings people type.
 - `src/db.rs`: Navidrome's database; `src/gotime.rs`: its timestamps; `src/secrets.rs`: its encryption.
 - `src/startup.rs`: what must hold before anything is answered here.
@@ -544,7 +686,7 @@ binaries (no Linux here).
 - `scripts/check-real-navidrome.mjs`: the phase 0 check above.
 - `examples/seal.rs`, `tests/golden/`: checking the encryption against Navidrome's own code.
 
-Code ported from Navidrome's (the sign-in rule, the limiter, the encryption) is a derived work of Navidrome
+Code ported from Navidrome's (the sign-in rule, the limiter, the encryption, the library's queries and answers) is a derived work of Navidrome
 (GPL-3.0) and says so in its header; GPL-3.0 and AGPL-3.0 combine (section 13 of both). Sonus Connect is Sonus's own:
 written from its protocol and its reference implementation in this repository.
 
@@ -552,5 +694,8 @@ The WebSocket's framing is `tokio-tungstenite` (tungstenite): the WebSocket libr
 and warp among them), maintained, and usable on the connection hyper hands over after an upgrade without a framework
 around it. It is built without its handshake, client and TLS features: the gateway answers the upgrade itself (it has
 SHA-1 and base64 already), so the dependency adds framing, masking, UTF-8 and size checks and nothing else.
+
+Compression of the library's answers is `flate2` with its default pure-Rust backend (`miniz_oxide`): the gzip
+library of the Rust ecosystem, maintained by the Rust project's own contributors; no C is added to the build.
 
 `rustfmt.toml` keeps the width the code is written to (160).

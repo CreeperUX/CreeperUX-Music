@@ -13,15 +13,15 @@ import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { Subsonic } from './lib/subsonic.mjs';
 import { serveGolden } from '../fixtures/serve.mjs';
-import { startGatewayOnGolden } from './diff.mjs';
+import { ANSWERED_BY_RUST, ANSWERED_HEADER, startGatewayOnGolden } from './diff.mjs';
 import { device } from './lib/connect.mjs';
 
 const CLIENT = 'sonus-gateway-test';
 const sleep = ms => new Promise(done => setTimeout(done, ms));
 
 /** The Subsonic error code of a ping with these parameters, 0 when it is answered ok. */
-async function ping(base, params) {
-  const { body } = await new Subsonic(base, {}, { client: CLIENT }).call('ping', params);
+async function ping(base, params, method = 'ping') {
+  const { body } = await new Subsonic(base, {}, { client: CLIENT }).call(method, params);
   return body.status === 'ok' ? 0 : body.error.code;
 }
 
@@ -102,9 +102,10 @@ test('Navidrome never sees what the Rust server refused, nor the credentials of 
   ];
   for (const server of [go, rust]) {
     for (const params of refused) assert.notEqual(await ping(server.url, params), 0, params.mark);
-    for (const params of accepted) assert.equal(await ping(server.url, params), 0, params.mark);
+    // (a method Navidrome still answers: the Rust server answers a signed-in ping itself)
+    for (const params of accepted) assert.equal(await ping(server.url, params, 'getLicense'), 0, params.mark);
     // as a form post too
-    const posted = await new Subsonic(server.url, {}, { client: CLIENT }).call('ping', { u: listener.username, p: listener.password, mark: 'accepted-form' }, { post: true });
+    const posted = await new Subsonic(server.url, {}, { client: CLIENT }).call('getLicense', { u: listener.username, p: listener.password, mark: 'accepted-form' }, { post: true });
     assert.equal(posted.body.status, 'ok');
   }
   await sleep(300);
@@ -175,6 +176,120 @@ test('signed in by the gateway, a request is to Navidrome what it was with crede
       assert.equal(db.prepare('SELECT count(*) AS n FROM user').get().n, Object.keys(users).length, 'no user was created');
     } finally { db.close(); }
   }
+});
+
+test('the library’s reads are answered by the Rust server: Navidrome sees a player’s registration and nothing else', { timeout: 600_000 }, async t => {
+  // at debug level Navidrome logs every request it gets, with its whole query
+  const { go, rust, users } = await both(t, { ND_LOGLEVEL: 'debug' });
+  const { listener } = users;
+  const ids = go.manifest.ids;
+  const client = 'sonus-library-test';
+  // each request carries a mark, to find it in Navidrome's log
+  const taken = [
+    ['ping', {}],
+    ['getSong', { id: ids['track.flac'] }],
+    ['getSong', { id: 'no-such-song' }],
+    ['getAlbum', { id: ids['album.twoDiscs'] }],
+    ['getAlbumList2', { type: 'alphabeticalByName', size: 500 }],
+    ['getAlbumList2', { type: 'starred' }],
+    ['getAlbumList2', { type: 'random', size: 3 }],
+    ['getAlbumList2', {}],
+  ].map(([method, params], i) => [method, { ...params, mark: `taken-${i}-${method}${params.type === 'random' ? '-random' : ''}` }]);
+  const left = [
+    ['getSong', { id: ids['track.flac'], f: 'xml', mark: 'left-xml' }],
+    ['getAlbumList2', { type: 'newest', musicFolderId: 1, mark: 'left-music-folder' }],
+    ['getMusicFolders', { mark: 'left-other-method' }],
+  ];
+  for (const [method] of taken) assert.ok(ANSWERED_BY_RUST.includes(method), method);
+  const answers = {};
+  for (const server of [go, rust]) {
+    const api = new Subsonic(server.url, { u: listener.username, password: listener.password }, { client });
+    const got = [];
+    for (const [method, params] of [...taken, ...left]) {
+      const res = await api.fetch(method, params);
+      const text = await res.text();
+      got.push({ mark: params.mark, by: res.headers.get(ANSWERED_HEADER), cookie: (res.headers.get('set-cookie') ?? '').split('=')[0], text });
+    }
+    answers[server === go ? 'go' : 'rust'] = got;
+  }
+  await sleep(300);
+  // who answered, by the Rust server's own mark on its answers (debug builds), and the same answers
+  for (const [i, fromRust] of answers.rust.entries()) {
+    const fromGo = answers.go[i];
+    const mine = fromRust.mark.startsWith('taken-');
+    assert.equal(fromRust.by, mine ? 'rust' : null, `${fromRust.mark}: ${mine ? 'answered by the Rust server' : 'left to Navidrome'}`);
+    assert.equal(fromGo.by, null);
+    assert.equal(fromRust.cookie, fromGo.cookie, `${fromRust.mark}: the player cookie's name`);
+    assert.match(fromGo.cookie, /^nd-player-[0-9a-f]+$/);
+    if (fromRust.mark.includes('random')) continue; // another order every time, on both
+    const strip = text => text.replace(/"serverVersion":"[^"]*"/, '');
+    assert.equal(strip(fromRust.text), strip(fromGo.text), `${fromRust.mark}: the same bytes`);
+  }
+
+  // The control: Navidrome alone saw every request.
+  const goLog = go.log();
+  for (const [, params] of [...taken, ...left]) assert.ok(goLog.includes(params.mark), `Navidrome alone logs ${params.mark}`);
+
+  // Behind the Rust server: none of the requests it answered reached Navidrome, the others did.
+  const rustLog = rust.log();
+  for (const [, params] of taken) assert.ok(!rustLog.includes(params.mark), `Navidrome never saw ${params.mark}`);
+  for (const [, params] of left) assert.ok(rustLog.includes(params.mark), `Navidrome answered ${params.mark}`);
+  const lines = rustLog.split(String.fromCharCode(10));
+  const requestsFor = method => lines.filter(line => line.includes(`/rest/${method}`) && line.includes(`c=${client}`) && !line.includes('mark=left-'));
+  for (const method of ['getSong', 'getAlbum', 'getAlbumList2']) assert.equal(requestsFor(method).length, 0, `no ${method} of the Rust server's reached Navidrome`);
+  // what did reach it: the player's registration, a ping as this user and client, once (it is remembered for a minute)
+  const registrations = lines.filter(line => line.includes('HTTP: GET') && line.includes('/rest/ping?') && line.includes(`c=${client}`));
+  assert.equal(registrations.length, 1, 'one registration for all the requests of one client');
+
+  // The player is Navidrome's own row, made by its rules, on both servers; and the user's last access is written.
+  const playerOf = server => {
+    const db = new DatabaseSync(join(server.data, 'navidrome.db'), { readOnly: true });
+    try {
+      const players = db.prepare('SELECT name, user_agent, client, ip, max_bit_rate, transcoding_id, report_real_path, scrobble_enabled, last_seen FROM player WHERE client = ?').all(client);
+      const access = db.prepare('SELECT last_access_at AS at FROM user WHERE user_name = ?').get(listener.username).at;
+      return { players, access };
+    } finally { db.close(); }
+  };
+  const [goState, rustState] = [playerOf(go), playerOf(rust)];
+  assert.equal(goState.players.length, 1);
+  assert.equal(rustState.players.length, 1, 'one player for the client, as with Navidrome alone');
+  const { last_seen: seenByGo, ...goPlayer } = goState.players[0];
+  const { last_seen: seenByRust, ...rustPlayer } = rustState.players[0];
+  assert.deepEqual(rustPlayer, goPlayer, 'the same player row');
+  assert.ok(seenByGo && seenByRust);
+  assert.ok(rustState.access > '2026-11-25', 'the last access is written for requests the Rust server answered');
+});
+
+test('a player’s settings count for the answers the Rust server gives', { timeout: 600_000 }, async t => {
+  const { go, rust, users } = await both(t, {});
+  const { listener } = users;
+  const id = go.manifest.ids['track.flac'];
+  const client = 'sonus-real-path-test';
+  const song = async server => {
+    const api = new Subsonic(server.url, { u: listener.username, password: listener.password }, { client });
+    const res = await api.call('getSong', { id });
+    return { path: res.body.song.path, by: res.headers.get(ANSWERED_HEADER) };
+  };
+  const set = (server, sql) => {
+    const db = new DatabaseSync(join(server.data, 'navidrome.db'));
+    try { db.prepare(sql).run(client); } finally { db.close(); }
+  };
+  // a new player: a path made up from the tags, answered by the Rust server
+  const [madeUpByGo, madeUpByRust] = [await song(go), await song(rust)];
+  assert.equal(madeUpByRust.path, madeUpByGo.path);
+  assert.equal(madeUpByRust.by, 'rust');
+  assert.match(madeUpByGo.path, /^Aurora Lane\/Northern Lights\//);
+  // ReportRealPath turned on for the player (as an admin does in Navidrome's UI): the next answer has the file's path.
+  // The Rust server reads the player's row at every request; where Go builds paths by its Windows rules, it leaves
+  // such a player's songs to Navidrome.
+  for (const server of [go, rust]) set(server, 'UPDATE player SET report_real_path = 1 WHERE client = ?');
+  const [realByGo, realByRust] = [await song(go), await song(rust)];
+  assert.notEqual(realByGo.path, madeUpByGo.path);
+  assert.equal(realByRust.path.replace(rust.data, ''), realByGo.path.replace(go.data, ''), 'the same real path');
+  assert.equal(realByRust.by, process.platform === 'win32' ? null : 'rust');
+  // and off again
+  for (const server of [go, rust]) set(server, 'UPDATE player SET report_real_path = 0 WHERE client = ?');
+  assert.deepEqual(await song(rust), madeUpByRust);
 });
 
 test('a client cannot name itself a user', { timeout: 600_000 }, async t => {

@@ -20,8 +20,13 @@
 //   { name, path: '/rest/ping', httpMethod: 'PUT', form: 'u=x&p=y' }               the same, with a form as its body
 //   { …, for: ['track.flac', 'track.mp3'] }                                        one request per key: {{$}} is the key
 //   { …, volatile: [paths], unordered: [paths] }                                   the same, for this request only
+//   { …, navidrome: 'why' }                                                       a request to a method the Rust server
+//       answers itself (ANSWERED_BY_RUST) that it must leave to Navidrome all the same, and why
 // The corpus's volatile paths are left out of every comparison (serverVersion, times of the request); its unordered
 // paths are arrays whose order means nothing (Go builds them from maps, in random order): compared sorted.
+// Who answered: a debug build of the Rust server marks the answers it made itself (`x-sonus-answered: rust`).
+// --go-vs-gateway checks the mark on every request: the methods the Rust server has taken over must carry it, unless
+// the request says why not (`navidrome`); everything else must not.
 // What the Rust server is meant to answer differently is not hidden as volatile: it is written down (EXPECTED, below)
 // and applied to Navidrome's answer before the comparison, so the two must then be the same, field for field.
 // Placeholders: {{key}} is the manifest's id for key, {{user.<name>}} a user's username, {{$}} the key of a `for`.
@@ -41,6 +46,12 @@ const root = resolve(here, '../..');
 const SALT = 'd1ff5a17';
 const CLIENT = 'sonus-diff';
 const COMPARED_HEADERS = ['content-type', 'content-length', 'content-range', 'accept-ranges'];
+// compared for JSON answers too, when either side sends them
+const COMPARED_JSON_HEADERS = ['x-total-count'];
+/** The header a debug build of the Rust server marks its own answers with (server/src/library/mod.rs). */
+export const ANSWERED_HEADER = 'x-sonus-answered';
+/** The Subsonic methods the Rust server answers itself from the database, in JSON, once the request is signed in. */
+export const ANSWERED_BY_RUST = ['ping', 'getSong', 'getAlbum', 'getAlbumList2'];
 
 // ---------------------------------------------------------------- the corpus
 
@@ -102,8 +113,12 @@ async function answer(base, r, manifest) {
   const buf = Buffer.from(await res.arrayBuffer());
   const type = res.headers.get('content-type') ?? '';
   const out = { status: res.status };
+  // who answered is not part of the comparison (Navidrome never says): kept beside the answer
+  Object.defineProperty(out, 'answeredBy', { value: res.headers.get(ANSWERED_HEADER) ?? null, enumerable: false });
   if (/json/.test(type)) {
     out.contentType = type;
+    const headers = Object.fromEntries(COMPARED_JSON_HEADERS.map(h => [h, res.headers.get(h)]).filter(([, v]) => v !== null));
+    if (Object.keys(headers).length) out.headers = headers;
     try { out.json = buf.length ? JSON.parse(buf.toString('utf8')) : null; } catch { out.text = buf.toString('utf8').slice(0, 500); }
   } else {
     out.headers = Object.fromEntries(COMPARED_HEADERS.map(h => [h, res.headers.get(h)]).filter(([, v]) => v !== null));
@@ -166,9 +181,24 @@ export const EXPECTED = {
   },
 };
 
-export async function runDiff({ a, b, manifest, corpus, only, expected = [], log = console.log }) {
+/**
+ * Whether the Rust server's own code must have answered a request: a method it has taken over, asked for in JSON,
+ * that got past the sign-in (Navidrome's answer says so), unless the request says why it is Navidrome's.
+ */
+export function mustBeAnsweredByRust(r, answerOfNavidrome) {
+  const method = (r.method ?? '').replace(/\.view$/, '');
+  if (!ANSWERED_BY_RUST.includes(method) || r.navidrome) return false;
+  if ((r.params && 'f' in r.params && r.params.f !== 'json')) return false;
+  const error = answerOfNavidrome.json?.['subsonic-response']?.error;
+  // refused at the sign-in: the method was never reached
+  if (error && ([40, 43, 44].includes(error.code) || /^missing parameter: '[uvc]'$/.test(error.message ?? ''))) return false;
+  return true;
+}
+
+export async function runDiff({ a, b, manifest, corpus, only, expected = [], whoAnswered = false, log = console.log }) {
   const requests = expand(corpus).filter(r => !only || r.name.includes(only));
   const results = [];
+  let byRust = 0;
   for (const e of expected) log(`  expected to differ, and compared with that applied to A: ${e.what}`);
   for (const r of requests) {
     const [ra, rb] = await Promise.all([answer(a, r, manifest), answer(b, r, manifest)]);
@@ -177,6 +207,12 @@ export async function runDiff({ a, b, manifest, corpus, only, expected = [], log
     const volatile = [...(corpus.volatile ?? []), ...(r.volatile ?? [])].map(inJson);
     const unordered = [...(corpus.unordered ?? []), ...(r.unordered ?? [])].map(inJson);
     const diffs = compare(ra, rb, volatile, [], [], unordered);
+    if (whoAnswered) {
+      const must = mustBeAnsweredByRust(r, ra), did = rb.answeredBy === 'rust';
+      if (must && !did) diffs.push({ path: '(who answered)', a: 'the Rust server is to answer this itself', b: 'left to Navidrome' });
+      if (!must && did) diffs.push({ path: '(who answered)', a: r.navidrome ? `Navidrome is to answer this: ${r.navidrome}` : 'not a request the Rust server answers itself', b: 'answered by the Rust server' });
+      if (did) byRust++;
+    }
     results.push({ name: r.name, same: diffs.length === 0, diffs, a: diffs.length ? ra : undefined, b: diffs.length ? rb : undefined });
     if (!diffs.length) { log(`  ✓ ${r.name}`); continue; }
     log(`  ✗ ${r.name}`);
@@ -185,7 +221,8 @@ export async function runDiff({ a, b, manifest, corpus, only, expected = [], log
   }
   const different = results.filter(x => !x.same).length;
   log(`\n${results.length} requests: ${results.length - different} the same, ${different} different`);
-  return { requests: results.length, different, results };
+  if (whoAnswered) log(`${byRust} answered by the Rust server itself (${ANSWERED_BY_RUST.join(', ')}), ${results.length - byRust} by Navidrome behind it or by the sign-in check`);
+  return { requests: results.length, different, byRust, results };
 }
 
 // ---------------------------------------------------------------- servers for the comparisons
@@ -252,7 +289,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   } });
   const corpus = JSON.parse(await readFile(values.corpus ? resolve(values.corpus) : join(here, 'corpus', 'read-only.json'), 'utf8'));
   const stops = [];
-  let a = values.a, b = values.b, manifest, expected = [];
+  let a = values.a, b = values.b, manifest, expected = [], whoAnswered = false;
   try {
     if (values['go-vs-gateway'] || values['go-vs-go']) {
       const { serveGolden } = await import('../fixtures/serve.mjs');
@@ -264,6 +301,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         const gw = await startGatewayOnGolden(); stops.push(gw.stop);
         b = gw.url;
         expected = [EXPECTED.connectVersion2];
+        whoAnswered = true;
         console.log(`A: Navidrome ${manifest.server.serverVersion} at ${a}\nB: the Rust server at ${b}, running its own Navidrome on another copy of the golden database\n`);
       } else {
         const goB = await serveGolden(); stops.push(goB.stop);
@@ -275,7 +313,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       manifest = JSON.parse(await readFile(resolve(values.manifest), 'utf8'));
       console.log(`A: ${a}\nB: ${b}\n`);
     }
-    const report = await runDiff({ a, b, manifest, corpus, only: values.only, expected });
+    const report = await runDiff({ a, b, manifest, corpus, only: values.only, expected, whoAnswered });
     if (values.json) await writeFile(resolve(values.json), JSON.stringify(report, null, 2));
     process.exitCode = report.different ? 1 : 0;
   } finally {

@@ -60,6 +60,34 @@ test('getAlbumList2 newest and random answer albums too', async () => {
   }
 });
 
+test('getAlbumList2 random: a pass over its pages gives every album once, and another pass another order', async () => {
+  const { albums } = await getLibrary();
+  if (albums.length < 6) return; // too few albums to tell one order from another
+  const pass = async () => {
+    const ids = [];
+    for (let offset = 0; ; offset += 4) {
+      const page = (await api.ok('getAlbumList2', { type: 'random', size: 4, offset })).albumList2.album ?? [];
+      ids.push(...page.map(a => a.id));
+      if (page.length < 4) return ids;
+    }
+  };
+  const orders = new Set();
+  for (let i = 0; i < 6; i++) {
+    const ids = await pass();
+    assert.deepEqual([...ids].sort(), albums.map(a => a.id).sort(), 'every album, each once: the pages of one pass belong together');
+    orders.add(ids.join(' '));
+  }
+  assert.ok(orders.size > 1, 'six passes are not all in the same order');
+  const one = (await api.ok('getAlbumList2', { type: 'random', size: 1 })).albumList2.album;
+  assertAlbum(one[0], 'getAlbumList2 random');
+});
+
+test('getAlbumList2 says how many albums the whole list has (X-Total-Count)', async () => {
+  const { albums } = await getLibrary();
+  const res = await api.call('getAlbumList2', { type: 'alphabeticalByName', size: 2, offset: 1 });
+  assert.equal(res.headers.get('x-total-count'), String(albums.length));
+});
+
 test('search3 with the empty query pages the whole library, each song once', async () => {
   const { songs } = await getLibrary();
   assert.ok(songs.length > 0);

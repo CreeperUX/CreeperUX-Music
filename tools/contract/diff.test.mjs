@@ -2,7 +2,7 @@
 // that. Usage: node --test tools/contract/diff.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compare, expand, matches, EXPECTED } from './diff.mjs';
+import { compare, expand, matches, mustBeAnsweredByRust, EXPECTED } from './diff.mjs';
 
 test('paths: * is one key or index, ** any number', () => {
   assert.ok(matches(['a', 'b', 0, 'c'], 'a.b.*.c'));
@@ -56,4 +56,22 @@ test('an expected difference is applied to A, and everything else still has to b
   EXPECTED.connectVersion2.apply(error);
   assert.deepEqual(error.json['subsonic-response'], { status: 'failed', error: { code: 40 } });
   EXPECTED.connectVersion2.apply({ status: 200, sha256: 'x' });
+});
+
+test('who must answer: the Rust server for the methods it has taken over, in JSON, past the sign-in', () => {
+  const ok = { json: { 'subsonic-response': { status: 'ok' } } };
+  const failed = (code, message) => ({ json: { 'subsonic-response': { status: 'failed', error: { code, message } } } });
+  assert.ok(mustBeAnsweredByRust({ method: 'getSong', params: { id: 'x' } }, ok));
+  assert.ok(mustBeAnsweredByRust({ method: 'getSong.view' }, failed(70, 'Song not found')));
+  assert.ok(mustBeAnsweredByRust({ method: 'getAlbumList2' }, failed(10, "missing parameter: 'type'")), 'the method’s own error');
+  assert.ok(mustBeAnsweredByRust({ method: 'ping', params: { f: 'json' } }, ok));
+  // not taken over, not JSON, refused at the sign-in, or marked as Navidrome's
+  assert.ok(!mustBeAnsweredByRust({ method: 'getArtists' }, ok));
+  assert.ok(!mustBeAnsweredByRust({ method: 'ping', params: { f: null } }, { status: 200, sha256: 'x' }));
+  assert.ok(!mustBeAnsweredByRust({ method: 'ping', params: { f: 'jsonp', callback: 'cb' } }, { status: 200, sha256: 'x' }));
+  assert.ok(!mustBeAnsweredByRust({ method: 'ping' }, failed(40, 'Wrong username or password')));
+  assert.ok(!mustBeAnsweredByRust({ method: 'ping' }, failed(10, "missing parameter: 'v'")));
+  assert.ok(!mustBeAnsweredByRust({ method: 'ping' }, failed(44, 'Invalid API key')));
+  assert.ok(!mustBeAnsweredByRust({ method: 'getAlbumList2', navidrome: 'musicFolderId' }, ok));
+  assert.ok(!mustBeAnsweredByRust({ path: '/auth/login' }, { status: 401 }));
 });

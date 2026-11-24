@@ -718,7 +718,7 @@ async fn at_start_the_database_is_checked_and_old_app_passwords_become_keys() {
     drop(conn);
 
     let upstream = answering_upstream().await;
-    sonus_server::startup::local(&shared(&dir), &upstream, "").await.expect("the known schema");
+    sonus_server::startup::local(&shared(&dir), &upstream, "", &hyper::header::HeaderName::from_static("x-sonus-user-test")).await.expect("the known schema");
     let hash: String = Connection::open(&file).unwrap().query_row("SELECT secret_hash FROM sonus_app_password WHERE id = 'old'", [], |r| r.get(0)).unwrap();
     assert_eq!(hash, sonus_server::secrets::api_key_hash(b"old1old2old3old4"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -730,11 +730,15 @@ async fn another_schema_or_no_database_stops_the_start() {
     let dir = std::env::temp_dir().join(format!("sonus-subsonic-test-{}-schema", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let Err(missing) = sonus_server::startup::local(&shared(&dir), &upstream, "").await else { panic!("no database is no start") };
+    let Err(missing) = sonus_server::startup::local(&shared(&dir), &upstream, "", &hyper::header::HeaderName::from_static("x-sonus-user-test")).await else {
+        panic!("no database is no start")
+    };
     assert!(missing.contains("cannot open Navidrome's database"), "{missing}");
 
     drop(database::create_at_version(&dir.join("navidrome.db"), 20270101000000));
-    let Err(newer) = sonus_server::startup::local(&shared(&dir), &upstream, "").await else { panic!("a newer schema is no start") };
+    let Err(newer) = sonus_server::startup::local(&shared(&dir), &upstream, "", &hyper::header::HeaderName::from_static("x-sonus-user-test")).await else {
+        panic!("a newer schema is no start")
+    };
     assert!(newer.contains("20270101000000") && newer.contains("20260922230428"), "{newer}");
 
     let conn = Connection::open(dir.join("navidrome.db")).unwrap();
@@ -743,7 +747,11 @@ async fn another_schema_or_no_database_stops_the_start() {
     )
     .unwrap();
     drop(conn);
-    let Err(upstream_navidrome) = sonus_server::startup::local(&shared(&dir), &upstream, "").await else { panic!("upstream Navidrome's tables are no start") };
+    let Err(upstream_navidrome) =
+        sonus_server::startup::local(&shared(&dir), &upstream, "", &hyper::header::HeaderName::from_static("x-sonus-user-test")).await
+    else {
+        panic!("upstream Navidrome's tables are no start")
+    };
     assert!(upstream_navidrome.contains("sonus_app_password"), "{upstream_navidrome}");
     let _ = std::fs::remove_dir_all(&dir);
 }

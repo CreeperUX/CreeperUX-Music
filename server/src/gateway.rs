@@ -28,6 +28,7 @@ use tracing::{debug, warn};
 
 use crate::auth::{self, Auth};
 use crate::connect::{self, Connect};
+use crate::library::{self, Library};
 use crate::routes::{self, Local};
 use crate::subsonic::{self, Subsonic};
 use crate::trust::{TrustList, client_ip};
@@ -81,6 +82,7 @@ struct Inner {
     subsonic: OnceLock<Arc<Subsonic>>,
     auth: OnceLock<Arc<Auth>>,
     connect: OnceLock<Connect>,
+    library: OnceLock<Arc<Library>>,
 }
 
 impl Gateway {
@@ -89,7 +91,17 @@ impl Gateway {
         connector.set_nodelay(true);
         connector.set_connect_timeout(Some(Duration::from_secs(5)));
         let client = Client::builder(TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).pool_timer(TokioTimer::new()).build(connector);
-        Gateway { inner: Arc::new(Inner { settings, client, ready, subsonic: OnceLock::new(), auth: OnceLock::new(), connect: OnceLock::new() }) }
+        Gateway {
+            inner: Arc::new(Inner {
+                settings,
+                client,
+                ready,
+                subsonic: OnceLock::new(),
+                auth: OnceLock::new(),
+                connect: OnceLock::new(),
+                library: OnceLock::new(),
+            }),
+        }
     }
 
     /// Gives the gateway what it checks Subsonic sign-ins with (the database is open and is the schema it knows).
@@ -107,6 +119,17 @@ impl Gateway {
     /// in `getOpenSubsonicExtensions`. Once: a second call changes nothing.
     pub fn set_connect(&self, connect: Connect) {
         let _ = self.inner.connect.set(connect);
+    }
+
+    /// Gives the gateway the library's reads: from then on it answers them itself (library/mod.rs). Once: a second
+    /// call changes nothing.
+    pub fn set_library(&self, library: Library) {
+        let _ = self.inner.library.set(Arc::new(library));
+    }
+
+    /// The library, when the gateway answers its reads.
+    pub fn library(&self) -> Option<&Library> {
+        self.inner.library.get().map(|library| &**library)
     }
 
     /// Sonus Connect, when the gateway answers it.
@@ -218,7 +241,17 @@ impl Gateway {
                         return response;
                     }
                     subsonic::Outcome::Untouched(body) => body,
-                    subsonic::Outcome::SignedIn { path_and_query: stripped, body, content_length, user: signed_in } => {
+                    subsonic::Outcome::SignedIn { path_and_query: stripped, body, content_length, user: signed_in, who, params } => {
+                        // the library's reads are answered here (library/mod.rs), unless it leaves one to Navidrome
+                        if let Some(library) = self.inner.library.get().filter(|_| library::answers(subsonic_method)) {
+                            let request = library::Request { method: subsonic_method, params: &params, user: &who, user_header: &signed_in, headers: &headers };
+                            if let library::Answer::Here(response) = library.handle(request).await {
+                                // Navidrome's UpdateLastAccessMiddleware, for the requests it no longer sees
+                                subsonic.touch_last_access(&who.user_id).await;
+                                debug!(%method, path, status = response.status().as_u16(), ms = started.elapsed().as_millis() as u64, %client, "answered here");
+                                return response;
+                            }
+                        }
                         path_and_query = stripped;
                         if let Some(length) = content_length {
                             headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));

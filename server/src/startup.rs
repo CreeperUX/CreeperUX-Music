@@ -18,6 +18,7 @@ use crate::config::Shared;
 use crate::connect::{self, Connect};
 use crate::db::{self, Db};
 use crate::jwt::Signer;
+use crate::library::{self, Library};
 use crate::secrets::Keys;
 use crate::subsonic::credentials;
 use crate::subsonic::respond::Envelope;
@@ -28,6 +29,7 @@ pub struct Local {
     pub subsonic: Subsonic,
     pub auth: Auth,
     pub connect: Connect,
+    pub library: Library,
 }
 
 /// Navidrome's `consts.JWTSecretKey`: where the `property` table keeps the session secret, sealed.
@@ -45,7 +47,7 @@ fn session_secret(db: &Db, keys: &Keys) -> Result<Signer, String> {
 
 /// Opens Navidrome's database and checks it; call when Navidrome answers (it migrates before it listens). The error
 /// says why the server cannot run.
-pub async fn local(shared: &Shared, upstream: &Uri, base_path: &str) -> Result<Local, String> {
+pub async fn local(shared: &Shared, upstream: &Uri, base_path: &str, user_header: &hyper::header::HeaderName) -> Result<Local, String> {
     let path = db::locate(&shared.data_folder, &shared.db_path)?;
     let keys = Keys::new(&shared.password_encryption_key);
     let opened = {
@@ -74,8 +76,17 @@ pub async fn local(shared: &Shared, upstream: &Uri, base_path: &str) -> Result<L
         two_factor: shared.two_factor,
         limit: shared.auth_request_limit,
         window: shared.auth_window,
+        envelope: envelope.clone(),
+        frame_options: shared.frame_options.clone(),
+    });
+    let library = Library::new(library::Setup {
+        db: opened.clone(),
+        options: shared.library.clone(),
         envelope,
         frame_options: shared.frame_options.clone(),
+        upstream: upstream.clone(),
+        base_path: base_path.to_string(),
+        user_header: user_header.clone(),
     });
     let auth = Auth::new(auth::Setup {
         db: opened,
@@ -90,7 +101,7 @@ pub async fn local(shared: &Shared, upstream: &Uri, base_path: &str) -> Result<L
         enable_gravatar: shared.enable_gravatar,
         auto_login: shared.dev_auto_login_username.clone(),
     });
-    Ok(Local { subsonic, auth, connect })
+    Ok(Local { subsonic, auth, connect, library })
 }
 
 /// The user name of the sign-in the server tries at Navidrome when it starts: nobody's.

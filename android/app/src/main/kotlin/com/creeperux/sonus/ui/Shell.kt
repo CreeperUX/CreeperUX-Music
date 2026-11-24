@@ -159,12 +159,19 @@ private fun Main(graph: AppGraph, session: MusicSession) {
             }
             CompositionLocalProvider(LocalLayout provides layout) {
                 if (layout == Layout.Phone) PhoneShell(nav) else TabletShell(nav, layout)
+                // above the mini player and the tabs; over the cover while the phone's full player is open, so a message
+                // never covers the player's song, position or buttons
+                val overPlayer = layout == Layout.Phone && nav.playerOpen.value
                 SnackbarHost(
                     snackbar,
-                    Modifier.align(if (layout == Layout.Phone) Alignment.BottomCenter else Alignment.BottomEnd)
-                        .navigationBarsPadding()
-                        .padding(bottom = if (layout == Layout.Phone) 140.dp else 104.dp, end = if (layout == Layout.Phone) 0.dp else 16.dp)
-                        .widthIn(max = 420.dp),
+                    if (overPlayer) {
+                        Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 72.dp).widthIn(max = 420.dp)
+                    } else {
+                        Modifier.align(if (layout == Layout.Phone) Alignment.BottomCenter else Alignment.BottomEnd)
+                            .navigationBarsPadding()
+                            .padding(bottom = if (layout == Layout.Phone) 140.dp else 104.dp, end = if (layout == Layout.Phone) 0.dp else 16.dp)
+                            .widthIn(max = 420.dp)
+                    },
                 ) { data ->
                     val c = Sonus.colors
                     Snackbar(data, shape = RoundedCornerShape(7.dp), containerColor = c.toast, contentColor = Sonus.colors.text.takeIf { c.isDark } ?: androidx.compose.ui.graphics.Color(0xFFF4F1EB), actionColor = c.accent)

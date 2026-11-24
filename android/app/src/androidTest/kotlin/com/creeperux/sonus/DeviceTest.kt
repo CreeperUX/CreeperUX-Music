@@ -6,7 +6,9 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.view.KeyEvent
 import androidx.compose.ui.test.SemanticsNodeInteractionCollection
+import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -157,6 +159,12 @@ class DeviceTest {
         nodes("track-row")[0].performClick()
         val first = album.trackIds[0]
         waitFor(what = "playing") { state().status == PlayerStatus.Playing && state().trackId == first }
+        // the player shows it: the phone's mini player, the tablet's playback bar
+        val song = session.lib.track(first)!!.title
+        val bar = if (exists("mini-player")) "mini-player" else "playback-bar"
+        compose.waitUntil(10_000) {
+            compose.onAllNodes(hasText(song) and hasAnyAncestor(hasTestTag(bar)), useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
+        }
         shot("03-playing")
         assertThat(eventually { (first to false) in scrobbles() }).isTrue() // "now playing"
         assertThat(streams()).contains(first)

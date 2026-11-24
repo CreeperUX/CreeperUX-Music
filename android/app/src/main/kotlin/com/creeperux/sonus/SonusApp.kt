@@ -16,12 +16,14 @@ import com.creeperux.sonus.core.Login
 import com.creeperux.sonus.core.ServerUnreachableException
 import com.creeperux.sonus.core.SubsonicClient
 import com.creeperux.sonus.core.SubsonicException
+import com.creeperux.sonus.core.connect.SessionClient
 import com.creeperux.sonus.data.KeystoreBox
 import com.creeperux.sonus.data.LoginStore
 import com.creeperux.sonus.data.Settings
 import com.creeperux.sonus.data.ThemeMode
 import com.creeperux.sonus.playback.LocalPlayback
 import com.creeperux.sonus.session.MusicSession
+import com.creeperux.sonus.session.SessionLink
 import com.creeperux.sonus.session.Toast
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -108,9 +110,33 @@ class AppGraph(private val app: Context, val scope: CoroutineScope = MainScope()
                 return@launch
             }
             playback.attach(session)
-            stateFlow.value = AppState.Ready(session)
-            offerSavedQueue(session)
+            closeLink()
+            if (SessionClient.supported(session.client)) {
+                // Sonus Connect version 2: the user's one session, kept on the server (it replaces 接着上次听, rule 6)
+                val tablet = app.resources.configuration.smallestScreenWidthDp >= 600
+                link = SessionLink(
+                    app, session, playback, settings.deviceId, deviceName, if (tablet) "tablet" else "phone",
+                    "Sonus ${BuildConfigInfo.versionName(app)} (Android)", scope,
+                ).also {
+                    playback.attachLink(it)
+                    it.start()
+                }
+                stateFlow.value = AppState.Ready(session)
+            } else {
+                stateFlow.value = AppState.Ready(session)
+                offerSavedQueue(session)
+            }
         }
+    }
+
+    /** Sonus Connect version 2 of the signed-in session, when the server offers it. */
+    var link: SessionLink? = null
+        private set
+
+    private fun closeLink() {
+        val l = link ?: return
+        link = null
+        scope.launch { l.close() }
     }
 
     /** The queue saved on the server last time (here or on another device), loaded paused, with an offer to go on. */
@@ -142,6 +168,7 @@ class AppGraph(private val app: Context, val scope: CoroutineScope = MainScope()
         val s = (state.value as? AppState.Ready)?.session
         val login = s?.client?.login ?: (state.value as? AppState.Failed)?.login ?: logins.load()
         connecting?.cancel()
+        closeLink()
         playback.attach(null)
         logins.clear()
         stateFlow.value = AppState.SignedOut()

@@ -24,8 +24,14 @@ import com.creeperux.sonus.core.Scrobbling
 import com.creeperux.sonus.core.ServerUnreachableException
 import com.creeperux.sonus.core.SubsonicException
 import com.creeperux.sonus.core.Track
+import com.creeperux.sonus.core.connect.PlaybackSession
+import com.creeperux.sonus.core.connect.SessionModes
+import com.creeperux.sonus.core.connect.SessionNow
+import com.creeperux.sonus.core.connect.SessionQueue
+import com.creeperux.sonus.core.connect.SessionResume
 import com.creeperux.sonus.data.Settings
 import com.creeperux.sonus.session.MusicSession
+import com.creeperux.sonus.session.SessionLink
 import com.creeperux.sonus.session.Toast
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -37,7 +43,13 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.SerializationException
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
+import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.pow
 
@@ -47,6 +59,12 @@ import kotlin.math.pow
  * without a gap. When ExoPlayer moves on by itself, the queue moves with it. Scrobbles as the Windows app does: "now
  * playing" once a song really starts, the counted play past half the song or four minutes. Saves the queue on the
  * server (savePlayQueue) so another device, or this one next time, can continue. Lives on the main thread.
+ *
+ * With Sonus Connect version 2 ([link], on a server that offers it) the queue and what plays are the user's session on
+ * the server: the actions below become its commands, the queue shows the session's, and the player plays only while
+ * this device is the session's active device, following the session and reporting what really happens (the Windows
+ * app's MusicService does the same). While another device plays, this one shows that device's song and position, and
+ * the system's media controls (QueuePlayer) steer it.
  */
 @OptIn(UnstableApi::class)
 class LocalPlayback(
@@ -59,6 +77,7 @@ class LocalPlayback(
     private var queue = newQueue()
     private val stateFlow = MutableStateFlow(PlayerState(order = settings.order))
     private val positionFlow = MutableStateFlow(0.0)
+    private val linkFlow = MutableStateFlow<SessionLink?>(null)
     private var counted = false
     private var nowPlayingSent = false
     private var startedAt = 0L
@@ -66,9 +85,20 @@ class LocalPlayback(
     private var ticker: Job? = null
     private var saveJob: Job? = null
 
+    // Sonus Connect version 2: the session as last applied, and what the player has of it
+    private var remote: PlaybackSession? = null
+    private var engineKey: String? = null // the session entry the player has loaded
+    private var advancedTo: String? = null // the song the player went on to by itself (gapless), until the session follows
+    private var loadedSaid = false // `loaded` was reported for engineKey
+    private var saidAt = 0L
+    private var sayPositionAt = 0L
+
     override val state: StateFlow<PlayerState> = stateFlow.asStateFlow()
     override val position: StateFlow<Double> = positionFlow.asStateFlow()
     override val queueEntries: List<QueueEntry> get() = queue.entries
+
+    /** Sonus Connect version 2, when the server offers it. */
+    val link: StateFlow<SessionLink?> = linkFlow.asStateFlow()
 
     var replayGain: ReplayGainMode = settings.replayGain
         set(v) {
@@ -78,6 +108,12 @@ class LocalPlayback(
         }
 
     val current: Track? get() = session?.lib?.track(queue.current)
+
+    /** With a session, another device plays it (or none does): this one shows it and its player is silent. */
+    val elsewhere: Boolean get() = linkFlow.value?.isActiveHere == false
+
+    /** The session as another device plays it (for the system's media controls), or null. */
+    val remoteSession: PlaybackSession? get() = remote?.takeIf { elsewhere && it.current != null && it.activeDevice != null }
 
     private fun newQueue() = PlayQueue({ session?.lib?.track(it) }).also { q ->
         q.order = settings.order
@@ -100,8 +136,8 @@ class LocalPlayback(
     }
 
     /** What the system's media controls (notification, lock screen, headphones, car) talk to: the player, with next and
-     *  previous going through the queue. */
-    val sessionPlayer: Player by lazy { QueuePlayer(exo, this) }
+     *  previous going through the queue, or another device's playback while that one plays the session. */
+    val sessionPlayer: QueuePlayer by lazy { QueuePlayer(exo, this) }
 
     /** Signed in (a session) or out (null): what plays stops. */
     fun attach(s: MusicSession?) {
@@ -112,13 +148,38 @@ class LocalPlayback(
             exo.clearMediaItems()
         }
         session = s
+        linkFlow.value = null
+        remote = null
+        engineKey = null
+        advancedTo = null
         queue = newQueue()
         stateFlow.value = PlayerState(order = queue.order)
+        sessionPlayer.refresh()
+    }
+
+    /** Sonus Connect version 2 for this sign-in (null: none). */
+    fun attachLink(l: SessionLink?) {
+        linkFlow.value = l
+        stateFlow.update { it.copy(queueVersion = it.queueVersion + 1) }
+    }
+
+    /** A command for the session (true: done that way). Without a connection the active device does what its player can
+     *  do by itself ([playerOffline]: pause, play, seek; the reports tell the server later); anything else waits a moment
+     *  for the connection. */
+    private fun command(action: String, fields: JsonObject = JsonObject(emptyMap()), playerOffline: Boolean = false): Boolean {
+        val l = linkFlow.value ?: return false
+        if (!l.isConnected && playerOffline && l.isActiveHere) return false
+        l.send(action, fields)
+        return true
     }
 
     // ---------------------------------------------------------------- playing
 
     override fun play(context: PlayContext, ids: List<String>, startId: String?, shuffle: Boolean) {
+        linkFlow.value?.let { l ->
+            l.playContext(context, ids, startId, shuffle, if (shuffle && !PlayQueue.shuffled(queue.order)) PlaybackOrder.ShuffleTracks else queue.order)
+            return
+        }
         val start = queue.start(context, ids, startId, shuffle) ?: return
         settings.order = queue.order
         load(start, autoplay = true)
@@ -135,6 +196,15 @@ class LocalPlayback(
     }
 
     override fun resume() {
+        val l = linkFlow.value
+        if (l != null) {
+            // a song that failed here is tried again here
+            if (l.isActiveHere && state.value.status == PlayerStatus.Error && queue.current != null) {
+                load(queue.current!!, autoplay = true, at = position.value)
+                return
+            }
+            if (command("play", playerOffline = true)) return
+        }
         val id = queue.current ?: return
         val status = state.value.status
         if (status == PlayerStatus.Error || status == PlayerStatus.Stopped || currentPlayerId() != id) {
@@ -148,17 +218,20 @@ class LocalPlayback(
     }
 
     override fun pause() {
+        if (command("pause", playerOffline = true)) return
         exo.pause()
         if (queue.current != null) setStatus(PlayerStatus.Paused)
         scheduleSave(soon = true)
     }
 
     override fun next() {
+        if (command("next")) return
         val id = queue.next()
         if (id != null) load(id, autoplay = true) else stop()
     }
 
     override fun previous() {
+        if (command("previous")) return // the server goes back to the start more than 3 s in, as below
         if (position.value > 3) {
             seek(0.0)
             return
@@ -177,32 +250,172 @@ class LocalPlayback(
     override fun seek(seconds: Double) {
         val d = state.value.duration
         val at = seconds.coerceIn(0.0, if (d > 0) d else seconds.coerceAtLeast(0.0))
+        if (command("seek", buildJsonObject { put("positionMs", (at * 1000).toLong()) }, playerOffline = true)) {
+            positionFlow.value = at
+            return
+        }
         positionFlow.value = at
         if (currentPlayerId() == queue.current) exo.seekTo((at * 1000).toLong())
         scheduleSave()
     }
 
     override fun setOrder(order: PlaybackOrder) {
+        settings.order = order // this device's own setting stays
+        linkFlow.value?.let {
+            it.setMode(order)
+            return
+        }
         queue.changeOrder(order) // the queue keeps the context's own order (search results, a radio) to come back to
-        settings.order = order
     }
 
     override fun setStopAfterCurrent(on: Boolean) {
+        if (command("stopAfterCurrent", buildJsonObject { put("on", on) })) return
         queue.stopAfterCurrent = on
         stateFlow.update { it.copy(stopAfterCurrent = on) }
         refreshPreload()
     }
 
-    override fun queueAdd(ids: List<String>, next: Boolean) = queue.add(ids, next)
-    override fun queueRemove(entryIds: List<String>) = queue.remove(entryIds)
-    override fun queueClear(manual: Boolean) = queue.clear(manual)
+    override fun queueAdd(ids: List<String>, next: Boolean) {
+        if (!command("add", buildJsonObject { put("ids", JsonArray(ids.map(::JsonPrimitive))); put("next", next) })) queue.add(ids, next)
+    }
+
+    override fun queueRemove(entryIds: List<String>) {
+        if (!command("remove", buildJsonObject { put("entries", JsonArray(entryIds.map(::JsonPrimitive))) })) queue.remove(entryIds)
+    }
+
+    override fun queueClear(manual: Boolean) {
+        if (!command("clear", buildJsonObject { put("manual", manual) })) queue.clear(manual)
+    }
+
     override fun queueJump(entryId: String) {
+        if (command("jump", buildJsonObject { put("entry", entryId) })) return
         queue.jump(entryId)?.let { load(it, autoplay = true) }
     }
 
-    /** Takes over a saved queue: its song at its position, paused. */
+    /** Takes over a saved queue: its song at its position, paused. (Without Sonus Connect v2: with it, the session is
+     *  kept on the server and continues where it stopped, rule 6.) */
     fun continueQueue(q: RemoteQueue, label: String) {
+        if (linkFlow.value != null) return
         queue.adopt(PlayContext("queue", "continue", label), q.trackIds, q.current)?.let { load(it, autoplay = false, at = q.position) }
+    }
+
+    // ---------------------------------------------------------------- Sonus Connect version 2: the session
+
+    /** The session changed: its queue is shown; this device's player follows it while this is the active device, and is
+     *  stopped at once otherwise (rule 4). */
+    fun applySession(s: PlaybackSession, q: SessionQueue, here: Boolean) {
+        remote = s
+        val ctx = s.context?.let { PlayContext(it.kind, it.id, it.label) }
+        queue.mirror(ctx, q.order, q.pointer, q.manual.map { it.key to it.trackId }, s.current?.trackId, SessionModes.parse(s.mode), s.stopAfterCurrent)
+        if (here) followHere(s) else showElsewhere(s)
+        stateFlow.update { it.copy(queueVersion = it.queueVersion + 1) }
+        sessionPlayer.refresh()
+    }
+
+    private fun showElsewhere(s: PlaybackSession) {
+        if (engineKey != null || exo.mediaItemCount > 0) {
+            exo.stop() // the device playback left stops at once
+            exo.clearMediaItems()
+        }
+        engineKey = null
+        advancedTo = null
+        val t = session?.lib?.track(s.current?.trackId)
+        stateFlow.update {
+            it.copy(
+                trackId = s.current?.trackId, error = null,
+                status = if (s.current == null) PlayerStatus.Stopped else if (s.playing) PlayerStatus.Playing else PlayerStatus.Paused,
+                duration = if (s.durationMs > 0) s.durationMs / 1000.0 else t?.duration ?: 0.0,
+            )
+        }
+        positionFlow.value = s.positionAt(linkFlow.value?.serverNow ?: System.currentTimeMillis()) / 1000.0
+        if (s.playing) startTicker()
+    }
+
+    /** The active device's player made to match the session: the current entry loaded, the position (when more than 1.5 s
+     *  off), playing or paused, the next song preloaded. */
+    private fun followHere(s: PlaybackSession) {
+        val cur = s.current
+        if (cur == null) {
+            if (engineKey != null) exo.stop()
+            engineKey = null
+            advancedTo = null
+            positionFlow.value = 0.0
+            stateFlow.update { it.copy(trackId = null, status = PlayerStatus.Stopped, error = null) }
+            return
+        }
+        val want = s.positionAt(linkFlow.value?.serverNow ?: System.currentTimeMillis()) / 1000.0
+        if (cur.key != engineKey) {
+            if (advancedTo != null && advancedTo == cur.trackId && currentPlayerId() == cur.trackId) {
+                // the player is there already (it went on by itself): only the entry is new
+                engineKey = cur.key
+                advancedTo = null
+                loadedSaid = false
+                if (exo.isPlaying) sayHere("playing")
+            } else {
+                engineKey = cur.key
+                advancedTo = null
+                loadedSaid = false
+                load(cur.trackId, autoplay = s.playing, at = want)
+                if (state.value.status == PlayerStatus.Error) sayHere("failed") // not in this library
+                return
+            }
+        } else if (advancedTo != null) {
+            return // the session has not yet followed the player to the next song
+        }
+        if (state.value.status == PlayerStatus.Error) return // reported: the session moves on
+        if (exo.playbackState == Player.STATE_ENDED || exo.playbackState == Player.STATE_IDLE) {
+            // the song ended here: played again from the session's position when the session plays on (repeat one, play
+            // after the end); near its end the session has not yet heard of it
+            val d = state.value.duration
+            if (s.playing && (d <= 0 || want < d - 2)) {
+                load(cur.trackId, autoplay = true, at = want)
+                return
+            }
+            if (!s.playing) {
+                positionFlow.value = want
+                setStatus(PlayerStatus.Paused)
+            }
+            return
+        }
+        if (exo.playbackState == Player.STATE_READY && abs(exo.currentPosition / 1000.0 - want) > 1.5) {
+            exo.seekTo((want * 1000).toLong())
+            positionFlow.value = want
+            sayPositionAt = System.currentTimeMillis() + 500
+        }
+        if (s.playing && !exo.playWhenReady) {
+            setStatus(PlayerStatus.Loading)
+            exo.play()
+            startTicker()
+        } else if (!s.playing && exo.playWhenReady) {
+            exo.pause()
+            setStatus(PlayerStatus.Paused)
+        }
+        refreshPreload()
+    }
+
+    /** What the player really did, for the session (the active device only): `loaded` first for a new entry. */
+    private fun sayHere(event: String) {
+        val l = linkFlow.value ?: return
+        val key = engineKey ?: return
+        if (!l.isActiveHere) return
+        val p = exo.currentPosition / 1000.0
+        if (!loadedSaid && event != "failed") {
+            loadedSaid = true
+            val t = session?.lib?.track(currentPlayerId() ?: queue.current)
+            val d = exo.duration.takeIf { it != C.TIME_UNSET && it > 0 }?.let { it / 1000.0 } ?: t?.duration
+            l.report(
+                "loaded", key, p, d,
+                t?.let { SessionNow(it.title, it.artist, it.album, it.albumId, session?.lib?.album(it.albumId)?.coverArt ?: it.coverArt) },
+            )
+        }
+        l.report(event, key, p)
+        saidAt = System.currentTimeMillis()
+    }
+
+    /** On reconnecting while active: still playing (a short network loss) or not. */
+    fun resumeState(rev: Long): SessionResume? {
+        if (currentPlayerId() == null) return null
+        return SessionResume(rev, exo.playWhenReady, exo.currentPosition)
     }
 
     // ---------------------------------------------------------------- the player
@@ -214,21 +427,37 @@ class LocalPlayback(
         // ExoPlayer plays FLAC, ALAC, AAC, MP3, WAV, Opus and Vorbis; the rest is asked for as MP3, which every server
         // can transcode to (the same list as the Windows app)
         val transcode = if (t.suffix in TRANSCODED) "mp3" else null
-        val cover = s.trackCoverUrl(t, 512)
         return MediaItem.Builder()
             .setMediaId(t.id)
             .setUri(s.client.streamUrl(t.id, transcode))
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(t.title).setArtist(t.artist).setAlbumTitle(t.album).setAlbumArtist(t.albumArtist)
-                    .setArtworkUri(cover?.toUri()).setDurationMs((t.duration * 1000).toLong())
-                    .setIsPlayable(true).setIsBrowsable(false).setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
-                    .build(),
-            )
+            .setMediaMetadata(metadataFor(t))
             .build()
     }
 
-    private fun nextItem(currentId: String?): MediaItem? = queue.peek()?.takeIf { it != currentId }?.let { session?.lib?.track(it) }?.let(::itemFor)
+    /** What the system's media controls show of a song. */
+    fun metadataFor(t: Track): MediaMetadata = MediaMetadata.Builder()
+        .setTitle(t.title).setArtist(t.artist).setAlbumTitle(t.album).setAlbumArtist(t.albumArtist)
+        .setArtworkUri(session?.trackCoverUrl(t, 512)?.toUri()).setDurationMs((t.duration * 1000).toLong())
+        .setIsPlayable(true).setIsBrowsable(false).setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+        .build()
+
+    /** What the system's media controls show of the session's song when another device plays it (it may not be in this
+     *  library: the session says what it is). */
+    fun metadataFor(s: PlaybackSession): MediaMetadata {
+        session?.lib?.track(s.current?.trackId)?.let { return metadataFor(it) }
+        val now = s.now
+        return MediaMetadata.Builder()
+            .setTitle(now?.title).setArtist(now?.artist).setAlbumTitle(now?.album)
+            .setArtworkUri(now?.coverArt?.let { session?.client?.coverUrl(it, 512)?.toUri() })
+            .setIsPlayable(true).setIsBrowsable(false).setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+            .build()
+    }
+
+    /** What to load after [currentId]: what the queue (or the session) says follows. */
+    private fun nextItem(currentId: String?): MediaItem? {
+        val next = if (linkFlow.value != null) remote?.next else queue.peek()
+        return next?.takeIf { it != currentId }?.let { session?.lib?.track(it) }?.let(::itemFor)
+    }
 
     private fun load(trackId: String, autoplay: Boolean, at: Double = 0.0) {
         val t = session?.lib?.track(trackId)
@@ -266,8 +495,15 @@ class LocalPlayback(
         override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
             if (item == null || reason != Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) return
             val id = item.mediaId
-            // the player moved on by itself (gapless): move the queue there too, then load what comes after
-            if (queue.peek() == id) {
+            val l = linkFlow.value
+            if (l != null) {
+                // the player went on by itself to the preloaded song (gapless): the session moves there on the report
+                if (!l.isActiveHere) return
+                engineKey?.let { l.report("ended", it, state.value.duration) }
+                advancedTo = id
+                if (!l.isConnected && queue.peek() == id) queue.next(ended = true) // shown at once while the server can't be told
+            } else if (queue.peek() == id) {
+                // the player moved on by itself: move the queue there too, then load what comes after
                 queue.next(ended = true)
             } else if (queue.current != id) {
                 load(queue.next(ended = true) ?: id, autoplay = true)
@@ -279,7 +515,7 @@ class LocalPlayback(
             counted = false
             nowPlayingSent = false
             startedAt = System.currentTimeMillis()
-            val t = current
+            val t = session?.lib?.track(id)
             applyVolume(t)
             stateFlow.update { it.copy(trackId = id, duration = t?.duration ?: 0.0, error = null) }
             positionFlow.value = 0.0
@@ -287,16 +523,20 @@ class LocalPlayback(
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
+            if (elsewhere) return
             if (isPlaying) {
                 setStatus(PlayerStatus.Playing)
                 if (!nowPlayingSent) nowPlaying()
                 startTicker()
+                sayHere("playing")
             } else {
                 positionFlow.value = exo.currentPosition / 1000.0
-                if (exo.playbackState == Player.STATE_BUFFERING && exo.playWhenReady) setStatus(PlayerStatus.Loading)
-                else if (!exo.playWhenReady && queue.current != null && state.value.status != PlayerStatus.Stopped && state.value.status != PlayerStatus.Error) {
+                if (exo.playbackState == Player.STATE_BUFFERING && exo.playWhenReady) {
+                    setStatus(PlayerStatus.Loading)
+                } else if (!exo.playWhenReady && queue.current != null && state.value.status != PlayerStatus.Stopped && state.value.status != PlayerStatus.Error) {
                     setStatus(PlayerStatus.Paused) // paused here, by a headset, a call or another app taking the sound
                     scheduleSave(soon = true)
+                    sayHere("paused")
                 }
             }
         }
@@ -304,6 +544,12 @@ class LocalPlayback(
         override fun onPlaybackStateChanged(playbackState: Int) {
             when (playbackState) {
                 Player.STATE_ENDED -> {
+                    val l = linkFlow.value
+                    if (l != null) {
+                        // the session says what follows
+                        if (l.isActiveHere) engineKey?.let { l.report("ended", it, state.value.duration) }
+                        return
+                    }
                     // the last loaded song ended: what follows was not known in advance (repeat one, random, the end)
                     val id = queue.next(ended = true)
                     if (id != null) load(id, autoplay = true) else stop()
@@ -327,6 +573,10 @@ class LocalPlayback(
             val message = "无法播放“${t?.title.orEmpty()}”：$reason"
             Log.w(TAG, message, error)
             setStatus(PlayerStatus.Error, message)
+            if (linkFlow.value != null) {
+                sayHere("failed") // the session skips it and says so to every device
+                return
+            }
             session?.say(Toast(message, isError = true))
             // a song that cannot be played here is skipped, as the Windows app does; a lost connection is not (every song
             // would fail the same way)
@@ -340,31 +590,47 @@ class LocalPlayback(
         stateFlow.update { it.copy(status = s, error = if (s == PlayerStatus.Error) error else null) }
     }
 
-    /** Four times a second while playing: the position, the counted play, the queue saved every 30 s. */
+    /** Four times a second while playing: the position, the counted play, the queue saved (or the session told) every
+     *  30 s; while another device plays, the session's position moving on. */
     private fun startTicker() {
         if (ticker?.isActive == true) return
         ticker = scope.launch {
             while (isActive) {
                 delay(250)
+                val l = linkFlow.value
+                if (l != null && !l.isActiveHere) {
+                    val s = remote ?: break
+                    if (!s.playing) break
+                    positionFlow.value = s.positionAt(l.serverNow) / 1000.0
+                    continue
+                }
+                if (l != null && sayPositionAt > 0 && System.currentTimeMillis() >= sayPositionAt) {
+                    sayPositionAt = 0
+                    sayHere("position") // a seek done
+                }
                 if (!exo.isPlaying) {
                     if (state.value.status != PlayerStatus.Loading) break
                     continue
                 }
                 val p = exo.currentPosition / 1000.0
                 positionFlow.value = p
-                val t = current
+                val t = session?.lib?.track(currentPlayerId())
                 if (!counted && t != null && Scrobbling.counts(p, state.value.duration)) {
                     counted = true // a play counts past half the song or four minutes
                     countPlay(t, startedAt)
                 }
-                if (System.currentTimeMillis() - savedAt > 30_000) scheduleSave(soon = true) // the position, for another device
+                if (l != null) {
+                    if (System.currentTimeMillis() - saidAt > 30_000) sayHere("position") // at least every 30 s
+                } else if (System.currentTimeMillis() - savedAt > 30_000) {
+                    scheduleSave(soon = true) // the position, for another device
+                }
             }
         }
     }
 
     private fun nowPlaying() {
         nowPlayingSent = true
-        val t = current ?: return
+        val t = session?.lib?.track(currentPlayerId()) ?: current ?: return
         quietly { session?.client?.scrobble(t.id, submission = false) }
         scheduleSave(soon = true)
     }
@@ -386,10 +652,11 @@ class LocalPlayback(
         exo.volume = (gain?.let { min(1.0, 10.0.pow(it / 20)) } ?: 1.0).toFloat()
     }
 
-    // ---------------------------------------------------------------- continue on another device
+    // ---------------------------------------------------------------- continue on another device (without Connect v2)
 
     private fun scheduleSave(soon: Boolean = false) {
-        if (queue.current == null || session == null) return
+        // with a session the server keeps it (rule 6)
+        if (queue.current == null || session == null || linkFlow.value != null) return
         saveJob?.cancel()
         saveJob = scope.launch {
             delay(if (soon) 1 else 1500)
@@ -398,6 +665,7 @@ class LocalPlayback(
     }
 
     private fun saveNow() {
+        if (linkFlow.value != null) return
         val s = session ?: return
         val c = queue.current ?: return
         savedAt = System.currentTimeMillis()

@@ -71,6 +71,28 @@ class PlayQueue(private val lookup: (String) -> Track?, private val random: Rand
     }
 
     /**
+     * Sonus Connect version 2: the queue as the server holds it (the server runs this same logic; the app shows its
+     * result): the context in playback order, the pointer, the hand-queued songs with the server's keys, the current
+     * song and the order. [onChanged] is called only when something differs.
+     */
+    fun mirror(context: PlayContext?, order: List<String>, pointer: Int, manual: List<Pair<String, String>>, current: String?, playbackOrder: PlaybackOrder, stopAfterCurrent: Boolean) {
+        if (playContext == context && pointerAt == pointer && this.current == current && this.order == playbackOrder &&
+            this.stopAfterCurrent == stopAfterCurrent && this.context == order && this.manual == manual
+        ) {
+            return
+        }
+        this.context = order.toList()
+        source = order.toList()
+        pointerAt = pointer
+        this.manual = manual.toList()
+        playContext = context
+        this.current = current
+        this.order = playbackOrder
+        this.stopAfterCurrent = stopAfterCurrent
+        changed()
+    }
+
+    /**
      * The song that follows when the current one ends — what [next] (ended = true) will return — without moving there
      * (to load it early), or null when that is not a different song known now (stop after current, repeat one, random).
      */

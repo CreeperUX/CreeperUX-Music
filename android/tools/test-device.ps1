@@ -15,16 +15,25 @@
 
 .PARAMETER Avd
   The emulator to start when no device is connected (sonus-phone or sonus-tablet).
+
+.PARAMETER DemoRepo
+  The checkout whose demo server to start (default: SONUS_DEMO_REPO, else this repository): one whose demo server speaks
+  Sonus Connect v2 for ConnectDeviceTest, which is skipped otherwise.
+
+  On a phone the tests sign in as demo, on a tablet as friend: one account is one playback session, and the tests run on
+  every connected device at once.
 #>
 param(
     [string]$Avd = "sonus-phone",
-    [int]$Port = 4633
+    [int]$Port = 4633,
+    [string]$DemoRepo = $env:SONUS_DEMO_REPO
 )
 
 # native tools (gradle, adb) write progress to stderr: Windows PowerShell must not take that for an error
 $ErrorActionPreference = "Continue"
 $android = Split-Path -Parent $PSScriptRoot
 $repo = Split-Path -Parent $android
+if (-not $DemoRepo) { $DemoRepo = $repo }
 if (-not $env:JAVA_HOME) { $env:JAVA_HOME = Get-ChildItem "$env:LOCALAPPDATA\Programs\jdk" -Directory | Select-Object -First 1 -ExpandProperty FullName }
 if (-not $env:ANDROID_HOME) { $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk" }
 $adb = Join-Path $env:ANDROID_HOME "platform-tools\adb.exe"
@@ -36,7 +45,7 @@ function Get-Devices { & $adb devices | Select-String "^(\S+)\s+device$" | ForEa
 $server = $null
 if (-not (Test-Server)) {
     Write-Host "Starting the demo server on port $Port"
-    $server = Start-Process node -ArgumentList "`"$repo\tools\demo-server\demo-server.mjs`"", $Port -PassThru -WindowStyle Hidden
+    $server = Start-Process node -ArgumentList "`"$DemoRepo\tools\demo-server\demo-server.mjs`"", $Port -PassThru -WindowStyle Hidden
     for ($i = 0; $i -lt 50 -and -not (Test-Server); $i++) { Start-Sleep -Milliseconds 200 }
 }
 
@@ -72,6 +81,10 @@ try {
     Write-Host "Report: $(Join-Path $android 'app\build\reports\androidTests\connected\debug\index.html')"
     exit $result
 } finally {
-    if ($started) { & $adb emu kill | Out-Null }
+    if ($started) {
+        & $adb -s emulator-5554 emu kill | Out-Null
+        Start-Sleep -Seconds 3
+        if (-not $started.HasExited) { Stop-Process -Id $started.Id -Force -ErrorAction SilentlyContinue }
+    }
     if ($server) { Stop-Process -Id $server.Id -ErrorAction SilentlyContinue }
 }

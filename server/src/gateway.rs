@@ -1,0 +1,240 @@
+//! The gateway: every request goes to Navidrome as it came, streamed both ways (songs, uploads, server-sent events),
+//! WebSockets included (Sonus Connect, the Jellyfin API). Only what a proxy must change changes: hop-by-hop headers,
+//! and who the client is (trust.rs). Parts of the API move out of Navidrome by being answered here instead.
+
+use std::convert::Infallible;
+use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use bytes::Bytes;
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Incoming;
+use hyper::header::{self, HeaderMap, HeaderName, HeaderValue};
+use hyper::service::service_fn;
+use hyper::{Request, Response, StatusCode, Uri, Version};
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto;
+use hyper_util::server::graceful::GracefulShutdown;
+use tokio::net::TcpListener;
+use tracing::{debug, warn};
+
+use crate::trust::{TrustList, client_ip};
+
+pub type Body = BoxBody<Bytes, hyper::Error>;
+
+pub struct Settings {
+    /// Navidrome's address: `http://127.0.0.1:4534`.
+    pub upstream: Uri,
+    pub trusted: TrustList,
+    pub user_header: HeaderName,
+}
+
+/// Cheap to clone: one per connection.
+#[derive(Clone)]
+pub struct Gateway {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    settings: Settings,
+    client: Client<HttpConnector, Incoming>,
+    /// Whether Navidrome has answered yet: until then a refused connection is "starting" (503), afterwards "down" (502).
+    ready: Arc<AtomicBool>,
+}
+
+impl Gateway {
+    pub fn new(settings: Settings, ready: Arc<AtomicBool>) -> Gateway {
+        let mut connector = HttpConnector::new();
+        connector.set_nodelay(true);
+        connector.set_connect_timeout(Some(Duration::from_secs(5)));
+        let client = Client::builder(TokioExecutor::new())
+            .pool_idle_timeout(Duration::from_secs(30))
+            .pool_timer(TokioTimer::new())
+            .build(connector);
+        Gateway { inner: Arc::new(Inner { settings, client, ready }) }
+    }
+
+    pub async fn handle(&self, mut req: Request<Incoming>, peer: IpAddr) -> Response<Body> {
+        let started = Instant::now();
+        let settings = &self.inner.settings;
+        let method = req.method().clone();
+        // the path only: queries carry Subsonic credentials (p, t, s, apiKey)
+        let path = req.uri().path().to_string();
+
+        let upgrade = upgrade_protocol(req.headers());
+        let client_upgrade = upgrade.as_ref().map(|_| hyper::upgrade::on(&mut req));
+
+        let (parts, body) = req.into_parts();
+        // Navidrome's address and the request's own path, as it came (a BaseURL path included)
+        let path_and_query = parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+        let uri = match settings.upstream.authority() {
+            Some(authority) => Uri::builder().scheme("http").authority(authority.clone()).path_and_query(path_and_query).build(),
+            None => return text(StatusCode::INTERNAL_SERVER_ERROR, "No upstream address"),
+        };
+        let uri: Uri = match uri {
+            Ok(uri) => uri,
+            Err(_) => return text(StatusCode::BAD_REQUEST, "Bad request target"),
+        };
+
+        let mut headers = parts.headers;
+        if !headers.contains_key(header::HOST) {
+            // HTTP/2 carries the host in the request target; Navidrome (HTTP/1.1) wants the header
+            if let Some(authority) = parts.uri.authority().and_then(|a| HeaderValue::from_str(a.as_str()).ok()) {
+                headers.insert(header::HOST, authority);
+            }
+        }
+        strip_hop_by_hop(&mut headers);
+        headers.remove(header::EXPECT); // answered here already
+        let client = client_ip(peer, &headers, &settings.trusted);
+        for name in ["true-client-ip", "x-real-ip", "x-forwarded-for"] {
+            headers.remove(name);
+        }
+        let client_value = HeaderValue::from_str(&client.to_string()).expect("an address is a header value");
+        headers.insert("x-real-ip", client_value.clone());
+        headers.insert("x-forwarded-for", client_value);
+        if !settings.trusted.contains(peer) {
+            // anyone could claim to be signed in by a proxy: only the trusted proxies' claim reaches Navidrome
+            headers.remove(&settings.user_header);
+        }
+        if let Some(protocol) = &upgrade {
+            headers.insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
+            headers.insert(header::UPGRADE, protocol.clone());
+        }
+
+        let mut upstream_req = Request::new(body);
+        *upstream_req.method_mut() = parts.method;
+        *upstream_req.uri_mut() = uri;
+        *upstream_req.version_mut() = Version::HTTP_11;
+        *upstream_req.headers_mut() = headers;
+
+        let mut response = match self.inner.client.request(upstream_req).await {
+            Ok(response) => response,
+            Err(e) => {
+                let ready = self.inner.ready.load(Ordering::Relaxed);
+                warn!(%method, path, error = %e, "Navidrome did not answer");
+                return if ready {
+                    text(StatusCode::BAD_GATEWAY, "The music server (Navidrome) did not answer")
+                } else {
+                    let mut r = text(StatusCode::SERVICE_UNAVAILABLE, "The music server is starting");
+                    r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+                    r
+                };
+            }
+        };
+        let status = response.status();
+        debug!(%method, path, status = status.as_u16(), ms = started.elapsed().as_millis() as u64, %client);
+
+        if status == StatusCode::SWITCHING_PROTOCOLS {
+            if let Some(client_upgrade) = client_upgrade {
+                let upstream_upgrade = hyper::upgrade::on(&mut response);
+                tokio::spawn(async move {
+                    match tokio::try_join!(client_upgrade, upstream_upgrade) {
+                        Ok((from_client, to_upstream)) => {
+                            let (mut a, mut b) = (TokioIo::new(from_client), TokioIo::new(to_upstream));
+                            if let Err(e) = tokio::io::copy_bidirectional(&mut a, &mut b).await {
+                                debug!(error = %e, "upgraded connection ended");
+                            }
+                        }
+                        Err(e) => warn!(error = %e, "upgrade failed"),
+                    }
+                });
+                let (mut parts, _) = response.into_parts();
+                let keep = (parts.headers.get(header::CONNECTION).cloned(), parts.headers.get(header::UPGRADE).cloned());
+                strip_hop_by_hop(&mut parts.headers);
+                if let (Some(connection), Some(upgrade)) = keep {
+                    parts.headers.insert(header::CONNECTION, connection);
+                    parts.headers.insert(header::UPGRADE, upgrade);
+                }
+                return Response::from_parts(parts, empty());
+            }
+        }
+
+        let (mut parts, body) = response.into_parts();
+        strip_hop_by_hop(&mut parts.headers);
+        Response::from_parts(parts, body.boxed())
+    }
+}
+
+/// Accepts connections until `shutdown` resolves, then lets the open ones finish for a few seconds.
+pub async fn serve(listener: TcpListener, gateway: Gateway, shutdown: impl Future<Output = ()>) -> std::io::Result<()> {
+    let mut builder = auto::Builder::new(TokioExecutor::new());
+    builder.http1().timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(30));
+    let graceful = GracefulShutdown::new();
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, peer): (_, SocketAddr) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(e) => { warn!(error = %e, "accept failed"); tokio::time::sleep(Duration::from_millis(100)).await; continue; }
+                };
+                let _ = stream.set_nodelay(true);
+                let gateway = gateway.clone();
+                let service = service_fn(move |req| {
+                    let gateway = gateway.clone();
+                    async move { Ok::<_, Infallible>(gateway.handle(req, peer.ip()).await) }
+                });
+                let connection = builder.serve_connection_with_upgrades(TokioIo::new(stream), service).into_owned();
+                let connection = graceful.watch(connection);
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        debug!(error = %e, "connection ended");
+                    }
+                });
+            }
+            () = &mut shutdown => break,
+        }
+    }
+    drop(listener);
+    if tokio::time::timeout(Duration::from_secs(10), graceful.shutdown()).await.is_err() {
+        debug!("connections still open after 10s: closing them");
+    }
+    Ok(())
+}
+
+/// The protocol asked for (`websocket`), when the request asks to switch to one.
+fn upgrade_protocol(headers: &HeaderMap) -> Option<HeaderValue> {
+    let asks = headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|token| token.trim().eq_ignore_ascii_case("upgrade"));
+    if asks { headers.get(header::UPGRADE).cloned() } else { None }
+}
+
+/// The headers that belong to one connection, not to the request (RFC 9110 7.6.1), and the ones Connection names.
+fn strip_hop_by_hop(headers: &mut HeaderMap) {
+    let named: Vec<HeaderName> = headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .filter_map(|token| HeaderName::try_from(token.trim()).ok())
+        .collect();
+    for name in named {
+        headers.remove(name);
+    }
+    for name in [header::CONNECTION, header::TE, header::TRAILER, header::TRANSFER_ENCODING, header::UPGRADE, header::PROXY_AUTHORIZATION, header::PROXY_AUTHENTICATE] {
+        headers.remove(name);
+    }
+    headers.remove("keep-alive");
+    headers.remove("proxy-connection");
+}
+
+fn text(status: StatusCode, message: &'static str) -> Response<Body> {
+    let mut r = Response::new(Full::new(Bytes::from_static(message.as_bytes())).map_err(|never: Infallible| match never {}).boxed());
+    *r.status_mut() = status;
+    r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
+    r
+}
+
+fn empty() -> Body {
+    Full::new(Bytes::new()).map_err(|never: Infallible| match never {}).boxed()
+}

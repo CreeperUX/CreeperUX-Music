@@ -7,3 +7,5 @@ bin/
 obj/
 # test instances: builds, data, screenshots, reports
 tools/e2e/.work/
+# the Rust server's build output
+server/target/

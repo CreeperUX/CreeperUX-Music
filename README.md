@@ -6,7 +6,7 @@
 
 ## 安装与更新
 
-从 GitHub 的 [Releases](https://github.com/CreeperUX/CreeperUX-Music/releases) 下载这台电脑架构的安装程序（`Sonus-<版本>-x64-setup.exe` 或 `-ARM64-setup.exe`）运行即可：只为当前用户安装，不需要管理员权限，装在 `%LOCALAPPDATA%\Programs\Sonus`。升级时再运行新版本的安装程序，登录和设置保留。
+从 GitHub 的 [Releases](https://github.com/CreeperUX/Sonus/releases) 下载这台电脑架构的安装程序（`Sonus-<版本>-x64-setup.exe` 或 `-ARM64-setup.exe`）运行即可：只为当前用户安装，不需要管理员权限，装在 `%LOCALAPPDATA%\Programs\Sonus`。升级时再运行新版本的安装程序，登录和设置保留。
 
 程序自己会检查更新（和 Lumen 同样的做法）：启动后每天查一次 GitHub 的 Release，有新版本时右上角出现「新版本」，点它看版本说明，下载安装程序（按 GitHub 记录的 SHA-256 校验）后关闭程序、打开安装程序。仓库是公开的，检查和下载都不用登录，也不用填令牌（GitHub 对不登录的请求每个网络地址每小时限 60 次，每天查一次绰绰有余）。0.5.0 及更早的版本为私有仓库保存的 GitHub 令牌（凭据管理器里的 `Sonus:github`）在新版本第一次启动时删掉。
 
@@ -78,7 +78,8 @@ npm run demo             # 演示服务器 + Windows 程序（第一次会先编
 | `src/Sonus.Core` | 不依赖界面的核心库：Subsonic 客户端、曲库分组、播放队列与播放顺序、歌词解析、文字格式 |
 | `src/Sonus` | WinUI 3 程序：`Services/MusicService.cs`（状态与操作）、`Playback/AudioEngine.cs`（MediaPlayer，全部在自己的线程上调用）、`MainWindow`（顶栏、三栏、播放条）、`Pages/`、`Controls/`、`Testing/E2EChannel.cs`（测试通道） |
 | `tests/Sonus.Core.Tests` | 核心库测试（xUnit）：单元测试 + 对演示服务器的集成测试 |
-| `server/` | 演示服务器：`demo-server.mjs`（API）、`catalogue.mjs`（虚构曲库）、`synth.mjs`（合成音乐）、`covers/`（封面 JPEG） |
+| `server/` | Sonus 服务器（Rust，AGPL-3.0，正在开发）：先作为网关挡在冻结版 Navidrome 前面，再逐块接管。见 `server/README.md` 和路线图 `docs/server-roadmap.md` |
+| `tools/demo-server/` | 演示服务器：`demo-server.mjs`（API）、`catalogue.mjs`（虚构曲库）、`synth.mjs`（合成音乐）、`connect.mjs`（跨设备控制）、`covers/`（封面 JPEG） |
 | `src/Sonus.Setup` | 安装程序窗口（WPF，和 Lumen 的一样）：里面带着 MSI，关掉 Windows Installer 自己的界面来运行它 |
 | `installer/` | MSI（WiX v5，`Package.wxs`）：按用户安装、开始菜单快捷方式 |
 | `docs/release-notes/` | 每个版本的说明，发布时作为 GitHub Release 的正文（程序的更新对话框也显示它） |
@@ -115,7 +116,7 @@ powershell -File tools/package.ps1 -Arch x64 -Extract  # 一个架构，并把 M
 
 ```bash
 npm install
-dotnet test tests/Sonus.Core.Tests     # 97 项：队列逻辑、歌词、格式、令牌、服务器地址、检查更新、跨设备控制、接手旧名字的数据，以及对演示服务器的集成测试
+dotnet test tests/Sonus.Core.Tests     # 105 项：队列逻辑、歌词、格式、令牌、服务器地址、检查更新、跨设备控制、接手旧名字的数据，以及对演示服务器的集成测试
 npm run check                                   # Windows 程序的多轮验收（本机架构；--arch=x64|ARM64）
 npm run check:web                               # 网页版客户端
 ```

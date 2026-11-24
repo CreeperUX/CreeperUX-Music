@@ -101,6 +101,10 @@ class SessionClient(
     @Volatile
     var resume: (() -> SessionResume?)? = null
 
+    /** Asked on every (re)connect: this device's volume (0–1) and muted, said in the hello. Called on a background thread. */
+    @Volatile
+    var volumeNow: (() -> Pair<Double, Boolean>)? = null
+
     /** This device is the session's active device (as last heard). */
     val isActive: Boolean get() = session.value.activeDevice == deviceId
 
@@ -183,6 +187,10 @@ class SessionClient(
                         put("kind", kind)
                         put("canPlay", canPlay)
                         put("client", clientLabel)
+                        volumeNow?.invoke()?.let { (volume, muted) ->
+                            put("volume", Math.round(volume * 1000) / 1000.0)
+                            put("muted", muted)
+                        }
                         resume?.invoke()?.let { r ->
                             put("resume", buildJsonObject { put("rev", r.rev); put("playing", r.playing); put("positionMs", r.positionMs) })
                         }

@@ -175,10 +175,10 @@ node tools\demo-server\demo-server.mjs 4633
 - `ConnectDemoTest` 让两台设备连同一个演示服务器，测切歌、暂停、调对方音量、切换出声设备；
 - 设备上的 `ConnectDeviceTest` 让测试程序扮演"测试电脑"：它放歌，App 显示并遥控它（App 按钮、系统媒体控件），它调 App 的音量，最后在设备列表里把播放切回 App。
 
-演示服务器的 v2 还没合进主干时，用 `SONUS_DEMO_REPO` 指向带 v2 的检出（比如 Windows 会话的工作目录），没有 v2 时这几个测试会自动跳过：
+这些测试默认用仓库自带的演示服务器和向量。要换用另一个检出里的演示服务器（比如正在改服务器的分支），设置 `SONUS_DEMO_REPO` 指向那个检出即可：
 
 ```powershell
-$env:SONUS_DEMO_REPO = "<带 Connect v2 演示服务器的检出目录>"; .\gradlew.bat :core:test; .\tools\test-device.ps1
+$env:SONUS_DEMO_REPO = "<另一个检出的目录>"; .\gradlew.bat :core:test; .\tools\test-device.ps1
 ```
 
 ## 在你自己的手机上试用

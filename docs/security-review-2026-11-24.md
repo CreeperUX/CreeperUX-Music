@@ -129,6 +129,12 @@ the acting session a new token), and making an app password asks for a code when
   wrong passwords, then the right one answered error 40). Harmless per client; behind an unannounced proxy or a
   shared address it lets anyone lock anyone out. See below.
 
+**Decided since** (the owner, 2026-11-25), and built in the Rust server and both web UIs (`server/README.md`,
+"Codes a session alone does not replace"; tests in `tools/contract/security/hardening.test.mjs`): a first set-up
+under `required` takes a one-time enrolment code an admin made; allowing an app, making an app password and an
+admin's reset each take a verification code of the acting account, and the approval page shows the address that
+asked. The lockout by address after failed sign-ins stays as it is.
+
 ## Deployment: the reverse proxy
 
 The server will run behind openresty, which makes one of two things true, and both were proven here:

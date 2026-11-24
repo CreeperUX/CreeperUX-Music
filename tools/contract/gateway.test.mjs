@@ -230,7 +230,8 @@ test('Sonus Connect version 2: the session is kept across a restart, in tables o
     assert.equal(fromRust.headers.get('content-length'), String(Buffer.byteLength(textRust)));
   }
 
-  assert.deepEqual(tables(), ['sonus_app_password', 'sonus_connect_session', 'sonus_recovery_code', 'sonus_server_schema', 'sonus_two_factor'], 'two tables of the Rust server’s own beside the fork’s three');
+  assert.deepEqual(tables(), ['sonus_app_password', 'sonus_connect_session', 'sonus_enrolment_code', 'sonus_recovery_code', 'sonus_server_schema', 'sonus_two_factor'],
+    'three tables of the Rust server’s own (Connect’s session, the enrolment codes, their versions) beside the fork’s three');
   const songs = (await signed(listener).allSongs()).slice(0, 5);
   const pc = await device(rust.url, signed(listener).query().toString(), 'restart-pc-0001', '书房电脑');
   const played = await pc.command('playContext', { context: { kind: 'album', id: 'x', label: 'X' }, ids: songs.map(s => s.id), startId: songs[1].id });

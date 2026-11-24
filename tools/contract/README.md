@@ -18,6 +18,7 @@ node tools/contract/diff.mjs --go-vs-gateway  # Navidrome vs the Rust server run
 node --test tools/contract/gateway.test.mjs   # what only the Rust server decides: the sign-in limit, what Navidrome never sees, Connect 2 across a restart
 node --test tools/contract/auth-routes.test.mjs   # /auth on servers of their own: a new server, optional/off, limits
 node tools/contract/web-ui.check.mjs          # the old web UI, headless, through the Rust server (--go: Navidrome alone)
+node --test tools/contract/security/findings.test.mjs tools/contract/security/hardening.test.mjs   # the security review's findings and decisions
 ```
 
 ## Running the suite
@@ -98,7 +99,7 @@ server with the same settings, sends both the same requests, and compares the tw
 | Test | Shows |
 |---|---|
 | a new server: the first admin | `createAdmin` (422 for a bad body, the admin and its session, 403 for a second one), the name in any case, the native API with that session and the admin's one library, the Subsonic API with the password; then a password change through the native API: Navidrome checks the current password (so each server reads what the other sealed), the session from before is refused (the epoch), the old password too, the new one signs in |
-| a new server with two-step verification required | `createAdmin` answers the setup step; setup and confirm give the session |
+| a new server with two-step verification required | `createAdmin` answers the setup step; setup and confirm give the session. The Rust server's answer has one key more (`enrolmentCodeRequired: false`: the first admin needs no enrolment code), and a later sign-in with the password gets a token that does need one: asserted for the Rust server, left out of the comparison |
 | optional, and off | optional: a user turns it on with their session, is then asked for a code (and their account password stops signing the Subsonic API), replaces and turns it off with a code; off: the two-step user signs in with the password alone, and setup is refused |
 | the sign-in routes are rate-limited the same way | 3 requests in 6 s per address across `login`, `device/start`, the setup routes and `device/revoke`: the fourth is 429 with `Retry-After`, the `X-RateLimit-*` headers count down the same; signed-in limited routes answer 401 before they count; `poll` and the status are not limited |
 | request bodies are bounded the same way | 8 KB under `/auth` (422), 4 MiB to `/api` (413 with Navidrome's text), uploads apart |
@@ -115,11 +116,39 @@ node tools/contract/web-ui.check.mjs --go   # Navidrome alone: the control
 ```
 
 Navidrome's React UI in headless Chromium (Playwright, from the repository's `node_modules`), on a new server with
-two-step verification required: the first admin; the sign-in form refusing a wrong password; the setup at the first
-sign-in (the secret read from the page, the QR code a square picture); the browser sign-in's approval page (allow,
-refuse, a typed code, a code nobody waits for); the app's key working and listed in Personal settings; every call the
-UI makes to Navidrome's `/api` answered; signing in again with a code. Screenshots go to
-`tools/fixtures/.work/web-ui/`. It is a script, not part of the suite: it needs a browser.
+two-step verification required: the first admin made on the sign-up page, setting two-step verification up without an
+enrolment code (the secret read from the page, the QR code a square picture, the recovery codes kept for the run);
+the browser sign-in's approval page (the app, the device and the address that asked; no allowing without a
+verification code, a wrong one refused, a right one handing the key over; refuse; a typed code; a code nobody waits
+for); the app's key working and listed in Personal settings; an app password made only with a code; every call the UI
+makes to Navidrome's `/api` answered; a second user made through Navidrome's API, the admin making their enrolment
+code on the user's page, and that user's first sign-in (the enrolment code asked for before any QR code, a wrong one
+refused); the admin's reset with a code, its new enrolment code, and the used one refused; signing in again with a
+code. Screenshots go to `tools/fixtures/.work/web-ui/`. It is a script, not part of the suite: it needs a browser.
+
+It needs a fork build whose UI knows the codes (0.64.2-sonus.11 or later): `--navidrome <exe>` runs another build
+than the fixtures'. With `--go` the same UI runs against Navidrome alone, which asks for none of the codes: the
+control that the UI still works there.
+
+## The security review's findings and decisions: `security/`
+
+```sh
+node --test tools/contract/security/findings.test.mjs     # F1 to F6: what the review proved, fixed since
+node --test tools/contract/security/hardening.test.mjs    # D1 to D3: what was decided after it
+```
+
+Each test runs the Rust server with the real Navidrome on a fresh copy of the golden database (or on none).
+`hardening.test.mjs`:
+
+| Test | Shows |
+|---|---|
+| D1. the password alone does not set two-step verification up | a user made through Navidrome's API: the setup token starts and confirms nothing without the enrolment code, and makes itself none; an admin's session alone makes none either; with the admin's code it is made, works, and after a reset does not work again (the reset's own does); a user from before needs one too; ten wrong ones from ten addresses, then the right one is 429 |
+| D1. the first admin | sets up with the token of the account's making; after that the password's token needs a code, which `sonus-server enrolment-code` prints (run with the server's settings beside the running server) |
+| D2. a session alone does not allow an app | the approval page is told the address that asked (another loopback address) and that a code is needed; no body, no code, a wrong code: 401, the app still waits, no key made; with a code: approved |
+| D3. a session alone makes no app password and resets nobody | each of the four routes that take a code refuses a session alone; ten wrong codes across them from ten addresses, then the right code is 429 on each and at the sign-in; nothing was made or reset |
+
+The suite's own `web-auth` file runs the same flows on the shared server, and expects the stricter answers when the
+first sign-in's answer says the server asks for enrolment codes (the Rust server), the fork's otherwise.
 
 ## The differential runner
 

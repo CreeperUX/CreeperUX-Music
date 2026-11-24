@@ -20,14 +20,44 @@ export function copyButton(container, { UI, S, L, text, target }) {
 
 /**
  * Sets up an authenticator: the QR code and its key, then a code from the app to confirm.
- * @param o.token   The setup token from a sign-in that asked for the setup; omitted when signed in.
- * @param o.code    A current code, when replacing an authenticator that is already set up.
- * @param o.onDone  Called with the server's answer ({ recoveryCodes, … }).
+ * @param o.token        The setup token from a sign-in that asked for the setup; omitted when signed in.
+ * @param o.code         A current code, when replacing an authenticator that is already set up.
+ * @param o.enrolment    The sign-in said the set-up takes an enrolment code (the one-time code an admin hands over
+ *                       with the password): it is asked for first.
+ * @param o.appPassword  A name: an app password of that name is made with the confirmation (see api/sonus.js, login).
+ * @param o.onDone       Called with the server's answer ({ recoveryCodes, … }).
  */
-export function setupPanel(container, { UI, S, L, auth, token, code, onDone, onCancel }) {
-  const box = h('div', { class: 'cm-setup' }, h('p', { class: 'cm-login-status', role: 'status' }, '…'));
+export function setupPanel(container, { UI, S, L, auth, token, code, enrolment = false, appPassword, onDone, onCancel }) {
+  const box = h('div', { class: 'cm-setup' });
   container.append(box);
-  auth.setupBegin({ token, code }).then(info => {
+  if (enrolment) askEnrolment(''); else begin();
+  return box;
+
+  /** The enrolment code first: without it the server hands out no key to scan. */
+  function askEnrolment(message) {
+    const form = h('form', { class: 'cm-login-form', novalidate: '' });
+    box.replaceChildren(h('p', { class: 'cm-login-intro' }, L.enrolIntro), form);
+    const field = UI.createTextField(form, { label: L.enrolCode, name: 'enrolment-code', autocomplete: 'off', required: true, placeholder: 'abcd-efgh-jkmn' }, S);
+    field.input.setAttribute('autocapitalize', 'off'); field.input.setAttribute('spellcheck', 'false');
+    const alert = h('p', { class: 'cm-login-error', role: 'alert', hidden: !message || null }, message);
+    const actions = h('div', { class: 'cm-login-actions' });
+    form.append(alert, actions);
+    UI.createButton(actions, { label: L.enrolNext, variant: 'primary', type: 'submit' }, S);
+    if (onCancel) UI.createButton(actions, { label: L.cancel, variant: 'ghost', onClick: onCancel }, S);
+    form.addEventListener('submit', e => { e.preventDefault(); const v = field.value.trim(); if (v) begin(v); });
+    field.input.focus();
+  }
+
+  function begin(enrolmentCode) {
+    box.replaceChildren(h('p', { class: 'cm-login-status', role: 'status' }, '…'));
+    auth.setupBegin({ token, code, enrolmentCode }).then(info => show(info, enrolmentCode), err => {
+      if (enrolment && (err.twoFactor === 'enrolment' || err.status === 429)) { askEnrolment(err.message); return; }
+      box.replaceChildren(h('p', { class: 'cm-login-error', role: 'alert' }, err.message));
+      if (onCancel) UI.createButton(box, { label: L.back, variant: 'secondary', onClick: onCancel }, S);
+    });
+  }
+
+  function show(info, enrolmentCode) {
     const form = h('form', { class: 'cm-login-form', novalidate: '' });
     const secret = h('code', { class: 'cm-secret', dir: 'ltr' }, info.secret);
     box.replaceChildren(
@@ -42,15 +72,14 @@ export function setupPanel(container, { UI, S, L, auth, token, code, onDone, onC
     form.addEventListener('submit', async e => {
       e.preventDefault();
       alert.hidden = true; submit.update({ busy: true });
-      try { onDone(await auth.setupConfirm({ token, code: field.value.trim() })); }
-      catch (err) { alert.textContent = err.message; alert.hidden = false; submit.update({ busy: false }); field.input.focus(); field.input.select(); }
+      try { onDone(await auth.setupConfirm({ token, code: field.value.trim(), enrolmentCode, appPassword })); }
+      catch (err) {
+        if (enrolment && err.twoFactor === 'enrolment') { askEnrolment(err.message); return; } // used or replaced meanwhile
+        alert.textContent = err.message; alert.hidden = false; submit.update({ busy: false }); field.input.focus(); field.input.select();
+      }
     });
     field.input.focus();
-  }, err => {
-    box.replaceChildren(h('p', { class: 'cm-login-error', role: 'alert' }, err.message));
-    if (onCancel) UI.createButton(box, { label: L.back, variant: 'secondary', onClick: onCancel }, S);
-  });
-  return box;
+  }
 }
 
 /** The recovery codes, shown once: a list to copy, and a button to go on. */
@@ -99,7 +128,7 @@ export function sessionGate(container, { UI, S, t, auth, user = '', onReady }) {
       } else if (err.twoFactor === 'setup') {
         // the server wants two-step verification set up before it opens a session
         form.hidden = true;
-        const setup = setupPanel(box, { UI, S, L, auth, token: err.setupToken, onCancel: () => { setup.remove(); form.hidden = false; },
+        const setup = setupPanel(box, { UI, S, L, auth, token: err.setupToken, enrolment: err.enrolmentCodeRequired, onCancel: () => { setup.remove(); form.hidden = false; },
           onDone: payload => { setup.remove(); recoveryPanel(box, { UI, S, L, codes: payload.recoveryCodes ?? [], onDone: () => { box.remove(); onReady(); } }); } });
       } else { show(err.message); fPass.input.focus(); }
     }

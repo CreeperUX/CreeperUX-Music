@@ -3,7 +3,7 @@
 // server lists it. run.mjs sets both variables.
 import { readFileSync } from 'node:fs';
 import { Subsonic } from './subsonic.mjs';
-import { signIn, webJson } from './web.mjs';
+import { signIn, webJson, withCode } from './web.mjs';
 
 const base = process.env.CONTRACT_BASE_URL;
 const manifestFile = process.env.CONTRACT_MANIFEST;
@@ -75,7 +75,8 @@ export const approver = manifest.server?.deviceApprover ?? manifest.primaryUser;
 
 /**
  * Allows or refuses a waiting browser sign-in as the user would on the approval page. Navidrome: the approver signs in
- * on the web and posts the decision; the demo server: its test hook.
+ * on the web and posts the decision; the demo server: its test hook. The Rust server asks for a verification code to
+ * allow one (the page is told so: `codeRequired`), which the frozen Navidrome does not.
  */
 export async function decideDeviceLogin(userCode, allow) {
   if (manifest.server?.deviceApproval === 'demo-hook') {
@@ -86,7 +87,10 @@ export async function decideDeviceLogin(userCode, allow) {
     return;
   }
   const token = await session(approver);
-  const r = await webJson(BASE, `/auth/device/${encodeURIComponent(userCode)}/${allow ? 'approve' : 'deny'}`, { method: 'POST', token });
+  const path = `/auth/device/${encodeURIComponent(userCode)}`;
+  const decide = code => webJson(BASE, `${path}/${allow ? 'approve' : 'deny'}`, { method: 'POST', token, ...(code ? { body: { code } } : {}) });
+  const takesCode = allow && (await webJson(BASE, path, { token })).json?.codeRequired === true;
+  const r = takesCode ? await withCode(manifest.users[approver], decide) : await decide();
   if (r.status !== 204) throw new Error(`approving ${userCode}: HTTP ${r.status} ${JSON.stringify(r.json)}`);
 }
 

@@ -4,13 +4,18 @@
 // client sees them. Needs a Navidrome-kind server (the web UI's routes) with two-step verification required, as the
 // golden database is served.
 //
+// The Rust server is stricter than the frozen Navidrome on purpose (the security review of 2026-11-24): a first set-up
+// takes an enrolment code an admin made, and making an app password, allowing an app and an admin's reset each take a
+// verification code. The first sign-in's answer says which server this is (`enrolmentCodeRequired`), and the tests
+// then expect that; against Navidrome alone they expect what the fork does.
+//
 // The tests make a user of their own (through the native API, as the admin) and remove it at the end, so the manifest's
 // users stay as the other files expect them. They run in order: each builds on the one before.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { manifest, session, BASE, CLIENT } from '../lib/context.mjs';
-import { webJson } from '../lib/web.mjs';
+import { webJson, withCode } from '../lib/web.mjs';
 import { step, totp } from '../lib/totp.mjs';
 import { Subsonic } from '../lib/subsonic.mjs';
 
@@ -94,13 +99,31 @@ test('the first sign-in gives a setup token that opens nothing else', { skip }, 
   // until it is set up, the account password still signs the Subsonic API
   assert.equal((await subsonic({ u: temp.username, p: temp.password })).body.status, 'ok');
 
-  const early = await post('/2fa/confirm', { token: temp.setupToken, code: '123456' });
+  temp.hardened = first.json.enrolmentCodeRequired === true;
+  if (temp.hardened) {
+    // the password got the token; it does not set anything up without the account's enrolment code
+    for (const [path, body] of [['/2fa/setup', {}], ['/2fa/confirm', { code: '123456' }], ['/2fa/setup', { enrolmentCode: 'abcd-efgh-jkmn' }]]) {
+      const refused = await post(path, { token: temp.setupToken, ...body });
+      assert.deepEqual([refused.status, refused.json.twoFactor], [401, 'enrolment'], `${path} ${JSON.stringify(body)}`);
+    }
+    // an admin makes one (with a code of their own), for the user they made through the native API
+    const noCode = await post(`/2fa/users/${temp.id}/enrolment-code`, {}, admin);
+    assert.deepEqual([noCode.status, noCode.json.twoFactor], [401, 'code']);
+    assert.equal((await post(`/2fa/users/${temp.id}/enrolment-code`, { code: '000000' }, temp.setupToken)).status, 401, 'not with a setup token');
+    const made = await withCode(manifest.users.admin, code => post(`/2fa/users/${temp.id}/enrolment-code`, { code }, admin));
+    assert.equal(made.status, 200, JSON.stringify(made.json));
+    assert.match(made.json.enrolmentCode, /^[a-z2-9]{4}(-[a-z2-9]{4}){2}$/);
+    assert.match(made.json.expiresAt, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+    temp.enrolment = made.json.enrolmentCode;
+    assert.equal((await get(`/2fa/users/${temp.id}`, admin)).json.enrolmentCodeExpiresAt, made.json.expiresAt, 'the admin sees that one waits');
+  }
+  const early = await post('/2fa/confirm', { token: temp.setupToken, code: '123456', enrolmentCode: temp.enrolment });
   assert.equal(early.status, 409, 'nothing is being set up yet');
   for (const body of [{}, { token: 'not.a.token' }]) assert.equal((await post('/2fa/setup', body)).status, 401);
 });
 
 test('setting it up: the secret and its QR code, a code from it, then recovery codes and a session', { skip }, async () => {
-  const begin = await post('/2fa/setup', { token: temp.setupToken });
+  const begin = await post('/2fa/setup', { token: temp.setupToken, enrolmentCode: temp.enrolment });
   assert.equal(begin.status, 200);
   assert.match(begin.json.secret, /^[A-Z2-7]{32}$/);
   assert.ok(begin.json.uri.startsWith(`otpauth://totp/Sonus:${temp.username}?`) && begin.json.uri.includes(`secret=${begin.json.secret}`));
@@ -109,13 +132,14 @@ test('setting it up: the secret and its QR code, a code from it, then recovery c
   assert.equal(begin.json.account, temp.username);
   temp.secret = begin.json.secret;
 
-  const wrong = await post('/2fa/confirm', { token: temp.setupToken, code: '000000' });
+  const wrong = await post('/2fa/confirm', { token: temp.setupToken, code: '000000', enrolmentCode: temp.enrolment });
   assert.equal(wrong.status, 401);
   assert.equal(wrong.json.twoFactor, 'setup');
   assert.equal((await get(`/2fa/users/${temp.id}`, admin)).json.enabled, false, 'off until a code is confirmed');
 
-  const done = await post('/2fa/confirm', { token: temp.setupToken, code: totp(temp.secret) });
+  const done = await post('/2fa/confirm', { token: temp.setupToken, code: totp(temp.secret), enrolmentCode: temp.enrolment });
   assert.equal(done.status, 200, JSON.stringify(done.json));
+  if (temp.hardened) assert.ok(!('enrolmentCodeExpiresAt' in (await get(`/2fa/users/${temp.id}`, admin)).json), 'the enrolment code is used up');
   assert.equal(done.json.username, temp.username);
   assert.equal(done.json.id, temp.id);
   assert.equal(done.json.isAdmin, false);
@@ -161,13 +185,20 @@ test('then every sign-in takes a code, each code once, or a recovery code', { sk
 });
 
 test('app passwords: made, listed, used on the Subsonic API, revoked', { skip }, async () => {
-  const made = await post('/app-passwords', { name: ' 书房电脑 ' }, temp.session);
+  if (temp.hardened) {
+    // a session alone makes none: it takes a code (a recovery code here; the frozen Navidrome reads none)
+    const none = await post('/app-passwords', { name: 'x' }, temp.session);
+    assert.deepEqual([none.status, none.json], [401, { error: 'Verification code required', twoFactor: 'code' }]);
+    assert.equal((await post('/app-passwords', { name: 'x', code: '000000' }, temp.session)).status, 401);
+    assert.equal((await get('/app-passwords', temp.session)).json.length, 0);
+  }
+  const made = await post('/app-passwords', { name: ' 书房电脑 ', code: temp.recovery[3] }, temp.session);
   assert.equal(made.status, 200);
   assert.match(made.json.password, /^[a-z2-9]{4}(-[a-z2-9]{4}){3}$/);
   assert.equal(made.json.appPassword.name, '书房电脑');
   assert.ok(!('lastUsedAt' in made.json.appPassword));
   const { id } = made.json.appPassword;
-  const unnamed = await post('/app-passwords', {}, temp.session);
+  const unnamed = await post('/app-passwords', { code: temp.recovery[4] }, temp.session);
   assert.equal(unnamed.json.appPassword.name, 'App');
   assert.equal((await post('/app-passwords', { name: 'x' })).status, 401, 'signed in only');
 
@@ -195,6 +226,29 @@ test('app passwords: made, listed, used on the Subsonic API, revoked', { skip },
   assert.equal((await subsonic({ u: temp.username, p: made.json.password })).body.error?.code, 40, 'revoked: it stops working at once');
   assert.equal((await subsonic({ apiKey: made.json.password })).body.error?.code, 44);
   assert.equal((await webJson(BASE, `/auth/app-passwords/${unnamed.json.appPassword.id}`, { method: 'DELETE', token: temp.session })).status, 204);
+
+  if (temp.hardened) {
+    // nor does a session alone hand an app a key
+    const s = (await post('/device/start', { client: 'Sonus', device: 'Contract' })).json;
+    const info = await get(`/device/${s.userCode}`, temp.session);
+    assert.equal(info.json.codeRequired, true);
+    assert.match(info.json.address, /^(127\.0\.0\.1|::1)$/, 'the page shows the address that asked');
+    for (const body of [undefined, {}, { code: '000000' }]) {
+      const refused = await post(`/device/${s.userCode}/approve`, body, temp.session);
+      assert.deepEqual([refused.status, refused.json.twoFactor], [401, 'code'], JSON.stringify(body));
+    }
+    assert.equal((await post('/device/poll', { deviceCode: s.deviceCode })).json.status, 'pending');
+    assert.equal((await post(`/device/${s.userCode}/approve`, { code: temp.recovery[5] }, temp.session)).status, 204);
+    const handed = (await post('/device/poll', { deviceCode: s.deviceCode })).json;
+    assert.equal(handed.status, 'approved');
+    assert.equal((await post('/device/revoke', { apiKey: handed.apiKey })).status, 204);
+    // a sign-in with the password and a code can ask for an app password with it: one code for both
+    const both = await post('/login', { username: temp.username, password: temp.password, otp: temp.recovery[6], appPassword: 'Contract (one code)' });
+    assert.equal(both.status, 200, JSON.stringify(both.json));
+    assert.equal(both.json.newAppPassword.appPassword.name, 'Contract (one code)');
+    assert.equal((await subsonic({ u: temp.username, p: both.json.newAppPassword.password })).body.status, 'ok');
+    assert.equal((await webJson(BASE, `/auth/app-passwords/${both.json.newAppPassword.appPassword.id}`, { method: 'DELETE', token: temp.session })).status, 204);
+  }
 });
 
 test('new recovery codes take a code and replace the old ones; required, it cannot be turned off', { skip }, async () => {
@@ -219,12 +273,25 @@ test('an admin sees and resets someone’s two-step verification; others cannot'
   assert.equal((await get(`/2fa/users/${temp.id}`, temp.session)).status, 403);
   assert.equal((await get(`/2fa/users/${temp.id}`)).status, 401);
 
-  const kept = await post('/app-passwords', { name: 'kept' }, temp.session);
+  const kept = await post('/app-passwords', { name: 'kept', code: temp.recovery[9] }, temp.session);
   const seen = await get(`/2fa/users/${temp.id}`, admin);
-  assert.deepEqual([seen.status, seen.json.enabled, seen.json.recoveryCodesLeft], [200, true, 10]);
-  assert.equal((await post(`/2fa/users/${temp.id}/reset`, undefined, admin)).status, 204);
+  assert.deepEqual([seen.status, seen.json.enabled, seen.json.recoveryCodesLeft], [200, true, temp.hardened ? 9 : 10]);
+  if (temp.hardened) {
+    // an admin's session alone resets nobody; with the admin's code, the answer carries the user's new enrolment code
+    for (const body of [undefined, { code: '000000' }]) {
+      const refused = await post(`/2fa/users/${temp.id}/reset`, body, admin);
+      assert.deepEqual([refused.status, refused.json.twoFactor], [401, 'code'], JSON.stringify(body));
+    }
+    assert.equal((await get(`/2fa/users/${temp.id}`, admin)).json.enabled, true);
+    const reset = await withCode(manifest.users.admin, code => post(`/2fa/users/${temp.id}/reset`, { code }, admin));
+    assert.equal(reset.status, 200, JSON.stringify(reset.json));
+    assert.match(reset.json.enrolmentCode, /^[a-z2-9]{4}(-[a-z2-9]{4}){2}$/);
+    assert.notEqual(reset.json.enrolmentCode, temp.enrolment);
+  } else {
+    assert.equal((await post(`/2fa/users/${temp.id}/reset`, undefined, admin)).status, 204);
+  }
   const after = await get(`/2fa/users/${temp.id}`, admin);
-  assert.deepEqual(after.json, { mode: 'required', enabled: false, recoveryCodesLeft: 0 });
+  assert.deepEqual([after.json.mode, after.json.enabled, after.json.recoveryCodesLeft], ['required', false, 0]);
   // they set it up again at their next sign-in; their app passwords keep working
   assert.equal((await signIn()).json.twoFactor, 'setup');
   assert.equal((await subsonic({ u: temp.username, p: kept.json.password })).body.status, 'ok');

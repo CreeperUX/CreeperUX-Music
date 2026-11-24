@@ -162,24 +162,46 @@ Ported from Navidrome and the fork; the design is theirs, restated here because 
   a setup token; `optional`, only users who set it up are asked; `off`, nobody is asked and the routes to set it up
   are refused (what was set up stays in the database).
 - **The setup token** is a session-shaped JWT with `aud: sonus-2fa-setup`, good for 15 minutes. The signed-in routes
-  here, Navidrome's `/api` and the Subsonic API all refuse it by its audience (checked). It lets its holder, who has
-  proven the password, set an authenticator up and so get a session: that is its purpose. The setup routes also take
-  a session token (a signed-in user replacing their authenticator), and then ask for a code from the one in use.
+  here, Navidrome's `/api` and the Subsonic API all refuse it by its audience (checked). Its holder has proven the
+  password and nothing else, so by itself it sets nothing up (next point). The setup routes also take a session
+  token (a signed-in user replacing their authenticator), and then ask for a code from the one in use.
+- **A first set-up takes an enrolment code** while two-step verification is required (README, "Codes a session alone
+  does not replace"): before it, whoever first had an unenrolled account's password could enrol their own
+  authenticator, keep the recovery codes, and leave the owner asked for a code only the attacker has. The code is
+  random (12 characters of 31, about 59 bits), kept as an unsalted sha256 (as recovery codes: random, not chosen)
+  in `sonus_enrolment_code`, good for seven days, one per user, checked in constant time at `setup` and again at
+  `confirm`, where it is deleted in the transaction that turns the authenticator on (`DELETE … WHERE code_hash = ?
+  AND expires_at > ?`: two confirmations at once enrol one). Ten wrong ones per account in an hour, then none is
+  looked at. What it does not close: the admin's channel to the user carries the code and the password together, so
+  whoever reads that message has both; an attacker with the password can spend the ten guesses every hour and keep
+  the owner's set-up refused (429), as with verification codes; and under `optional` the password alone still signs
+  in and can turn two-step verification on for itself, which is what `optional` means.
+- **The first admin's token**: `createAdmin` answers a setup token with a second audience
+  (`sonus-2fa-first-admin`) that sets up without an enrolment code, for 15 minutes, for the account that request
+  made. Anyone who reaches a server with no users can make that account anyway (below). Afterwards the way in is
+  the server's command line (`sonus-server enrolment-code`), which trusts whoever can run it: they can write the
+  database file themselves.
 - **Authenticator codes**: RFC 6238 with SHA-1, 6 digits, 30 s, one step either side accepted. Each code signs in
   once: the step is stored, and a code for that step or an earlier one is refused (one atomic `UPDATE … WHERE
   last_step < ?`). Compared in constant time.
 - **Recovery codes**: ten, 10 characters of a 31-letter alphabet each (about 49 bits), stored as unsalted sha256 (the
   fork's choice: they are random, not chosen), each used up by one atomic `UPDATE … WHERE used_at IS NULL`.
-- **What limits guessing codes**: only the per-address rate limit of `/auth/login` (5 requests in 20 s by default).
-  There is no per-user lockout: someone who has the password can try about 21,600 codes a day from one address
-  against 3 valid ones in a million at any moment, more from more addresses. As in Navidrome and the fork; not
-  changed here, and worth a decision.
-- **An admin's reset** takes the admin's session and no code: it removes the user's authenticator and recovery codes,
-  so with `required` the user's password alone gets a setup token again. An admin's session is thus enough to take
-  over any account's second step (they can also change any password through Navidrome's `/api`).
+- **What limits guessing codes**: the per-address rate limit of `/auth/login` (5 requests in 20 s by default), and
+  per account ten wrong verification codes in an hour, from anywhere and on any route that takes one (the sign-in,
+  the set-up of a replacement, recovery codes, turning it off, allowing an app, an app password, an admin's reset or
+  enrolment code): then no code is looked at for the rest of the hour. Kept in memory: a restart forgets. Someone
+  who has the password can keep the owner's codes refused this way; nobody is told.
+- **An admin's reset** takes the admin's own verification code besides the session (when the admin has two-step
+  verification): it removes the user's authenticator and recovery codes, and where two-step verification is required
+  answers the enrolment code the user sets it up again with. An admin's session alone no longer takes over an
+  account's second step. (An admin can still change any password through Navidrome's `/api`, which asks for no
+  code: with `required` that password alone now gets a setup token and no further.)
 - **App passwords** are random (16 characters of the 31-letter alphabet, about 79 bits; 32 for keys handed to apps),
   sealed like passwords so the Subsonic token sign-in can use them, shown once. They bypass the second step by
-  design: that is what they are for.
+  design: that is what they are for. So making one takes a verification code from an account that has two-step
+  verification: a session (stolen, left open, opened before two-step verification was on) does not mint a
+  permanent key. A sign-in may ask for one in the same request (`appPassword`): password and code were checked by
+  that request, so it is the same proof in one step, not a way around it.
 - **The first admin** (`createAdmin`) can be made by anyone who reaches a server that has no user yet, with any name
   and password, empty ones included (Navidrome's behaviour, kept). Here the count and the insert are one transaction.
 - **`DevAutoLoginUsername`**, Navidrome's development setting, is honoured on the signed-in routes as Navidrome
@@ -212,11 +234,15 @@ user code the app shows (8 letters of 20, about 34 bits, valid ten minutes, read
 
 - The API key is made only when a signed-in user approves, belongs to that user, and is handed to the poller once.
   Two approvals at once make one key (the sign-in is held while the key is made).
-- **The grant's inherent risk is here too**: someone can start a sign-in and talk a user into approving the code they
-  are shown; the page shows the app's own claims (`client`, `device`), which are whatever the starter sent. The user
-  code is the only tie between the app in front of the user and the request they approve.
-- At most 200 sign-ins wait at a time; `start` is rate-limited per address, but several addresses can fill the 200
-  and keep apps from starting a sign-in for up to ten minutes.
+- **The grant's inherent risk is here too**, with a higher bar: someone can start a sign-in and talk a user into
+  approving the code they are shown. The page shows the app's own claims (`client`, `device`), which are whatever
+  the starter sent, and the address the request came from, which the starter does not choose (the gateway's decided
+  client address; behind a proxy the server is not told about, it is the proxy's). Allowing takes a verification
+  code from an account that has two-step verification, so a click on a link is not enough; a user who is talked
+  into typing a code too still hands the key over. The user code is the only tie between the app in front of the
+  user and the request they approve.
+- Five sign-ins wait per address and 2000 in all, the oldest unapproved giving way, so a new sign-in always gets a
+  place; with several hundred addresses the list can still be turned over faster than a user approves.
 - `revoke` takes only the key itself: whoever has a key can delete it. That is the point (an app signing out), and
   it is rate-limited so it does not become a way to test keys quickly (the Subsonic limiter does not see it).
 - Waiting sign-ins are in memory: lost at a restart, never written anywhere.
@@ -354,9 +380,12 @@ another origin has nothing to ride on (the same as the Subsonic API's open CORS)
 matches nothing; both keys tried for passwords; a user name that is not UTF-8 refused here; a malformed
 `Content-Type` answered after the sign-in check instead of before; the gateway's own answers uncompressed; key hashes
 filled at start; one first admin when several are asked for at once; the QR code's pixels; a simpler title-casing of
-the first admin's display name; 413 for a body cut off at the limit. None widens what signs in: each either refuses
-more or changes nothing about who is accepted, except the second key, which only opens what was sealed with the
-public default key.
+the first admin's display name; 413 for a body cut off at the limit; and, since the security review, the rules that
+ask for more than Navidrome did: no header signs anyone in unless one is named, sessions end when two-step
+verification is turned on, an enrolment code for a first set-up, and a verification code to allow an app, make an
+app password or reset a user. None widens what signs in: each either refuses more or changes nothing about who is
+accepted, except the second key, which only opens what was sealed with the public default key, and the app password
+a sign-in may ask for, which that sign-in's own password and code would have got in a second request.
 
 ## Running in front of a Navidrome it did not start
 

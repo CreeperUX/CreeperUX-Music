@@ -552,3 +552,268 @@ async fn a_sign_in_is_checked_before_anything_is_read() {
     assert_eq!(w.get("/rest/getAlbumList2?u=alice&p=sesame&c=test&f=json&type=newest").await.1, failed(10, "missing parameter: 'v'"));
     assert!(w.reached().is_empty(), "nothing reached Navidrome, not even a registration");
 }
+
+/// More of the library for the lists: the two artists (known to have no picture), a starred artist, three playlists
+/// (alice's own, root's public one, root's smart one) and one of root's that is private, and alice's play queue.
+fn add_lists(conn: &Connection) {
+    for (artist, albums) in [("Abe", 2), ("Zed", 2)] {
+        conn.execute("INSERT INTO artist (id, name, order_artist_name) VALUES ('ar-' || ?1, ?1, lower(?1))", [artist]).unwrap();
+        let stats = format!(
+            r#"{{"albumartist":{{"a":{albums},"m":3,"s":10}},"maincredit":{{"a":{},"m":3,"s":10}},"total":{{"a":{albums},"m":3,"s":10}}}}"#,
+            albums + 1
+        );
+        conn.execute("INSERT INTO library_artist (library_id, artist_id, stats) VALUES (1, 'ar-' || ?1, ?2)", (artist, stats)).unwrap();
+        conn.execute("INSERT INTO item_artwork (item_kind, item_id, hash) VALUES ('ar', 'ar-' || ?1, '')", [artist]).unwrap();
+    }
+    annotate(conn, "id-alice", "ar-Abe", "artist", 0, 0, true);
+    let playlist = |id: &str, name: &str, owner: &str, public: bool, rules: Option<&str>| {
+        conn.execute(
+            "INSERT INTO playlist (id, name, comment, duration, song_count, public, created_at, updated_at, owner_id, rules, evaluated_at) \
+             VALUES (?1, ?2, 'a comment', 123.9, 2, ?3, '2026-11-24 23:42:33.9+01:00', '2026-11-24 23:42:34+01:00', ?4, ?5, \
+             CASE WHEN ?5 IS NOT NULL THEN '2026-11-24 23:42:33.5+01:00' END)",
+            (id, name, public, owner, rules),
+        )
+        .unwrap();
+    };
+    playlist("pl-own", "Road Trip", "id-alice", false, None);
+    playlist("pl-shared", "Shared Picks", "id-root", true, None);
+    playlist("pl-smart", "All FLAC", "id-root", true, Some(r#"{"all":[{"is":{"suffix":"flac"}}],"sort":"title"}"#));
+    playlist("pl-secret", "Secret", "id-root", false, None);
+    for (playlist, position, song) in [("pl-own", 1, "s-2"), ("pl-own", 2, "s-gone"), ("pl-own", 3, "s-1"), ("pl-shared", 1, "s-3"), ("pl-smart", 1, "s-1")] {
+        conn.execute("INSERT INTO playlist_tracks (id, playlist_id, media_file_id) VALUES (?1, ?2, ?3)", (position, playlist, song)).unwrap();
+    }
+    conn.execute("INSERT INTO item_artwork (item_kind, item_id, hash) VALUES ('pl', 'pl-own', '560ad02e92edcc95')", []).unwrap();
+    conn.execute(
+        "INSERT INTO playqueue (id, user_id, current, changed_by, items, created_at, updated_at, position) \
+         VALUES ('pq-1', 'id-alice', 1, 'Sonus', 's-2,s-gone,s-1', '2026-11-24 23:00:00+01:00', '2026-11-24 23:42:33.9263+01:00', 5000)",
+        [],
+    )
+    .unwrap();
+}
+
+async fn world_with_lists() -> World {
+    let w = world().await;
+    add_lists(&w.db());
+    w
+}
+
+fn ids(list: &Value) -> Vec<&str> {
+    list.as_array().map(|items| items.iter().map(|item| item["id"].as_str().unwrap_or("?")).collect()).unwrap_or_default()
+}
+
+fn nothing() -> Value {
+    serde_json::json!({})
+}
+
+#[tokio::test]
+async fn a_search_for_nothing_pages_the_library_in_the_tables_order() {
+    let w = world_with_lists().await;
+    let sync = |count: i64, offset: i64| format!("/rest/search3?{ALICE}&query=&songCount={count}&songOffset={offset}&albumCount=0&artistCount=0");
+    let (_, page) = w.here(&sync(2, 0)).await;
+    assert_eq!(ids(&page["searchResult3"]["song"]), ["s-1", "s-2"]);
+    assert!(page["searchResult3"].get("album").is_none() && page["searchResult3"].get("artist").is_none(), "a count of 0 asks for none");
+    assert_eq!(page["searchResult3"]["song"][0]["starred"], "2026-11-24T23:42:33.88+01:00", "with the user's own annotations");
+    assert_eq!(ids(&w.here(&sync(1, 2)).await.1["searchResult3"]["song"]), ["s-3"]);
+    assert_eq!(w.here(&sync(2, 4)).await.1["searchResult3"], nothing(), "past the end: nothing, and no error");
+    // no query at all, two quotes, a star: everything, 20 of each kind
+    for query in ["", "&query=%22%22", "&query=*"] {
+        let (_, all) = w.here(&format!("/rest/search3?{ALICE}{query}&songCount=3")).await;
+        assert_eq!(ids(&all["searchResult3"]["song"]), ["s-1", "s-2", "s-3"], "{query}");
+        assert_eq!(ids(&all["searchResult3"]["album"]), ["al-10", "al-2", "al-b", "al-c"]);
+        assert_eq!(ids(&all["searchResult3"]["artist"]), ["ar-Abe", "ar-Zed"]);
+    }
+    // an offset without a count is not SQL for Navidrome either: no rows
+    assert_eq!(w.here(&sync(-1, 1)).await.1["searchResult3"], nothing());
+    // the page that would show the song with a content type of the system's: Navidrome's
+    w.navidromes(&sync(500, 0)).await;
+    // what a user may see: bob has no library, an admin every one
+    assert_eq!(w.here(&format!("/rest/search3?{BOB}&query=")).await.1["searchResult3"], nothing());
+    let (_, admin) = w.here(&format!("/rest/search3?{ADMIN}&query=&songCount=3")).await;
+    assert_eq!(ids(&admin["searchResult3"]["artist"]), ["ar-Abe", "ar-Zed"]);
+    assert!(admin["searchResult3"]["song"][0].get("starred").is_none(), "the admin's own annotations, not alice's");
+}
+
+#[tokio::test]
+async fn a_search_for_words_goes_through_fts5_like_or_musicbrainz_ids() {
+    let w = world_with_lists().await;
+    let search =
+        async |query: &str| w.here(&format!("/rest/search3?{ALICE}&query={query}&songCount=20&albumCount=20&artistCount=20")).await.1["searchResult3"].clone();
+    // words: FTS5, any case, prefixes
+    let blue = search("BLU").await;
+    assert_eq!(ids(&blue["album"]), ["al-b"]);
+    assert_eq!(ids(&blue["song"]), ["s-1", "s-2"], "songs of the album, by title");
+    assert!(blue.get("artist").is_none());
+    assert_eq!(ids(&search("album+2").await["album"]), ["al-2"]);
+    let (_, phrase) = w.here(&format!("/rest/search3?{ALICE}&query=%22album+10%22&songCount=0")).await;
+    assert_eq!(ids(&phrase["searchResult3"]["album"]), ["al-10"], "a phrase");
+    assert_eq!(search("o").await, nothing(), "one character is too broad");
+    assert_eq!(search("nothing+like+it").await, nothing());
+    assert_eq!(ids(&search("co+cyan").await["album"]), ["al-c"], "every word, in any order");
+    assert_eq!(search("cyan+AND+co").await, nothing(), "FTS5's operators are words like any other: nothing here has an 'and'");
+    // an artist: Navidrome's ArtistID3
+    let abe = search("abe").await;
+    assert_eq!(
+        abe["artist"],
+        serde_json::json!([{"id": "ar-Abe", "name": "Abe", "albumCount": 2, "starred": "2026-11-24T23:42:33.88+01:00", "musicBrainzId": "", "sortName": "abe",
+            "roles": ["albumartist", "maincredit"]}])
+    );
+    assert_eq!(ids(&abe["album"]).len(), 2, "the albums of this album artist");
+    // Chinese, Japanese, Korean: LIKE, a single character too
+    w.db().execute("UPDATE media_file SET title = '夜の歌' WHERE id = 's-3'", []).unwrap();
+    assert_eq!(ids(&search("%E5%A4%9C").await["song"]), ["s-3"]);
+    assert_eq!(ids(&search("%E5%A4%9C+%E6%AD%8C").await["song"]), ["s-3"], "every word, anywhere");
+    assert_eq!(search("%E5%A4%9C+%E6%9C%9D").await, nothing());
+    // punctuation: the word through FTS5; what FTS5 would lose, with LIKE
+    assert_eq!(ids(&search("%3CCyan%3E").await["album"]), ["al-c"]);
+    assert_eq!(ids(&search("%26+%22").await["album"]), ["al-c"]);
+    // a MusicBrainz id, in any case
+    w.db().execute("UPDATE media_file SET mbz_recording_id = '0f3d6a8e-5c1b-4d2a-9e7f-1a2b3c4d5f01' WHERE id = 's-2'", []).unwrap();
+    let by_id = search("0F3D6A8E-5C1B-4D2A-9E7F-1A2B3C4D5F01").await;
+    assert_eq!((ids(&by_id["song"]), by_id.get("album").is_none()), (vec!["s-2"], true));
+    // paging
+    let page = w.here(&format!("/rest/search3?{ALICE}&query=album&albumCount=1&albumOffset=1&songCount=0&artistCount=0")).await.1;
+    assert_eq!(ids(&page["searchResult3"]["album"]).len(), 1);
+    // legacy clients get no OpenSubsonic fields; Subsonic.ArtistParticipations counts the albums an artist is only on
+    let (_, legacy) = w.here("/rest/search3?u=alice&p=sesame&v=1.16.1&c=DSub&f=json&query=abe").await;
+    assert!(legacy["searchResult3"]["artist"][0].get("roles").is_none() && legacy["searchResult3"]["album"][0].get("userRating").is_none());
+    let participations = world_with(LibraryOptions { artist_participations: true, ..LibraryOptions::default() }, true).await;
+    add_lists(&participations.db());
+    assert_eq!(participations.here(&format!("/rest/search3?{ALICE}&query=zed&songCount=0")).await.1["searchResult3"]["artist"][0]["albumCount"], 3);
+}
+
+#[tokio::test]
+async fn searches_that_stay_navidromes() {
+    let w = world_with_lists().await;
+    w.navidromes(&format!("/rest/search3?{ALICE}&query=blue&musicFolderId=1")).await;
+    w.navidromes(&format!("/rest/search3?{ALICE}&query=%ff")).await;
+    w.navidromes(&format!("/rest/search2?{ALICE}&query=blue")).await;
+    // an artist with a picture (or one not looked for yet) carries a link Navidrome signs
+    w.db().execute("UPDATE item_artwork SET hash = '00ff00ff00ff00ff' WHERE item_kind = 'ar' AND item_id = 'ar-Zed'", []).unwrap();
+    w.navidromes(&format!("/rest/search3?{ALICE}&query=zed")).await;
+    w.navidromes(&format!("/rest/search3?{ALICE}&query=&songCount=1")).await;
+    w.here(&format!("/rest/search3?{ALICE}&query=zed&artistCount=0&songCount=0")).await;
+    w.here(&format!("/rest/search3?{ALICE}&query=abe")).await;
+    w.db().execute("DELETE FROM item_artwork WHERE item_kind = 'ar'", []).unwrap();
+    w.navidromes(&format!("/rest/search3?{ALICE}&query=abe")).await;
+    w.navidromes(&format!("/rest/getStarred2?{ALICE}")).await;
+    // Navidrome's older search (Search.Backend = legacy, Search.FullString)
+    for options in
+        [LibraryOptions { legacy_search: true, ..LibraryOptions::default() }, LibraryOptions { search_full_string: true, ..LibraryOptions::default() }]
+    {
+        let legacy = world_with(options, true).await;
+        legacy.navidromes(&format!("/rest/search3?{ALICE}&query=blue")).await;
+    }
+}
+
+#[tokio::test]
+async fn what_a_user_starred() {
+    let w = world_with_lists().await;
+    let (_, starred) = w.here(&format!("/rest/getStarred2?{ALICE}")).await;
+    let starred = &starred["starred2"];
+    assert_eq!((ids(&starred["artist"]), ids(&starred["album"]), ids(&starred["song"])), (vec!["ar-Abe"], vec!["al-b"], vec!["s-1"]));
+    assert_eq!(starred["artist"][0]["albumCount"], 2);
+    assert_eq!(starred["album"][0]["starred"], "2026-11-24T23:42:33.88+01:00");
+    // nothing starred: an empty object, as Navidrome writes it
+    assert_eq!(w.get(&format!("/rest/getStarred2?{ADMIN}")).await.1, format!("{OK},\"starred2\":{{}}}}}}"));
+    assert_eq!(w.here(&format!("/rest/getStarred2?{BOB}")).await.1["starred2"], nothing());
+    // the latest first
+    annotate(&w.db(), "id-alice", "s-2", "media_file", 0, 0, true);
+    w.db().execute("UPDATE annotation SET starred_at = '2026-11-25 08:00:00+01:00' WHERE item_id = 's-2'", []).unwrap();
+    assert_eq!(ids(&w.here(&format!("/rest/getStarred2.view?{ALICE}")).await.1["starred2"]["song"]), ["s-2", "s-1"]);
+    w.navidromes(&format!("/rest/getStarred2?{ALICE}&musicFolderId=1")).await;
+    w.navidromes(&format!("/rest/getStarred?{ALICE}")).await;
+}
+
+#[tokio::test]
+async fn playlists_a_user_may_see() {
+    let w = world_with_lists().await;
+    let (_, body) = w.get(&format!("/rest/getPlaylists?{ALICE}")).await;
+    // Navidrome's bytes: by name; `public` left out when false; someone else's and a smart one read-only; a smart
+    // one good until Navidrome's refresh delay after it was filled
+    let expected = concat!(
+        r#""playlists":{"playlist":[{"id":"pl-smart","name":"All FLAC","comment":"a comment","songCount":2,"duration":123,"public":true,"owner":"root","#,
+        r#""created":"2026-11-24T23:42:33.9+01:00","changed":"2026-11-24T23:42:34+01:00","coverArt":"pl-pl-smart","readonly":true,"#,
+        r#""validUntil":"2026-11-24T23:42:38.5+01:00"},"#,
+        r#"{"id":"pl-own","name":"Road Trip","comment":"a comment","songCount":2,"duration":123,"owner":"alice","created":"2026-11-24T23:42:33.9+01:00","#,
+        r#""changed":"2026-11-24T23:42:34+01:00","coverArt":"pl-pl-own_560ad02e92edcc95","readonly":false},"#,
+        r#"{"id":"pl-shared","name":"Shared Picks","comment":"a comment","songCount":2,"duration":123,"public":true,"owner":"root","#,
+        r#""created":"2026-11-24T23:42:33.9+01:00","changed":"2026-11-24T23:42:34+01:00","coverArt":"pl-pl-shared","readonly":true}]}"#
+    );
+    assert_eq!(body, format!("{OK},{expected}}}}}"));
+    // an admin sees every playlist; someone with none of their own the public ones
+    assert_eq!(ids(&w.here(&format!("/rest/getPlaylists?{ADMIN}")).await.1["playlists"]["playlist"]), ["pl-smart", "pl-own", "pl-secret", "pl-shared"]);
+    assert_eq!(ids(&w.here(&format!("/rest/getPlaylists?{BOB}")).await.1["playlists"]["playlist"]), ["pl-smart", "pl-shared"]);
+    // minimal and legacy clients
+    let (_, minimal) = w.here("/rest/getPlaylists?u=alice&p=sesame&v=1.16.1&c=SubMusic&f=json").await;
+    assert_eq!(
+        minimal["playlists"]["playlist"][1],
+        serde_json::json!({"id": "pl-own", "name": "Road Trip", "songCount": 2, "duration": 123, "created": "2026-11-24T23:42:33.9+01:00",
+            "changed": "2026-11-24T23:42:34+01:00"})
+    );
+    let (_, legacy) = w.here("/rest/getPlaylists?u=alice&p=sesame&v=1.16.1&c=DSub&f=json").await;
+    assert!(legacy["playlists"]["playlist"][0].get("readonly").is_none() && legacy["playlists"]["playlist"][0].get("coverArt").is_some());
+    // SmartPlaylistRefreshDelay
+    let slow = world_with(LibraryOptions { smart_playlist_refresh_delay: Duration::from_secs(3600), ..LibraryOptions::default() }, true).await;
+    add_lists(&slow.db());
+    assert_eq!(slow.here(&format!("/rest/getPlaylists?{ALICE}")).await.1["playlists"]["playlist"][0]["validUntil"], "2026-11-25T00:42:33.5+01:00");
+    // a smart playlist with a delay of its own, or rules Navidrome's decoder refuses: Navidrome's list
+    w.db().execute(r#"UPDATE playlist SET rules = '{"all":[{"is":{"suffix":"flac"}}],"refreshDelay":"1h"}' WHERE id = 'pl-smart'"#, []).unwrap();
+    w.navidromes(&format!("/rest/getPlaylists?{ALICE}")).await;
+}
+
+#[tokio::test]
+async fn a_playlist_with_its_songs() {
+    let w = world_with_lists().await;
+    let (_, own) = w.here(&format!("/rest/getPlaylist?{ALICE}&id=pl-own")).await;
+    let own = &own["playlist"];
+    // in the playlist's order, without the song that is gone; counted and timed from the songs that are there
+    assert_eq!(ids(&own["entry"]), ["s-2", "s-1"]);
+    assert_eq!((own["songCount"].as_i64(), own["duration"].as_i64(), own["readonly"].as_bool()), (Some(2), Some(123), Some(false)));
+    assert_eq!(own["entry"][1]["starred"], "2026-11-24T23:42:33.88+01:00");
+    assert_eq!(own["entry"][1]["userRating"], 4);
+    assert!(own.get("public").is_none());
+    // someone else's public playlist: read-only; a private one is not there for them; an admin reads any
+    let (_, shared) = w.here(&format!("/rest/getPlaylist?{ALICE}&id=pl-shared")).await;
+    let shared = &shared["playlist"];
+    assert_eq!((ids(&shared["entry"]), shared["readonly"].as_bool(), shared["songCount"].as_i64()), (vec!["s-3"], Some(true), Some(1)));
+    assert_eq!(w.get(&format!("/rest/getPlaylist?{ALICE}&id=pl-secret")).await.1, failed(70, "playlist not found"));
+    assert_eq!(w.get(&format!("/rest/getPlaylist?{BOB}&id=pl-own")).await.1, failed(70, "playlist not found"));
+    assert_eq!(w.here(&format!("/rest/getPlaylist?{ADMIN}&id=pl-own")).await.1["playlist"]["readonly"], true, "not the owner");
+    assert_eq!(w.get(&format!("/rest/getPlaylist?{ALICE}&id=nope")).await.1, failed(70, "playlist not found"));
+    assert_eq!(w.get(&format!("/rest/getPlaylist?{ALICE}")).await.1, failed(10, "missing parameter: 'id'"));
+    // a user without the library sees a public playlist without its songs
+    let (_, empty) = w.here(&format!("/rest/getPlaylist?{BOB}&id=pl-shared")).await;
+    assert!(empty["playlist"].get("entry").is_none());
+    assert_eq!(empty["playlist"]["songCount"], 0);
+    // a playlist Navidrome keeps in step with a file is read-only for its owner too
+    w.db().execute("UPDATE playlist SET sync = TRUE WHERE id = 'pl-own'", []).unwrap();
+    assert_eq!(w.here(&format!("/rest/getPlaylist?{ALICE}&id=pl-own")).await.1["playlist"]["readonly"], true);
+    // a smart playlist: Navidrome fills it when it is read, which writes its songs
+    w.navidromes(&format!("/rest/getPlaylist?{ALICE}&id=pl-smart")).await;
+    w.navidromes(&format!("/rest/getPlaylist?{ADMIN}&id=pl-smart")).await;
+}
+
+#[tokio::test]
+async fn the_saved_play_queue() {
+    let w = world_with_lists().await;
+    let (_, queue) = w.here(&format!("/rest/getPlayQueue?{ALICE}")).await;
+    let queue = &queue["playQueue"];
+    // the queue's order, without the song that is gone; `current` is the song at the saved index of what is left
+    assert_eq!(ids(&queue["entry"]), ["s-2", "s-1"]);
+    assert_eq!(
+        (queue["current"].as_str(), queue["position"].as_i64(), queue["username"].as_str(), queue["changedBy"].as_str(), queue["changed"].as_str()),
+        (Some("s-1"), Some(5000), Some("alice"), Some("Sonus"), Some("2026-11-24T23:42:33.9263+01:00"))
+    );
+    // none saved: the user's name and Go's zero time
+    let none = format!("{OK},\"playQueue\":{{\"username\":\"bob\",\"changed\":\"0001-01-01T00:00:00Z\",\"changedBy\":\"\"}}}}}}");
+    assert_eq!(w.get(&format!("/rest/getPlayQueue?{BOB}")).await.1, none);
+    // an index past the end: no current song; position 0 is left out
+    w.db().execute("UPDATE playqueue SET current = 2, position = 0", []).unwrap();
+    let (_, queue) = w.here(&format!("/rest/getPlayQueue?{ALICE}")).await;
+    assert!(queue["playQueue"].get("current").is_none() && queue["playQueue"].get("position").is_none());
+    // a queue of songs that are all gone answers as none saved
+    w.db().execute("UPDATE playqueue SET items = 's-gone,s-gone2'", []).unwrap();
+    let (_, queue) = w.here(&format!("/rest/getPlayQueue?{ALICE}")).await;
+    assert_eq!(queue["playQueue"], serde_json::json!({"username": "alice", "changed": "0001-01-01T00:00:00Z", "changedBy": ""}));
+    w.navidromes(&format!("/rest/getPlayQueueByIndex?{ALICE}")).await;
+}

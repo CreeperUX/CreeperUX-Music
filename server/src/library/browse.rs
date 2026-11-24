@@ -12,7 +12,7 @@ use crate::subsonic::respond::{GENERIC, MISSING_PARAMETER};
 
 use super::json::Json;
 use super::query::{self, Cond, ListOptions, QueryError, Table, not_missing};
-use super::{NOT_FOUND, Reply, Scope, entities, seeded_order};
+use super::{NOT_FOUND, Reply, Scope, entities, lists, seeded_order};
 
 /// The answer of one of `super::METHODS`.
 pub fn answer(method: &str, scope: &Scope) -> Result<Reply, QueryError> {
@@ -21,13 +21,18 @@ pub fn answer(method: &str, scope: &Scope) -> Result<Reply, QueryError> {
         "getSong" => get_song(scope),
         "getAlbum" => get_album(scope),
         "getAlbumList2" => get_album_list2(scope),
+        "search3" => lists::search3(scope),
+        "getStarred2" => lists::get_starred2(scope),
+        "getPlaylists" => lists::get_playlists(scope),
+        "getPlaylist" => lists::get_playlist(scope),
+        "getPlayQueue" => lists::get_play_queue(scope),
         _ => Ok(Reply::Navidrome("not a method answered here")),
     }
 }
 
 /// A parameter Navidrome reads as a string (`req.Params.String`): its first value, None when empty or missing.
 /// Err: bytes that are not text, which Go passes on as they are; such a request is Navidrome's.
-fn string<'a>(params: &'a Params, name: &str) -> Result<Option<&'a str>, Reply> {
+pub(super) fn string<'a>(params: &'a Params, name: &str) -> Result<Option<&'a str>, Reply> {
     let value = params.get(name);
     if value.is_empty() {
         return Ok(None);
@@ -36,7 +41,7 @@ fn string<'a>(params: &'a Params, name: &str) -> Result<Option<&'a str>, Reply> 
 }
 
 /// `req.Params.String` where the parameter is needed: error 10 in Navidrome's words without it.
-fn required<'a>(params: &'a Params, name: &str) -> Result<&'a str, Reply> {
+pub(super) fn required<'a>(params: &'a Params, name: &str) -> Result<&'a str, Reply> {
     string(params, name)?.ok_or_else(|| Reply::error(MISSING_PARAMETER, format!("missing parameter: '{name}'")))
 }
 
@@ -56,7 +61,7 @@ fn required_int(params: &Params, name: &str) -> Result<i64, Reply> {
 }
 
 /// `req.Params.IntOr`: the default when missing or not a number.
-fn int_or(params: &Params, name: &str, default: i64) -> i64 {
+pub(super) fn int_or(params: &Params, name: &str, default: i64) -> i64 {
     std::str::from_utf8(params.get(name)).ok().and_then(parse_int).unwrap_or(default)
 }
 

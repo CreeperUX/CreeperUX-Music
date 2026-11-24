@@ -302,6 +302,21 @@ proxy's user are still Navidrome's, as for every Subsonic method.
 - **The user's row is read again** for every request (admin or not, the libraries): a change in Navidrome counts at
   the next request. A user deleted since the sign-in check gets Navidrome's answer.
 
+- **Playlists.** A playlist is shown to its owner, to everyone when it is public, and to an admin: Navidrome's rule,
+  in the query. Someone else's private playlist answers 70, as an id that does not exist. A playlist's songs are
+  filtered by the reader's libraries like any song.
+- **The play queue** is read by the signed-in user's id only: nobody reads another user's.
+- **Artists** are those with content in a library the user sees (the join over `library_artist` and
+  `user_library`, as Navidrome joins them).
+
+**What is typed into a search.** It never becomes SQL: it is bound as an argument, either inside LIKE patterns or as
+one FTS5 MATCH expression. The expression is built by a port of Navidrome's `buildFTS5Query`, which keeps only
+letters, numbers, quoted phrases and a trailing `*`, and turns FTS5's operators into plain words; the port passes
+every case of Navidrome's own test, and the corpus sends it FTS5 syntax (`{title}: x`, `x)`, `NOT x`, `"`, `x;drop`)
+with the same answers from both servers. Were an expression refused by SQLite all the same, the request would go to
+Navidrome. A search costs what it costs in Navidrome: the same statements, the same limits (none on the counts:
+`songCount=-1` lists everything, as in Navidrome).
+
 **The queries.** Their text is built from constants: the list types, the sort keys and the settings choose among
 fixed fragments, and no part of a request is ever pasted into SQL. Everything a request brings is bound as an
 argument: ids, years, the genre. The genre is matched with LIKE, as Navidrome matches it, so `%` and `_` in it are
@@ -360,8 +375,9 @@ of it.
   `sonus_connect_session` (a user's Connect session, as JSON). Sonus Connect reads `media_file`, `user` and
   `user_library` and writes only its own table. What it stores came from the user's own devices and is read back as
   data: parsed as JSON, checked for shape and size, and a row that does not pass starts an empty session.
-- The library's reads (above) read `album`, `media_file`, `annotation`, `bookmark`, `item_artwork`, `album_tags`,
-  `tag`, `library`, `user`, `user_library` and `player`, and write none of them.
+- The library's reads (above) read `album`, `media_file`, `artist`, `library_artist`, `annotation`, `bookmark`,
+  `item_artwork`, `album_tags`, `tag`, `playlist`, `playlist_tracks`, `playqueue`, the three FTS5 tables, `library`,
+  `user`, `user_library` and `player`, and write none of them.
 - No change to Navidrome's schema, ever, and no VACUUM; the schema is checked at start and the server refuses any
   other. The server's own tables are additive (`CREATE TABLE IF NOT EXISTS`); a `sonus_connect_session` row refers to
   its user (`ON DELETE CASCADE`), which adds one indexed lookup to Navidrome's deleting of a user and nothing else.
@@ -421,7 +437,8 @@ gateway alone. Everything passes through, as in phase 0; only the 4 MiB limit on
 
 ## Not covered by tests
 
-- The library's reads: settings other than the defaults against the real Navidrome (unit and integration tests
+- The library's reads: an artist with a picture against the real Navidrome (unit and integration tests only);
+  settings other than the defaults against the real Navidrome (unit and integration tests
   only); a scan writing while lists are read; a database of production's size; `ReportRealPath` answered here against
   the real Navidrome (Linux only: the checks ran on Windows, where such requests go to Navidrome).
 

@@ -9,8 +9,9 @@ Status: phase 0's gateway, phase 2: **Subsonic sign-ins are checked here** ([bel
 routes are answered here** ([below](#the-auth-routes): the web sign-in with two-step verification, app passwords, the
 browser sign-in for apps), on Navidrome's own database, which the server opens beside Navidrome; and phase 1:
 **Sonus Connect version 2 is answered here** ([below](#sonus-connect-version-2): one playback session per user, kept
-in the database); and phase 3, so far: **the library's reads `ping`, `getSong`, `getAlbum` and `getAlbumList2` are
-answered here** from Navidrome's database ([below](#the-librarys-reads)). Everything else is still Navidrome's. It reads
+in the database); and phase 3, so far: **the library's reads `ping`, `getSong`, `getAlbum`, `getAlbumList2`,
+`search3`, `getStarred2`, `getPlaylists`, `getPlaylist` and `getPlayQueue` are answered here** from Navidrome's
+database ([below](#the-librarys-reads)). Everything else is still Navidrome's. It reads
 Navidrome's own settings (`navidrome.toml`, `ND_*`, the command line), has unit and integration tests, and passes the
 contract suite and the differential corpora of `tools/contract` in front of the real frozen Navidrome
 ([below](#checked-against-the-real-navidrome)). The image `ghcr.io/creeperux/sonus-server` is built by CI
@@ -253,7 +254,7 @@ sealed, and Navidrome's code opened what this server sealed (`tests/golden/READM
 `src/library/` (roadmap, phase 3). The Subsonic methods Sonus clients read the library with are answered here, from
 Navidrome's database, as Navidrome answers them: the same JSON, byte for byte, for the same request. Navidrome still
 owns the database and writes it (its scanner too), so everything is read when the request comes and nothing is kept
-between requests. So far, part 1 of 3:
+between requests. So far, parts 1 and 2 of 3:
 
 | Method | |
 |---|---|
@@ -261,6 +262,11 @@ between requests. So far, part 1 of 3:
 | `getSong` | a song with the signed-in user's star, rating, play count and bookmark; 70 `Song not found` (also without an id) |
 | `getAlbum` | an album and its songs in disc and track order; 70 `Album not found` |
 | `getAlbumList2` | every `type`: `alphabeticalByName`, `alphabeticalByArtist`, `newest`, `recent`, `frequent`, `starred`, `highest`, `byYear` (`fromYear` > `toYear`: newest first), `byGenre`, `random`; `size` (10; at most 500; 0 or less: everything), `offset`; `X-Total-Count`; 10 for a missing `type`, `genre`, `fromYear` or `toYear`, 0 for a year that is not a number or an unknown type, in Navidrome's words |
+| `search3` | nothing typed (`query=` empty, missing, `""` or `*`) lists everything in the tables' own order, paged by `songCount`/`songOffset` and the like: how Sonus clients read the whole library; words go through FTS5 with Navidrome's query building and BM25 ranking; Chinese, Japanese and Korean text, and text FTS5 would lose (`1+`, `!!!`), through LIKE; a MusicBrainz id is looked up as one; one character finds nothing; a count of 0 asks for none of that kind |
+| `getStarred2` | the artists, albums and songs the user starred, the latest first |
+| `getPlaylists` | the user's playlists and everyone's public ones (an admin: all), by name; smart playlists as they were last filled, with `validUntil` |
+| `getPlaylist` | a plain playlist with its songs in order (the ones that are still there, counted and timed anew); 10 without an id, 70 `playlist not found` (someone else's private one too) |
+| `getPlayQueue` | the saved queue with its songs, the current one and the position; the user's name and a zero time when none is saved |
 
 Each also as `<method>.view`, by GET or as a form post, for any way of signing in the gateway checks.
 
@@ -279,6 +285,10 @@ stored with, floats as Go formats them, `<`, `>` and `&` escaped as `\u003c`…
 | asks for XML or JSONP (`f` is not `json`) | the roadmap's decision 1: JSON only |
 | carries `musicFolderId` | Sonus clients do not send it; it changes the list and has an error of its own |
 | `getAlbumList2` with an `offset` and a `size` of 0 or less | Navidrome's query fails there (an OFFSET without a LIMIT), and its answer says so |
+| `getPlaylist` of a smart playlist | Navidrome fills a smart playlist anew when it is read (after its refresh delay, for its owner): a write, with the rules' translation into SQL, which stays Navidrome's |
+| `getPlaylists` when a smart playlist has a refresh delay of its own, or rules Navidrome's decoder would refuse | its `validUntil`, or Navidrome's error, is Navidrome's to make |
+| `search3` or `getStarred2` that would show an artist with a picture, or one whose picture is not resolved yet | such an artist carries `artistImageUrl`, a public link signed with a secret this server does not read; a search that asks for no artists (`artistCount=0`, as the clients' library sync does) is not touched by this |
+| `search3` with `Search.Backend = legacy` or `Search.FullString` on | Navidrome's older search over another column |
 | comes from a player with a transcoding set | songs then carry `transcodedSuffix` and a content type from Go's tables |
 | comes from a player with `ReportRealPath`, on Windows | Go builds the path by Windows' rules there; on Linux (the image) it is answered here |
 | would show a song whose suffix is not in Navidrome's own list of types (`resources/mime_types.yaml`) | Go asks the operating system for its content type |
@@ -312,10 +322,13 @@ the gateway for the requests it answers here (the same code as for `tokenInfo`).
 | `RecentlyAddedByModTime` | off | `created`, and the `newest` list |
 | `AlbumPlayCountMode` | `absolute` | `normalized`: an album's `playCount` is divided by its songs |
 | `EnableMediaFileCoverArt` | on | whether a song with a picture of its own has a `mf-` cover id |
+| `Subsonic.ArtistParticipations` | off | an artist's `albumCount`: the albums they are album artist of, or also those they only appear on |
+| `SmartPlaylistRefreshDelay` | `5s` | a smart playlist's `validUntil` |
+| `Search.Backend`, `Search.FullString` | `fts`, off | `legacy` or on: `search3` goes to Navidrome |
 | `Subsonic.DefaultReportRealPath` | off | nothing here: Navidrome gives it to a new player, and the player's own setting is what is read |
 
-(`Subsonic.ArtistParticipations`, `IgnoredArticles`, `Search.Backend` and `Search.FullString` are read already, for
-the methods of parts 2 and 3.)
+(`IgnoredArticles` is read and changes nothing yet: Navidrome applies it when it scans, and in `getArtists`, which is
+not answered here.)
 
 **Headers.** Navidrome's own ([Sign-ins](#sign-ins)), the player's `Set-Cookie`, `X-Total-Count` on album lists, and
 gzip when the client's `Accept-Encoding` names it, as Navidrome compresses every JSON answer. Debug builds add
@@ -326,8 +339,10 @@ Where it knowingly differs from Navidrome:
 - **The random list** (`type=random`) is ordered by this server's own seed, kept per user in memory as Navidrome
   keeps its own: a new order whenever the list is asked for from its start, and the pages of one pass fit together.
   The order itself is another than Navidrome's would have been (both are random).
-- **`contributors`** (a song's composers, performers, …) come sorted by role; Go lists the roles from a map, in
-  another order every time.
+- **`contributors`** (a song's composers, performers, …) and an artist's **`roles`** come sorted by role; Go lists the
+  roles from a map, in another order every time.
+- **A search whose query fails in SQLite** (none was found: Navidrome's query building is what guards FTS5's syntax,
+  and it is ported with its tests) would go to Navidrome, which logs the error and answers with empty lists.
 - **Compression**: gzip at Navidrome's level, but another encoder's bytes (the same content); a client that takes
   `deflate` only gets the answer as it is.
 - **Text that is not UTF-8** in the database is written with U+FFFD as the character itself; Go writes the escape
@@ -445,12 +460,22 @@ pushes linux/amd64 and linux/arm64, tagged `latest`, the Cargo version and `sha-
   what a user sees (no library: nothing; an admin: everything; each their own stars and counts); every list type's
   order, paging, `X-Total-Count` and errors; the random list's pages; `EnableNaturalSorting`, `PreferSortTags`,
   `RecentlyAddedByModTime`, `AlbumPlayCountMode`, `Subsonic.EnableAverageRating`, the legacy and minimal clients, a
-  player's `ReportRealPath`; gzip; the sign-in checked before anything is read;
+  player's `ReportRealPath`; gzip; the sign-in checked before anything is read; `search3` for nothing (pages in the
+  tables' order, counts of 0 and -1, past the end), for words (FTS5 on the real FTS tables and triggers, phrases,
+  operators as words, an artist in Navidrome's bytes), for CJK text and punctuation (LIKE), for a MusicBrainz id, and
+  what stays Navidrome's (an artist with a picture, the older search); `getStarred2` (the latest first, nothing
+  starred); `getPlaylists` in Navidrome's bytes (who sees what, `readonly`, `validUntil` and
+  `SmartPlaylistRefreshDelay`, the minimal and legacy clients); `getPlaylist` (the order, songs that are gone,
+  someone else's private one, a synced one, smart ones going to Navidrome); `getPlayQueue` (the current song among
+  what is left, none saved, all gone);
 - unit tests of the library's pure parts: Go's JSON (floats, strings, omitted fields), songs and albums against
   answers of the real Navidrome, cover art ids, made-up and real paths, `appendSuffix`, content types, the sort orders
   with every setting (the ORDER BY clauses Navidrome logs), squirrel's conditions, Go's `toSnakeCase`, the list
   filters and their errors, the natural collation (the cases of Navidrome's own test), the stored tags and
-  participants, the player cookie;
+  participants, the player cookie; the search syntax against every case of Navidrome's
+  `persistence/sql_search_fts_test.go` (`buildFTS5Query`, the degraded flag, `containsCJK`) and the search
+  statements against the ones Navidrome logs; Go's lowercasing (`İ`, `ı`) and its list of accents; smart playlist
+  rules and artist statistics as stored;
 - `tests/connect_vectors.rs`: the protocol's shared vectors (`docs/protocol/connect-vectors.json`) replayed on the
   session logic: 14 cases, 157 steps, each compared exactly;
 - `tests/connect.rs`: Sonus Connect version 2 over its real WebSocket through the gateway, with a fake Navidrome that
@@ -484,6 +509,32 @@ These start this server as its image runs it: `cargo run`, which starts Navidrom
 database.
 
 ## Checked against the real Navidrome
+
+### The library's reads (phase 3, part 2), 2026-11-25
+
+Same machine and Navidrome as part 1, on `main` with the security review's fixes:
+
+- `node tools/contract/diff.mjs --go-vs-gateway`: 401 of 401 the same as Navidrome alone, 293 of them answered by
+  this server itself. 152 requests were added: the empty query's paging (the last page, past the end, counts of 0,
+  -1 and not a number, an offset without a count, albums and artists paged, no `query` at all, `""`, `*`, spaces),
+  as three users; 65 word searches (case, prefixes, phrases, accents, the Turkish I both ways, sort names, FTS5's
+  operators and syntax characters typed as words, punctuated names, LIKE's wildcards, quotes alone) and 12 in Chinese,
+  Japanese and Korean, paged; MusicBrainz ids of a recording, a release track, an album and an artist, in capitals,
+  without dashes, in braces, unknown, almost one; the legacy and minimal clients; `getStarred2`, `getPlaylists`,
+  `getPlaylist` and `getPlayQueue` as the three users (nothing starred, no queue saved, someone else's private
+  playlist), without an id, with the wrong kind of id; and what stays Navidrome's (`musicFolderId`, XML, the smart
+  playlist). With `corpus/writes.json`: 34 of 34. Two Navidromes (`--go-vs-go`): 401 of 401.
+- `node tools/contract/run.mjs --through-gateway`: 131 of 131.
+- `node --test tools/contract/gateway.test.mjs`: 7 of 7; the test of who answers now sends sixteen requests to the
+  nine methods and three kinds of request left to Navidrome.
+- `cargo test`: 249 tests (155 unit, 19 in `tests/library.rs`, 75 in the other integration tests).
+
+Not checked: an artist with a picture against the real Navidrome (the fixture library's artists have none: that
+such a search goes to Navidrome is checked in `tests/library.rs`); `Subsonic.ArtistParticipations`,
+`SmartPlaylistRefreshDelay` and the older search against the real Navidrome (`tests/library.rs` and unit tests
+only); a smart playlist with a refresh delay of its own; FTS5 ranking on a library of production's size (the same
+SQL and the same SQLite functions, but another build of SQLite than Navidrome's: equal scores are ordered by the
+title or name, as in Navidrome).
 
 ### The library's reads (phase 3, part 1), 2026-11-25
 
@@ -676,7 +727,8 @@ binaries (no Linux here).
   user, and the upgrade; `socket.rs`: one connection; `store.rs`: the session in the database, and the library as a
   user sees it; `extensions.rs`: the merge into `getOpenSubsonicExtensions`.
 - `src/library/`: the library's reads. `mod.rs`: what is answered here and what goes on to Navidrome; `browse.rs`: the
-  methods; `query.rs`: Navidrome's queries; `entities.rs`: albums and songs as its JSON; `json.rs`: Go's JSON;
+  methods of part 1, `lists.rs` those of part 2; `query.rs`, `catalog.rs`: Navidrome's queries; `search.rs`: its
+  search syntax; `entities.rs`: albums, songs, artists and playlists as its JSON; `json.rs`: Go's JSON;
   `player.rs`: the player, registered by Navidrome; `natural.rs`: the `NATSORT` collation.
 - `src/jwt.rs`: session tokens; `src/id.rs`: ids and the random strings people type.
 - `src/db.rs`: Navidrome's database; `src/gotime.rs`: its timestamps; `src/secrets.rs`: its encryption.
@@ -694,6 +746,9 @@ The WebSocket's framing is `tokio-tungstenite` (tungstenite): the WebSocket libr
 and warp among them), maintained, and usable on the connection hyper hands over after an upgrade without a framework
 around it. It is built without its handshake, client and TLS features: the gateway answers the upgrade itself (it has
 SHA-1 and base64 already), so the dependency adds framing, masking, UTF-8 and size checks and nothing else.
+
+The search syntax uses `regex` (the Rust project's own regular expressions) for what Go's `regexp` does in
+Navidrome: Unicode letter and number classes, the CJK scripts, ASCII word boundaries.
 
 Compression of the library's answers is `flate2` with its default pure-Rust backend (`miniz_oxide`): the gzip
 library of the Rust ecosystem, maintained by the Rust project's own contributors; no C is added to the build.

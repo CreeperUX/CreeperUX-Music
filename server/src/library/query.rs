@@ -43,7 +43,7 @@ impl Viewer {
 
     /// Navidrome's `applyLibraryFilter`: nothing for an admin and for a user granted every library, else the
     /// subquery over `user_library`.
-    fn library_filter(&self, table: &str) -> Option<Cond> {
+    pub(super) fn library_filter(&self, table: &str) -> Option<Cond> {
         if self.is_admin || (self.all_libraries > 0 && self.libraries.len() as i64 == self.all_libraries) {
             return None;
         }
@@ -128,11 +128,13 @@ pub struct ListOptions {
     pub offset: i64,
 }
 
-/// Which table's sort mappings (`setSortMappings` in the two repositories).
+/// Which table's sort mappings (`setSortMappings` in the repositories).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Table {
     Album,
     MediaFile,
+    Artist,
+    Playlist,
 }
 
 impl Table {
@@ -140,6 +142,8 @@ impl Table {
         match self {
             Table::Album => "album",
             Table::MediaFile => "media_file",
+            Table::Artist => "artist",
+            Table::Playlist => "playlist",
         }
     }
 }
@@ -170,6 +174,9 @@ fn sort_mapping_for(table: Table, key: &str, options: &LibraryOptions) -> Option
             if by_mod_time { "media_file.updated_at, media_file.id" } else { "media_file.created_at, media_file.id" }.to_string()
         }
         (Table::MediaFile, "year" | "genre" | "duration" | "channels" | "bpm" | "path" | "comment" | "play_count" | "play_date" | "rating") => key.to_string(),
+        (Table::Artist, "name") => "order_artist_name".to_string(),
+        (Table::Playlist, "name") => natural_sort("playlist.name", options),
+        (Table::Playlist, "owner_name") => natural_sort("owner_name", options),
         (_, "random") => "random".to_string(),
         (_, "starred_at") => "starred, starred_at".to_string(),
         (_, "rated_at") => "rating, rated_at".to_string(),
@@ -332,11 +339,11 @@ pub fn build_sort_order(table: Table, sort: &str, order: &str, options: &Library
 }
 
 /// `withAnnotation`'s join and columns for a table.
-fn annotation_join(table: &str) -> String {
+pub(super) fn annotation_join(table: &str) -> String {
     format!("LEFT JOIN annotation on (annotation.item_id = {table}.id AND annotation.item_type = ? AND annotation.user_id = ?)")
 }
 
-fn annotation_columns(table: &str, options: &LibraryOptions) -> String {
+pub(super) fn annotation_columns(table: &str, options: &LibraryOptions) -> String {
     let play_count = if options.normalized_album_play_count && table == "album" {
         "round(coalesce(round(cast(play_count as float) / coalesce(album.song_count, 1), 1), 0)) as play_count"
     } else {
@@ -346,7 +353,7 @@ fn annotation_columns(table: &str, options: &LibraryOptions) -> String {
 }
 
 /// WHERE, ORDER BY, LIMIT and OFFSET as squirrel writes them for `newSelect(options)` plus the library filter.
-fn tail(list: &ListOptions, library: Option<Cond>, args: &mut Vec<Value>) -> String {
+pub(super) fn tail(list: &ListOptions, library: Option<Cond>, args: &mut Vec<Value>) -> String {
     let mut sql = String::new();
     let conditions: Vec<&Cond> = list.filter.iter().chain(library.iter()).collect();
     if !conditions.is_empty() {
@@ -514,6 +521,11 @@ const ROLES: [&str; 14] = [
     "maincredit",
 ];
 
+/// Whether a name is one of Navidrome's roles.
+pub(super) fn is_role(name: &str) -> bool {
+    ROLES.contains(&name)
+}
+
 /// A row Navidrome would fail to read, or that this port does not read as Go's decoders do: the request goes to
 /// Navidrome instead.
 #[derive(Debug)]
@@ -538,7 +550,7 @@ impl std::fmt::Display for QueryError {
     }
 }
 
-type QueryResult<T> = Result<T, QueryError>;
+pub(super) type QueryResult<T> = Result<T, QueryError>;
 
 /// `unmarshalTags`: `{"genre":[{"id":"…","value":"Rock"}]}`.
 fn parse_tags(data: &str) -> QueryResult<Tags> {
@@ -623,7 +635,7 @@ fn parse_discs(data: &str) -> QueryResult<Vec<(i64, String)>> {
 
 // Columns, read as Go's database/sql and dbx read them into the model's fields: NULL is the zero value.
 
-fn text<I: rusqlite::RowIndex>(row: &Row, column: I) -> String {
+pub(super) fn text<I: rusqlite::RowIndex>(row: &Row, column: I) -> String {
     match row.get_ref(column) {
         Ok(ValueRef::Text(bytes)) | Ok(ValueRef::Blob(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
         Ok(ValueRef::Integer(n)) => n.to_string(),
@@ -632,7 +644,7 @@ fn text<I: rusqlite::RowIndex>(row: &Row, column: I) -> String {
     }
 }
 
-fn integer(value: ValueRef) -> i64 {
+pub(super) fn integer(value: ValueRef) -> i64 {
     match value {
         ValueRef::Integer(n) => n,
         ValueRef::Real(x) => x as i64,
@@ -641,11 +653,11 @@ fn integer(value: ValueRef) -> i64 {
     }
 }
 
-fn int(row: &Row, column: &str) -> i64 {
+pub(super) fn int(row: &Row, column: &str) -> i64 {
     row.get_ref(column).map(integer).unwrap_or(0)
 }
 
-fn optional_int(row: &Row, column: &str) -> Option<i64> {
+pub(super) fn optional_int(row: &Row, column: &str) -> Option<i64> {
     match row.get_ref(column) {
         Ok(ValueRef::Null) | Err(_) => None,
         Ok(value) => Some(integer(value)),
@@ -661,7 +673,7 @@ fn real(value: ValueRef) -> f64 {
     }
 }
 
-fn float(row: &Row, column: &str) -> f64 {
+pub(super) fn float(row: &Row, column: &str) -> f64 {
     row.get_ref(column).map(real).unwrap_or(0.0)
 }
 
@@ -672,7 +684,7 @@ fn optional_float(row: &Row, column: &str) -> Option<f64> {
     }
 }
 
-fn truthy(value: ValueRef) -> bool {
+pub(super) fn truthy(value: ValueRef) -> bool {
     match value {
         ValueRef::Integer(n) => n != 0,
         ValueRef::Real(x) => x != 0.0,
@@ -681,20 +693,20 @@ fn truthy(value: ValueRef) -> bool {
     }
 }
 
-fn boolean(row: &Row, column: &str) -> bool {
+pub(super) fn boolean(row: &Row, column: &str) -> bool {
     row.get_ref(column).map(truthy).unwrap_or(false)
 }
 
 /// A time column for a JSON answer, as Go's driver reads it and `time.Time` marshals it; None for NULL and for text
 /// the driver reads as the zero time.
-fn time(row: &Row, column: &str) -> Option<String> {
+pub(super) fn time(row: &Row, column: &str) -> Option<String> {
     match row.get_ref(column) {
         Ok(ValueRef::Text(bytes)) => gotime::stored_to_json(std::str::from_utf8(bytes).ok()?).filter(|t| !t.starts_with("0001-01-01T00:00:00")),
         _ => None,
     }
 }
 
-fn annotations(row: &Row) -> Annotations {
+pub(super) fn annotations(row: &Row) -> Annotations {
     Annotations {
         play_count: int(row, "play_count"),
         play_date: time(row, "play_date"),
@@ -705,7 +717,7 @@ fn annotations(row: &Row) -> Annotations {
     }
 }
 
-fn album_from(row: &Row) -> QueryResult<Album> {
+pub(super) fn album_from(row: &Row) -> QueryResult<Album> {
     let tags_text = text(row, "tags");
     let (mut genre, mut tags) = (text(row, "genre"), Tags::default());
     if !tags_text.is_empty() {
@@ -742,7 +754,7 @@ fn album_from(row: &Row) -> QueryResult<Album> {
     })
 }
 
-fn song_from(row: &Row) -> QueryResult<Song> {
+pub(super) fn song_from(row: &Row) -> QueryResult<Song> {
     let tags_text = text(row, "tags");
     let (mut genre, mut tags) = (text(row, "genre"), Tags::default());
     if !tags_text.is_empty() {

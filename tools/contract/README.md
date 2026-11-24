@@ -82,7 +82,7 @@ the Rust server running its own Navidrome, with the same settings.
 |---|---|
 | failed sign-ins are limited the same way | with `AuthRequestLimit=3` and a 5 s window: three failures (by GET, by form post, by HEAD), then the right password refused (40), the name in capitals too, another user and an API key not; three unknown keys, then the right key refused (44), mixed credentials still 43, a password user not limited by keys; a window later both sign in again. The sixteen answers are the same from both servers |
 | Navidrome never sees what the Rust server refused | with Navidrome's log at debug level (it logs every request with its query): six refused requests are not in the log of the Navidrome behind the Rust server, three accepted ones are (to `getLicense`, which Navidrome still answers), without any `p`, `t`, `s` or `apiKey` parameter, and it logged no "Invalid login"; Navidrome alone logs all nine and refuses the six itself |
-| the library's reads are answered by the Rust server | with Navidrome's log at debug level: eight requests to the methods the Rust server has taken over (`ANSWERED_BY_RUST` in `diff.mjs`; errors and a random list among them) carry its mark (`X-Sonus-Answered: rust`, debug builds), Navidrome's bytes and the same player cookie name, and are not in the log of the Navidrome behind it, which shows one `ping` for the client (the player's registration) and the three requests left to it (XML, `musicFolderId`, another method); the player's row is the same as the one Navidrome alone makes; the last access is written |
+| the library's reads are answered by the Rust server | with Navidrome's log at debug level: sixteen requests to the nine methods the Rust server has taken over (`ANSWERED_BY_RUST` in `diff.mjs`; errors and a random list among them) carry its mark (`X-Sonus-Answered: rust`, debug builds), Navidrome's bytes and the same player cookie name, and are not in the log of the Navidrome behind it, which shows one `ping` for the client (the player's registration) and the three requests left to it (XML, `musicFolderId`, another method); the player's row is the same as the one Navidrome alone makes; the last access is written |
 | a player's settings count for the answers the Rust server gives | `ReportRealPath` turned on in the database while the servers run: the next `getSong` has the file's path on both, and the made-up path again when it is off (on Windows the Rust server leaves such a player's songs to Navidrome: checked that it does) |
 | signed in by the gateway, a request is to Navidrome what it was with credentials | the player cookie's name (after the user name as typed) and attributes, the player in `getNowPlaying`, the user's last access written, no user created by an unknown name |
 | Sonus Connect version 2: the session is kept across a restart | the extensions answer in JSON, JSONP and XML is Navidrome's but for `sonusConnect`'s version 2; two users' sessions are in the Rust server's own table 1.5 s after their last change (the server is then killed, so nothing is written at its end); the Rust server and Navidrome start again on the same data folder, tables included, without errors; both sessions are back with no active device, paused at their position, and play on from there |
@@ -135,8 +135,8 @@ Each side gets its own copy of the golden database. Options: `--only <text>` (re
 `--json <file>` (the whole report). It exits with 1 when anything differs. `node --test tools/contract/diff.test.mjs`
 tests the runner itself.
 
-Results so far (Navidrome 0.64.2-sonus.10): `corpus/read-only.json`, 249 requests, and `corpus/writes.json`, 34, come
-out identical between Navidrome and the Rust server in front of its own Navidrome (124 of the 249 answered by the
+Results so far (Navidrome 0.64.2-sonus.10): `corpus/read-only.json`, 401 requests, and `corpus/writes.json`, 34, come
+out identical between Navidrome and the Rust server in front of its own Navidrome (293 of the 401 answered by the
 Rust server itself), and between two Navidromes.
 
 **Who answered.** A debug build of the Rust server marks the answers it made itself from the database
@@ -162,7 +162,7 @@ server that runs on its own: then it only passes requests through.
 
 | File | |
 |---|---|
-| `corpus/read-only.json` | every sign-in and every way it fails: in JSON, XML and JSONP (compared byte for byte, with `Accept-Encoding: identity`), in the query and as a form, by every HTTP method, mixed credentials, missing `v`/`c`, `tokenInfo`, a CORS preflight, queries Go refuses; extensions, scan status; album lists (every type but random: whole and paged, as three users, the paging boundaries, `byYear` both ways round, `byGenre` in another case and with wildcards, every error), `search3` (the empty query whole and paged, words in every script); `getAlbum`, `getSong` for every fixture case (and without an id, with the wrong kind of id, as the admin, as a user with no state, for the legacy and minimal client names, as `.view` and as form posts); what stays Navidrome's (XML, JSONP, `musicFolderId`); playlists, the play queue, stars; lyrics, similar songs, artist info; cover art (as is, resized), `stream` (every format, ranges, errors); two device sign-in calls |
+| `corpus/read-only.json` | every sign-in and every way it fails: in JSON, XML and JSONP (compared byte for byte, with `Accept-Encoding: identity`), in the query and as a form, by every HTTP method, mixed credentials, missing `v`/`c`, `tokenInfo`, a CORS preflight, queries Go refuses; extensions, scan status; album lists (every type but random: whole and paged, as three users, the paging boundaries, `byYear` both ways round, `byGenre` in another case and with wildcards, every error), `search3` (the empty query whole and paged to its boundaries, for songs, albums and artists; words in every script, in any case, as prefixes and phrases, with accents, the Turkish I, sort names, punctuated names, FTS5's own syntax typed as words, LIKE's wildcards; Chinese, Japanese and Korean; MusicBrainz ids); `getAlbum`, `getSong` for every fixture case (and without an id, with the wrong kind of id, as the admin, as a user with no state, for the legacy and minimal client names, as `.view` and as form posts); playlists, the play queue and stars as three users (nothing starred, no queue saved, someone else's private playlist); what stays Navidrome's (XML, JSONP, `musicFolderId`, a smart playlist); playlists, the play queue, stars; lyrics, similar songs, artist info; cover art (as is, resized), `stream` (every format, ranges, errors); two device sign-in calls |
 | `corpus/writes.json` | stars, ratings, plays, the play queue, changing and deleting a playlist; each followed by the reads that show it |
 
 ### Normalizing
@@ -224,6 +224,13 @@ Found while writing these, all checked by the suite or the corpora:
 - An album list's `size` of 0 or less means everything; with an `offset` too, Navidrome's query fails (an OFFSET
   without a LIMIT) and it answers error 0. A random list (`type=random`) keeps its order until it is asked for from
   its start again (`offset` 0), so the pages of one pass fit together.
+- `search3`: a count of 0 asks for none of that kind, a count below 0 for everything; a count below 0 with an offset
+  fails inside Navidrome (an OFFSET without a LIMIT), which then answers with no rows of that kind and no error; one
+  character finds nothing; `""` and `*` are the empty query; a key of a `for` may hold quotes (the runner escapes it).
+- An artist's `albumCount` is the albums they are album artist of. An artist with a picture also carries
+  `artistImageUrl` (the fixture library's artists have none).
+- A playlist read with its songs is counted and timed from the songs that are still there; `getPlaylists` shows the
+  stored numbers. The play queue's `current` is the song at the saved index among the songs that are still there.
 - `byGenre` matches the genre's name with LIKE: any ASCII case, and `%` and `_` are wildcards.
 - Album entries of a client whose name is a substring of `Subsonic.LegacyClients` (`DSub`: so `Sub`, `D`, …) carry no
   OpenSubsonic fields; songs only for the listed names themselves.

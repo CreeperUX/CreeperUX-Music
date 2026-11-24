@@ -56,6 +56,18 @@ pub fn stored_to_json(text: &str) -> Option<String> {
     Some(to_json(&utc.with_timezone(&offset.unwrap_or(FixedOffset::east_opt(0)?))))
 }
 
+/// A stored time moved by `by` for a JSON answer (Go: `t.Add(d)`), in the offset it was stored with.
+pub fn stored_plus_to_json(text: &str, by: std::time::Duration) -> Option<String> {
+    let utc = parse(text)?;
+    let offset = text.trim_end_matches('Z').rfind(['+', '-']).filter(|at| *at > 10).and_then(|at| {
+        let (hours, minutes) = text[at + 1..].split_once(':')?;
+        let seconds = hours.parse::<i32>().ok()? * 3600 + minutes.parse::<i32>().ok()? * 60;
+        FixedOffset::east_opt(if text.as_bytes()[at] == b'-' { -seconds } else { seconds })
+    });
+    let moved = utc.checked_add_signed(chrono::Duration::from_std(by).ok()?)?;
+    Some(to_json(&moved.with_timezone(&offset.unwrap_or(FixedOffset::east_opt(0)?))))
+}
+
 /// Reads what go-sqlite3 reads back as a time (its `SQLiteTimestampFormats`): a date, then optionally a time after a
 /// space or `T`, fractional seconds, and an offset or `Z`. Without an offset it is UTC.
 pub fn parse(text: &str) -> Option<DateTime<Utc>> {
@@ -132,6 +144,10 @@ mod tests {
         assert_eq!(stored_to_json("2026-11-24 13:01:52-07:00").as_deref(), Some("2026-11-24T13:01:52-07:00"));
         assert_eq!(stored_to_json("2026-11-24 20:01:52").as_deref(), Some("2026-11-24T20:01:52Z"));
         assert_eq!(stored_to_json("soon"), None);
+        let five = std::time::Duration::from_secs(5);
+        assert_eq!(stored_plus_to_json("2026-11-24 23:42:33.9197185+01:00", five).as_deref(), Some("2026-11-24T23:42:38.9197185+01:00"));
+        assert_eq!(stored_plus_to_json("2026-11-24 23:59:58+00:00", five).as_deref(), Some("2026-11-25T00:00:03Z"));
+        assert_eq!(stored_plus_to_json("never", five), None);
     }
 
     #[test]

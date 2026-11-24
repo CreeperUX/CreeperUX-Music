@@ -194,11 +194,21 @@ test('the library’s reads are answered by the Rust server: Navidrome sees a pl
     ['getAlbumList2', { type: 'starred' }],
     ['getAlbumList2', { type: 'random', size: 3 }],
     ['getAlbumList2', {}],
+    ['search3', { query: '', songCount: 500, albumCount: 0, artistCount: 0 }],
+    ['search3', { query: 'kenji', songCount: 200, albumCount: 60, artistCount: 30 }],
+    ['search3', { query: '夜行' }],
+    ['getStarred2', {}],
+    ['getPlaylists', {}],
+    ['getPlaylist', { id: ids['playlist.own'] }],
+    ['getPlaylist', { id: 'no-such-playlist' }],
+    ['getPlayQueue', {}],
   ].map(([method, params], i) => [method, { ...params, mark: `taken-${i}-${method}${params.type === 'random' ? '-random' : ''}` }]);
   const left = [
     ['getSong', { id: ids['track.flac'], f: 'xml', mark: 'left-xml' }],
     ['getAlbumList2', { type: 'newest', musicFolderId: 1, mark: 'left-music-folder' }],
     ['getMusicFolders', { mark: 'left-other-method' }],
+    ['getPlaylist', { id: ids['playlist.otherUser'], f: 'xml', mark: 'left-playlist-xml' }],
+    ['search3', { query: 'kenji', musicFolderId: 1, mark: 'left-search-music-folder' }],
   ];
   for (const [method] of taken) assert.ok(ANSWERED_BY_RUST.includes(method), method);
   const answers = {};
@@ -222,6 +232,7 @@ test('the library’s reads are answered by the Rust server: Navidrome sees a pl
     assert.equal(fromRust.cookie, fromGo.cookie, `${fromRust.mark}: the player cookie's name`);
     assert.match(fromGo.cookie, /^nd-player-[0-9a-f]+$/);
     if (fromRust.mark.includes('random')) continue; // another order every time, on both
+    if (fromGo.text.includes('"roles":[')) continue; // an artist's roles: Go lists them in another order every time (the diff corpus compares them sorted)
     const strip = text => text.replace(/"serverVersion":"[^"]*"/, '');
     assert.equal(strip(fromRust.text), strip(fromGo.text), `${fromRust.mark}: the same bytes`);
   }
@@ -236,7 +247,7 @@ test('the library’s reads are answered by the Rust server: Navidrome sees a pl
   for (const [, params] of left) assert.ok(rustLog.includes(params.mark), `Navidrome answered ${params.mark}`);
   const lines = rustLog.split(String.fromCharCode(10));
   const requestsFor = method => lines.filter(line => line.includes(`/rest/${method}`) && line.includes(`c=${client}`) && !line.includes('mark=left-'));
-  for (const method of ['getSong', 'getAlbum', 'getAlbumList2']) assert.equal(requestsFor(method).length, 0, `no ${method} of the Rust server's reached Navidrome`);
+  for (const method of ANSWERED_BY_RUST.filter(m => m !== 'ping')) assert.equal(requestsFor(method).length, 0, `no ${method} of the Rust server's reached Navidrome`);
   // what did reach it: the player's registration, a ping as this user and client, once (it is remembered for a minute)
   const registrations = lines.filter(line => line.includes('HTTP: GET') && line.includes('/rest/ping?') && line.includes(`c=${client}`));
   assert.equal(registrations.length, 1, 'one registration for all the requests of one client');

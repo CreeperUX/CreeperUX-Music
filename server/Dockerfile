@@ -14,15 +14,17 @@ RUN case "$TARGETARCH" in \
         *) echo "no Rust target for $TARGETARCH" >&2; exit 1 ;; \
     esac > /rust-target && \
     rustup target add "$(cat /rust-target)"
-ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
-    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 # the commit, for the version the server reports ("0.1.0 (abc1234)"); last, so it only rebuilds this layer
 ARG SONUS_GIT_SHA=""
-RUN SONUS_GIT_SHA="$SONUS_GIT_SHA" cargo build --release --locked --target "$(cat /rust-target)" && \
-    cp "target/$(cat /rust-target)/release/sonus-server" /sonus-server
+# rust-lld only when the target is not the build machine's own: set for that one too, it would also link the build's
+# proc macros (host libraries, which need the system's linker and libc), and fail.
+RUN target="$(cat /rust-target)" && host="$(rustc -vV | sed -n 's/^host: //p')" && \
+    if [ "$target" != "$host" ]; then export "CARGO_TARGET_$(echo "$target" | tr 'a-z-' 'A-Z_')_LINKER=rust-lld"; fi && \
+    SONUS_GIT_SHA="$SONUS_GIT_SHA" cargo build --release --locked --target "$target" && \
+    cp "target/$target/release/sonus-server" /sonus-server
 
 FROM ${NAVIDROME_IMAGE}
 LABEL org.opencontainers.image.source="https://github.com/CreeperUX/Sonus" \

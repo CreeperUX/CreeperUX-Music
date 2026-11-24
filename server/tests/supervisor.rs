@@ -55,8 +55,8 @@ fn fake_navidrome() {
         let reply = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
         stream.write_all(reply.as_bytes()).unwrap();
         drop(stream);
-        if head.starts_with("GET /exit/") {
-            let code: i32 = head["GET /exit/".len()..].split(' ').next().unwrap().parse().unwrap();
+        if let Some(rest) = head.strip_prefix("GET /exit/") {
+            let code: i32 = rest.split(' ').next().unwrap().parse().unwrap();
             std::process::exit(code);
         }
     }

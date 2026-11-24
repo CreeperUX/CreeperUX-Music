@@ -179,7 +179,12 @@ async fn ranges_get_partial_content() {
     .await;
     let (gw, _) = gateway(nd, GatewaySetup::default()).await;
 
-    let req = Request::get("/rest/stream.view?id=1").header(header::HOST, "h").header(header::RANGE, "bytes=10-19").header("if-range", "\"v1\"").body(empty()).unwrap();
+    let req = Request::get("/rest/stream.view?id=1")
+        .header(header::HOST, "h")
+        .header(header::RANGE, "bytes=10-19")
+        .header("if-range", "\"v1\"")
+        .body(empty())
+        .unwrap();
     let response = send(gw, req).await;
     assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
     assert_eq!(response.headers()["content-range"], "bytes 10-19/100");

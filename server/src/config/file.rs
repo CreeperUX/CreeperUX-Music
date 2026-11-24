@@ -48,10 +48,7 @@ pub fn locate(flag: Option<&OsStr>, env: Option<String>, files: &dyn Files) -> O
             return Some(path);
         }
     }
-    NAVIDROME_FORMATS
-        .iter()
-        .map(|ext| PathBuf::from(format!("navidrome.{ext}")))
-        .find(|path| files.kind(path) == Some(Kind::File))
+    NAVIDROME_FORMATS.iter().map(|ext| PathBuf::from(format!("navidrome.{ext}"))).find(|path| files.kind(path) == Some(Kind::File))
 }
 
 #[derive(Debug, Clone, PartialEq)]

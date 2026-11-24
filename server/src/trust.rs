@@ -57,10 +57,7 @@ pub fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &TrustList) -> IpAd
     if !trusted.contains(peer) {
         return peer;
     }
-    header_ip(headers, "true-client-ip")
-        .or_else(|| header_ip(headers, "x-real-ip"))
-        .or_else(|| forwarded_for(headers, trusted))
-        .unwrap_or(peer)
+    header_ip(headers, "true-client-ip").or_else(|| header_ip(headers, "x-real-ip")).or_else(|| forwarded_for(headers, trusted)).unwrap_or(peer)
 }
 
 fn header_ip(headers: &HeaderMap, name: &str) -> Option<IpAddr> {

@@ -1,0 +1,3 @@
+# The code was written to this width; see README.md.
+max_width = 160
+use_small_heuristics = "Max"

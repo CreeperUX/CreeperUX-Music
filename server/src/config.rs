@@ -192,8 +192,8 @@ impl Navidrome<'_> {
 
     /// A renamed setting: the current name when it is set anywhere, else the old one, else the current name's default.
     fn get_renamed(&self, name: &str, old: &str) -> Result<Option<String>, String> {
-        let explicit = self.file.is_some_and(|f| f.get(name).is_some() || f.get_env_named(name).is_some())
-            || (self.var)(&env_name(name)).is_some_and(|v| !v.is_empty());
+        let explicit =
+            self.file.is_some_and(|f| f.get(name).is_some() || f.get_env_named(name).is_some()) || (self.var)(&env_name(name)).is_some_and(|v| !v.is_empty());
         if !explicit {
             if let Some(value) = self.get(old)? {
                 return Ok(Some(value));
@@ -334,7 +334,12 @@ mod tests {
 
     #[test]
     fn navidromes_settings_are_read_as_navidrome_reads_them() {
-        let c = load(&[("ND_ADDRESS", "127.0.0.1"), ("ND_PORT", "8080"), ("ND_REVERSEPROXYWHITELIST", "10.0.0.0/8"), ("ND_REVERSEPROXYUSERHEADER", "X-User")], &[], None).unwrap();
+        let c = load(
+            &[("ND_ADDRESS", "127.0.0.1"), ("ND_PORT", "8080"), ("ND_REVERSEPROXYWHITELIST", "10.0.0.0/8"), ("ND_REVERSEPROXYUSERHEADER", "X-User")],
+            &[],
+            None,
+        )
+        .unwrap();
         assert_eq!(c.listen, "127.0.0.1:8080".parse().unwrap());
         assert!(c.trusted.contains("10.1.1.1".parse().unwrap()));
         assert_eq!(c.user_header, Some(HeaderName::from_static("x-user")));
@@ -349,7 +354,8 @@ mod tests {
 
     #[test]
     fn the_file_counts_under_the_environment() {
-        let toml = "Address = '127.0.0.1'\nPort = 4600\nBaseURL = 'https://example.com/music'\n[ExtAuth]\nTrustedSources = '10.0.0.0/8'\nUserHeader = 'X-Auth-User'";
+        let toml =
+            "Address = '127.0.0.1'\nPort = 4600\nBaseURL = 'https://example.com/music'\n[ExtAuth]\nTrustedSources = '10.0.0.0/8'\nUserHeader = 'X-Auth-User'";
         let c = load(&[], &[], Some(toml)).unwrap();
         assert_eq!(c.listen, "127.0.0.1:4600".parse().unwrap());
         assert!(c.trusted.contains("10.2.3.4".parse().unwrap()));

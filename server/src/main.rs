@@ -64,7 +64,8 @@ async fn main() -> ExitCode {
         tokio::spawn(watch_until_ready(config.upstream.clone(), ready.clone()));
     }
 
-    let settings = Settings { upstream: config.upstream, trusted: config.trusted, user_header: config.user_header, upstream_user_header: config.upstream_user_header };
+    let settings =
+        Settings { upstream: config.upstream, trusted: config.trusted, user_header: config.user_header, upstream_user_header: config.upstream_user_header };
     let gateway = Gateway::new(settings, ready);
     let (stop_tx, mut stop_rx) = watch::channel(false);
     let server = tokio::spawn(gateway::serve(listener, gateway, async move {

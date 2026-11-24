@@ -69,10 +69,7 @@ impl Gateway {
         let mut connector = HttpConnector::new();
         connector.set_nodelay(true);
         connector.set_connect_timeout(Some(Duration::from_secs(5)));
-        let client = Client::builder(TokioExecutor::new())
-            .pool_idle_timeout(Duration::from_secs(30))
-            .pool_timer(TokioTimer::new())
-            .build(connector);
+        let client = Client::builder(TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).pool_timer(TokioTimer::new()).build(connector);
         Gateway { inner: Arc::new(Inner { settings, client, ready }) }
     }
 

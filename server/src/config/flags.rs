@@ -66,9 +66,7 @@ pub fn scan(args: &[OsString]) -> Result<Flags, String> {
                 "--{name} is on the command line: the Sonus server listens in Navidrome's place and gives Navidrome its own \
                  address; set ND_ADDRESS / ND_PORT (or Address / Port in navidrome.toml) instead"
             )),
-            (_, Refused::Tls) => Err(format!(
-                "--{name} is on the command line, but the Sonus server serves plain HTTP: put TLS in a proxy in front of it"
-            )),
+            (_, Refused::Tls) => Err(format!("--{name} is on the command line, but the Sonus server serves plain HTTP: put TLS in a proxy in front of it")),
             ("configfile", _) => {
                 flags.config_file = Some(value.to_owned());
                 Ok(())

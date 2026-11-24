@@ -356,9 +356,9 @@ for (const [engine, launch] of engines) {
 
     // ---------------------------------------------------------------- the library pages, the keyboard, the system's media controls
     await check('the library pages list playlists, albums, artists and songs; a song there plays within the library', async () => {
-      for (const [kind, n] of [['playlists', await app(() => __app.playlists.length)], ['albums', await app(() => __app.lib.albumList.length)], ['artists', await app(() => __app.lib.artistList.length)]]) {
+      for (const [kind, name, n] of [['playlists', '歌单', await app(() => __app.playlists.length)], ['albums', '专辑', await app(() => __app.lib.albumList.length)], ['artists', '艺人', await app(() => __app.lib.artistList.length)]]) {
         await app(k => { location.hash = `#/library/${k}`; }, kind);
-        await until(async () => (await page.locator('.cm-libpage .ui-mcard').count()) > 0 && (await page.locator('.cm-libpage .cm-chip[aria-pressed="true"]').count()) === 1, `${kind} listed`);
+        await until(async () => (await page.locator('.cm-libpage .ui-mcard').count()) > 0 && (await page.locator('.cm-libpage .cm-chip[aria-pressed="true"]').allTextContents()).join() === name, `${kind} listed`); // the page of this kind, not the one before it
         assert((await page.locator('.cm-libpage .ui-mcard').count()) <= n, `${kind}: more cards than the library has`);
       }
       await app(() => { location.hash = '#/library/songs'; });

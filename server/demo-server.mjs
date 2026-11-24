@@ -8,6 +8,8 @@
 // deletePlaylist, star / unstar, getStarred2, scrobble, getNowPlaying, savePlayQueue / getPlayQueue,
 // getSimilarSongs2, getTopSongs, getArtistInfo2, getCoverArt, stream (WAV, with byte ranges), getLyricsBySongId and
 // getLyrics; and Sonus Connect (rest/connect, a WebSocket: connect.mjs), as the CreeperUX/navidrome fork serves it.
+// Signing in: token (u, t, s) or password (u, p), and OpenSubsonic apiKeyAuthentication (apiKey, tokenInfo) with the
+// fork's browser sign-in (sonusDeviceLogin: POST /auth/device/start, /poll, /revoke), which hands an app a key.
 // GET query parameters and POSTed forms are both read; every /rest answer carries
 // Access-Control-Allow-Origin: * as Navidrome's do. It is not Navidrome: passing against it shows the client follows the
 // API, not that a real server behaves the same.
@@ -16,12 +18,14 @@
 // Test hooks (not part of the API): GET /__test/log → the stream, scrobble and cover requests seen, and how many streams
 // are open;
 // GET /__test/offline?on=1|0 drops every /rest connection (Connect's WebSockets too) while on;
-// GET /__test/devices?u=demo → the user's connected devices and what they play.
+// GET /__test/devices?u=demo → the user's connected devices and what they play;
+// GET /__test/device?code=BCDF-GHJK&decide=allow|deny[&u=demo] → decides a browser sign-in as the user would on the
+// approval page; without decide, lists the sign-ins waiting and the API keys given (names, not the keys).
 // Usage: node server/demo-server.mjs [port]   (default 4533, Navidrome's)
 import { createServer } from 'node:http';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, resolve, dirname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -103,6 +107,48 @@ const playQueues = new Map();  // user → { entries, current, position, changed
 const log = { streams: [], scrobbles: [], queues: [], covers: [], open: 0 }; // open: stream responses not finished yet
 let offline = false;
 
+// ---------------------------------------------------------------- API keys and the browser sign-in
+// As the fork has them (server/sonus_device.go there): an app asks for a sign-in, the user allows it on the server's web
+// page (here: the test hook /__test/device), and the app's next poll gets a key of its own, which it uses as apiKey.
+const API_KEY = { name: 'apiKeyAuthentication', versions: [1] }, DEVICE_LOGIN = { name: 'sonusDeviceLogin', versions: [1] };
+const apiKeys = new Map();       // key → { user, name }
+const pendingLogins = new Map(); // deviceCode → { userCode, client, device, expires, status, user, key }
+const LOGIN_TTL = 10 * 60 * 1000;
+const userCode = () => [...randomBytes(8)].map((x, i) => (i === 4 ? '-' : '') + 'BCDFGHJKLMNPQRSTVWXZ'[x % 20]).join('');
+function sweepLogins() { for (const [code, p] of pendingLogins) if (p.expires < Date.now()) pendingLogins.delete(code); }
+async function deviceLogin(action, req, res) {
+  const reply = (status, body) => res.writeHead(status, { 'Content-Type': 'application/json' }).end(body === undefined ? undefined : JSON.stringify(body));
+  const chunks = []; for await (const c of req) chunks.push(c);
+  let body; try { body = JSON.parse(Buffer.concat(chunks).toString() || 'null'); } catch { body = null; }
+  if (req.method !== 'POST' || !body) return reply(422, { error: 'invalid request payload' });
+  sweepLogins();
+  if (action === 'start') {
+    if (!body.client) return reply(422, { error: 'client is required' });
+    const deviceCode = randomBytes(24).toString('base64url'), code = userCode();
+    pendingLogins.set(deviceCode, { userCode: code, client: String(body.client), device: String(body.device ?? ''), expires: Date.now() + LOGIN_TTL, status: 'pending' });
+    return reply(200, { deviceCode, userCode: code, verificationPath: `/app/#/device?code=${code}`, expiresIn: LOGIN_TTL / 1000, interval: 1 });
+  }
+  if (action === 'poll') {
+    const p = pendingLogins.get(body.deviceCode);
+    if (!p) return reply(200, { status: 'expired' });
+    if (p.status === 'pending') return reply(200, { status: 'pending', interval: 1 });
+    pendingLogins.delete(body.deviceCode); // the key is handed over once
+    return reply(200, p.status === 'approved' ? { status: 'approved', apiKey: p.key, username: p.user } : { status: 'denied' });
+  }
+  if (action === 'revoke') return apiKeys.delete(String(body.apiKey ?? '')) ? reply(204) : reply(404, { error: 'No such API key' });
+  return reply(404, { error: 'not found' });
+}
+/** The test hook: decides a sign-in by its code (as the user on the approval page), and says what is waiting and given. */
+function decideLogin(q) {
+  sweepLogins();
+  const p = [...pendingLogins.values()].find(x => x.userCode === q.get('code') && x.status === 'pending');
+  if (p && q.get('decide') === 'allow') {
+    p.user = q.get('u') ?? 'demo'; p.key = randomBytes(24).toString('base64url'); p.status = 'approved';
+    apiKeys.set(p.key, { user: p.user, name: `${p.client} · ${p.device}` });
+  } else if (p && q.get('decide') === 'deny') p.status = 'denied';
+  return { decided: Boolean(p && q.get('decide')), pending: [...pendingLogins.values()].map(x => ({ userCode: x.userCode, client: x.client, device: x.device, status: x.status })), keys: [...apiKeys.values()] };
+}
+
 // ---------------------------------------------------------------- the API
 const OK = { status: 'ok', version: '1.16.1', type: 'navidrome', serverVersion: '0.58.0 (Sonus demo)', openSubsonic: true };
 const ok = (extra = {}) => ({ ...OK, ...extra });
@@ -110,20 +156,29 @@ const err = (code, message) => ({ ...OK, status: 'failed', error: { code, messag
 const many = (q, k) => q.getAll(k).flatMap(v => (v === '' ? [] : [v]));
 const plOut = p => ({ id: p.id, name: p.name, owner: p.owner, public: p.public, comment: p.comment, songCount: p.entries.length, duration: p.entries.reduce((s, id) => s + (songs.get(id)?.duration ?? 0), 0), created: iso(p.created), changed: iso(p.changed) });
 
-function auth(q) {
+/** Who these parameters sign in as: { user }, or { error } (the Subsonic error to answer). */
+function signIn(q) {
+  if (q.has('apiKey')) {
+    // apiKeyAuthentication: the key alone; with u (or a password, a token) it is error 43
+    if (['u', 'p', 't', 's'].some(k => q.has(k))) return { error: err(43, 'Multiple conflicting authentication mechanisms provided') };
+    const key = apiKeys.get(q.get('apiKey'));
+    return key ? { user: key.user } : { error: err(44, 'Invalid API key') };
+  }
   const u = q.get('u'), t = q.get('t'), s = q.get('s'), p = q.get('p');
-  if (!u || (!t && !p)) return err(10, 'Required parameter is missing: u, t/s or p');
+  if (!u || (!t && !p)) return { error: err(10, 'Required parameter is missing: u, t/s or p') };
   const pass = ACCOUNTS[u];
   const good = pass !== undefined && (t ? s && md5(pass + s) === t : (p.startsWith('enc:') ? Buffer.from(p.slice(4), 'hex').toString() : p) === pass);
-  return good ? null : err(40, 'Wrong username or password');
+  return good ? { user: u } : { error: err(40, 'Wrong username or password') };
 }
+const auth = q => signIn(q).error ?? null;
 
 function api(method, q) {
-  if (method === 'getOpenSubsonicExtensions') return ok({ openSubsonicExtensions: [{ name: 'songLyrics', versions: [1] }, { name: 'formPost', versions: [1] }, CONNECT] });
-  const denied = auth(q); if (denied) return denied;
-  const me = q.get('u');
+  if (method === 'getOpenSubsonicExtensions') return ok({ openSubsonicExtensions: [{ name: 'songLyrics', versions: [1] }, { name: 'formPost', versions: [1] }, CONNECT, API_KEY, DEVICE_LOGIN] });
+  const who = signIn(q); if (who.error) return who.error;
+  const me = who.user;
   switch (method) {
     case 'ping': return ok();
+    case 'tokenInfo': return ok({ tokenInfo: { username: me } });
     case 'getLicense': return ok({ license: { valid: true } });
     case 'getScanStatus': return ok({ scanStatus: { scanning: false, count: songs.size, folderCount: albums.size } });
     case 'search3': {
@@ -263,8 +318,14 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   if (url.pathname.startsWith('/__test/')) {
     if (url.pathname === '/__test/offline') { offline = url.searchParams.get('on') === '1'; if (offline) connect.dropAll(); }
-    const body = url.pathname === '/__test/log' ? log : url.pathname === '/__test/devices' ? connect.devices(url.searchParams.get('u') ?? 'demo') : { offline };
+    const body = url.pathname === '/__test/log' ? log : url.pathname === '/__test/devices' ? connect.devices(url.searchParams.get('u') ?? 'demo')
+      : url.pathname === '/__test/device' ? decideLogin(url.searchParams) : { offline };
     res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(body));
+    return;
+  }
+  if (url.pathname.startsWith('/auth/device/')) {
+    if (offline) { req.socket.destroy(); return; }
+    await deviceLogin(url.pathname.slice('/auth/device/'.length), req, res);
     return;
   }
   if (url.pathname.startsWith('/rest/')) {
@@ -296,6 +357,6 @@ const server = createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': TYPES[extname(real)] || 'application/octet-stream', 'Cache-Control': 'no-store' }).end(await readFile(real));
   } catch { res.writeHead(404).end('not found'); }
 });
-const connect = attachConnect(server, { authenticate: q => (auth(q) ? null : q.get('u')), isOffline: () => offline });
+const connect = attachConnect(server, { authenticate: q => signIn(q).user ?? null, isOffline: () => offline });
 server.listen(port, '127.0.0.1', () => console.log(`demo server: http://127.0.0.1:${port}/ (${songs.size} songs, ${albums.size} albums, ${playlists.length} playlists; sign in as demo / demo)`));
 export { server };

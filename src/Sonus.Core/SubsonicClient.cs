@@ -7,11 +7,20 @@ using System.Text.RegularExpressions;
 
 namespace Sonus.Core;
 
-/// <summary>The sign-in kept between runs: the server, the user, and the token (md5(password + salt)) with its salt.
-/// The password itself is never kept. The token works like the password for this API, so it is a secret.</summary>
-public sealed record Login(string Server, string User, string Salt, string Token)
+/// <summary>The sign-in kept between runs: the server, the user, and either the token (md5(password + salt)) with its
+/// salt, or an API key (the browser sign-in, <see cref="DeviceLogin"/>: OpenSubsonic apiKeyAuthentication, a key of
+/// this app's own that the user can revoke). The password itself is never kept. Token and key work like the password for
+/// this API, so they are secrets.</summary>
+public sealed record Login(string Server, string User, string Salt, string Token, string? ApiKey = null)
 {
-    public string ToJson() => JsonSerializer.Serialize(new Dictionary<string, string> { ["server"] = Server, ["user"] = User, ["salt"] = Salt, ["token"] = Token });
+    /// <summary>Signed in through the browser: requests carry the API key alone.</summary>
+    public bool IsApiKey => !string.IsNullOrEmpty(ApiKey);
+
+    public static Login WithApiKey(string server, string user, string apiKey) => new(server, user, "", "", apiKey);
+
+    public string ToJson() => JsonSerializer.Serialize(IsApiKey
+        ? new Dictionary<string, string> { ["server"] = Server, ["user"] = User, ["apiKey"] = ApiKey! }
+        : new Dictionary<string, string> { ["server"] = Server, ["user"] = User, ["salt"] = Salt, ["token"] = Token });
 
     public static Login? FromJson(string? json)
     {
@@ -20,10 +29,14 @@ public sealed record Login(string Server, string User, string Salt, string Token
         {
             using var doc = JsonDocument.Parse(json);
             string? Get(string k) => doc.RootElement.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+            if (Get("server") is { Length: > 0 } server && Get("apiKey") is { Length: > 0 } key) return WithApiKey(server, Get("user") ?? "", key);
             return Get("server") is { Length: > 0 } s && Get("user") is { Length: > 0 } u && Get("salt") is { Length: > 0 } salt && Get("token") is { Length: > 0 } t ? new Login(s, u, salt, t) : null;
         }
         catch (JsonException) { return null; }
     }
+
+    // a record prints its properties: never the secrets, should one end up in a log
+    public override string ToString() => $"Login {{ Server = {Server}, User = {User}{(IsApiKey ? ", by API key" : "")} }}";
 }
 
 /// <summary>The server answered with a Subsonic error (wrong password, not found, not allowed …).</summary>
@@ -48,7 +61,7 @@ public sealed class SubsonicClient
 {
     public const string ApiVersion = "1.16.1";
     private const int Page = 500;
-    private static readonly HttpClient Shared = new(new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5), AutomaticDecompression = DecompressionMethods.All }) { Timeout = TimeSpan.FromSeconds(30) };
+    internal static readonly HttpClient Shared = new(new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5), AutomaticDecompression = DecompressionMethods.All }) { Timeout = TimeSpan.FromSeconds(30) };
 
     private static readonly Dictionary<int, string> Errors = new()
     {
@@ -156,10 +169,13 @@ public sealed class SubsonicClient
 
     private List<KeyValuePair<string, string>> Params(IEnumerable<KeyValuePair<string, object?>>? extra)
     {
-        var p = new List<KeyValuePair<string, string>>
-        {
-            new("u", Login.User), new("t", Login.Token), new("s", Login.Salt), new("v", ApiVersion), new("c", ClientName), new("f", "json"),
-        };
+        // an API key signs alone (apiKeyAuthentication: u= alongside it is an error)
+        var p = Login.IsApiKey
+            ? new List<KeyValuePair<string, string>> { new("apiKey", Login.ApiKey!), new("v", ApiVersion), new("c", ClientName), new("f", "json") }
+            : new List<KeyValuePair<string, string>>
+            {
+                new("u", Login.User), new("t", Login.Token), new("s", Login.Salt), new("v", ApiVersion), new("c", ClientName), new("f", "json"),
+            };
         foreach (var (k, v) in extra ?? [])
         {
             switch (v)

@@ -331,7 +331,8 @@ public sealed class SettingsPage : View
         }
         acc.Children.Add(Fact("用户", music.Client.Login.User));
         acc.Children.Add(Fact("本机名称", music.Client.ClientName));
-        acc.Children.Add(Fact("登录信息保存在", "Windows 凭据管理器（只有令牌，没有密码）"));
+        acc.Children.Add(Fact("登录方式", music.Client.Login.IsApiKey ? "在浏览器中登录（应用密钥，可在服务器网页上撤销）" : "用户名和密码"));
+        acc.Children.Add(Fact("登录信息保存在", music.Client.Login.IsApiKey ? "Windows 凭据管理器（只有这台电脑的应用密钥，没有密码）" : "Windows 凭据管理器（只有令牌，没有密码）"));
         var signOutButton = new Button { Content = Ui.Row(8, Ui.Icon(Glyphs.SignOut, 14), Ui.Text("退出登录")), Style = Ui.Style("PillButtonStyle") };
         AutomationProperties.SetName(signOutButton, "退出登录");
         signOutButton.Click += async (_, _) => await signOut();

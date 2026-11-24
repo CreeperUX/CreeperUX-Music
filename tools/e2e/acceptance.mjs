@@ -1,10 +1,10 @@
 // Acceptance of the Windows app, silent and isolated (tools/e2e/e2e.mjs): builds it, starts the demo server and test
 // instances, and goes through the app in rounds: sign-in, every page, playback, playlists, search, continuing on a second
 // device, controlling another device, narrow windows, losing the server, the system media controls, a restart and signing
-// out, updates, and taking over what the former name (CreeperUX Music) left. After each round the
+// out, updates, taking over what the former name (CreeperUX Music) left, and signing in through the browser. After each round the
 // test window must still be hidden and never have been the foreground window. Results: .work/acceptance/report.md;
 // screenshots: .work/shots/acc-*.png (look at them).
-// Usage: node tools/e2e/acceptance.mjs [--arch=x64|ARM64] [--no-build] [--only=signin,pages,playback,playlists,search,devices,connect,layout,offline,smtc,restart,updates,former] [--exe=<path>]
+// Usage: node tools/e2e/acceptance.mjs [--arch=x64|ARM64] [--no-build] [--only=signin,pages,playback,playlists,search,devices,connect,layout,offline,smtc,restart,updates,former,browser] [--exe=<path>]
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -76,7 +76,7 @@ try {
     await check('密码错误时说明原因，不保存任何东西', async () => {
       await app.send(`set 服务器地址=${server.url}`); await app.send('set 用户名=demo'); await app.send('set 密码=wrong');
       await app.invoke('登录');
-      await until(async () => (await app.texts()).includes('用户名或密码不正确。'), 'error text');
+      await until(async () => (await app.texts()).some(t => t.startsWith('用户名或密码不正确。') && t.includes('在浏览器中登录')), 'error text, with the hint for two-step verification');
       assert(!credentialKept(), '凭据被保存了');
       await shot('login-error');
     });
@@ -666,6 +666,80 @@ try {
       await app.send('nav settings');
       await app.invoke('检查更新');
       await until(async () => (await app.texts()).some(t => /发现新版本 9\.9\.0。$/.test(t)), '9.9.0 found with the adopted token');
+    });
+    quiet(app);
+  }
+
+  // ---------------------------------------------------------------- 13. signing in through the browser (an API key)
+  if (want('browser')) {
+    round('browser', '第 13 轮：在浏览器中登录（服务器发给这台电脑的应用密钥，不经过密码）');
+    // the approval page's decision is the demo server's test hook: no browser is opened (a test instance only logs it)
+    const logins = async (query = '') => (await fetch(`${server.url}/__test/device${query}`)).json();
+    const codeShown = async () => (await app.texts()).find(t => /^[B-Z]{4}-[B-Z]{4}$/.test(t));
+    const logText = () => readFileSync(join(app.data, 'app.log'), 'utf8');
+    await check('点“在浏览器中登录”：显示登录代码，打开服务器的允许页面（测试实例只记日志）', async () => {
+      await app.stop();
+      forgetAll();
+      app = await new TestApp('browser', { demo: server.url, exe, env: appEnv }).start();
+      await until(async () => hasName('在浏览器中登录'), 'login page');
+      await app.send(`set 服务器地址=${server.url}`);
+      await app.invoke('在浏览器中登录');
+      await until(codeShown, 'the code');
+      const code = await codeShown();
+      await until(async () => logText().includes(`[browser sign-in] ${server.url}/app/#/device?code=${code}`), 'the approval page logged');
+      const waiting = (await logins()).pending.find(p => p.userCode === code);
+      assert(waiting?.client === 'Sonus' && waiting.device === '测试 第一台', `服务器上的登录请求：${JSON.stringify(waiting)}`);
+      assert(await hasName('取消在浏览器中登录'), '没有取消按钮');
+      assert((await audit()).length === 0, (await audit()).join(' | '));
+      await shot('login-browser');
+    });
+    await check('在网页上允许后自动登录：服务器上多了一个以这台电脑命名的应用密钥', async () => {
+      assert((await logins(`?code=${await codeShown()}&decide=allow`)).decided, '服务器上没有等待中的登录');
+      await until(async () => (await app.send('ready')) === 'yes', 'ready', 30000);
+      assert(credentialKept(), '凭据没有保存');
+      const { keys } = await logins();
+      assert(keys.length === 1 && keys[0].user === 'demo' && keys[0].name === 'Sonus · 测试 第一台', JSON.stringify(keys));
+      const s = await state();
+      assert(s.songs === 293 && s.albums === 34, JSON.stringify({ songs: s.songs, albums: s.albums }));
+    });
+    await check('设置页写明登录方式；Sonus Connect 用应用密钥连上服务器', async () => {
+      await app.send('nav settings');
+      await until(async () => (await app.texts()).includes('在浏览器中登录（应用密钥，可在服务器网页上撤销）'), 'the sign-in method');
+      await until(async () => (await (await fetch(`${server.url}/__test/devices?u=demo`)).json()).length > 0, 'a Connect device for demo');
+      await app.send('scroll 45'); await sleep(300);
+      await shot('settings-browser');
+    });
+    await check('关掉再打开：用保存的应用密钥直接登录，密钥不出现在日志里', async () => {
+      await app.stop();
+      app = await new TestApp('browser', { demo: server.url, fresh: false, exe, env: appEnv }).start();
+      await until(async () => (await app.send('ready')) === 'yes', 'signed in with the kept key', 30000);
+      assert(!/apiKey=[A-Za-z0-9_-]{8}/.test(logText()), '日志里有应用密钥');
+    });
+    await check('退出登录：把应用密钥还给服务器（随即失效），凭据被删除', async () => {
+      await app.send('nav settings'); await sleep(800);
+      await app.invoke('退出登录');
+      await until(async () => hasName('服务器地址'), 'login page');
+      assert(!credentialKept(), '凭据还在');
+      await until(async () => (await logins()).keys.length === 0, 'the key given back');
+      assert(!(await hasName('接着播放')), '登录页上还留着上一个会话的“接着播放”提示');
+    });
+    await check('在网页上拒绝：说明被拒绝，什么都不保存', async () => {
+      await app.send(`set 服务器地址=${server.url}`);
+      await app.invoke('在浏览器中登录');
+      await until(codeShown, 'the code');
+      await logins(`?code=${await codeShown()}&decide=deny`);
+      await until(async () => (await app.texts()).includes('在浏览器中拒绝了这次登录。'), 'the denied message');
+      assert(!(await codeShown()), '代码还显示着');
+      assert(!credentialKept() && (await logins()).keys.length === 0, '拒绝后还是保存了登录或发了密钥');
+      await shot('login-browser-denied');
+    });
+    await check('取消：代码收起，还能用密码登录', async () => {
+      await app.invoke('在浏览器中登录');
+      await until(codeShown, 'the code');
+      await app.invoke('取消在浏览器中登录');
+      await until(async () => !(await codeShown()), 'the code put away');
+      await app.invoke('使用本机的演示服务器');
+      await until(async () => (await app.send('ready')) === 'yes', 'ready', 30000);
     });
     quiet(app);
   }

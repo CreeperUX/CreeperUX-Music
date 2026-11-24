@@ -64,6 +64,102 @@ public class SignInTests
         Assert.Contains("format=mp3", c.StreamUrl("t1", "mp3"));
         Assert.DoesNotContain("format", c.StreamUrl("t1"));
     }
+
+    [Fact]
+    public void ApiKeyLoginRoundTripsAndKeepsTheKeyOutOfLogs()
+    {
+        var login = Login.WithApiKey("https://h", "u", "k3y-secret");
+        Assert.True(login.IsApiKey);
+        Assert.False(new Login("http://h", "u", "abcd", "0123").IsApiKey);
+        Assert.Equal(login, Login.FromJson(login.ToJson()));
+        Assert.Contains("\"apiKey\"", login.ToJson());
+        Assert.DoesNotContain("token", login.ToJson());
+        Assert.DoesNotContain("k3y-secret", login.ToString());
+    }
+
+    [Fact]
+    public void ApiKeyUrlsCarryTheKeyAndNoUser()
+    {
+        // OpenSubsonic apiKeyAuthentication: the key alone; u with it is error 43
+        var c = new SubsonicClient(Login.WithApiKey("http://h:4533", "demo", "abc"), "Sonus (PC)");
+        string url = c.CoverUrl("al1");
+        Assert.StartsWith("http://h:4533/rest/getCoverArt.view?apiKey=abc&v=1.16.1&c=Sonus%20%28PC%29&f=json&id=al1", url);
+        Assert.DoesNotContain("u=", url);
+        Assert.DoesNotContain("t=", url.Replace("format=", ""));
+    }
+}
+
+public class DeviceLoginTests
+{
+    /// <summary>A server answering from a table: path → (status, JSON body); every request is recorded.</summary>
+    private sealed class FakeServer(Func<HttpRequestMessage, (int Status, string Body)> answer) : HttpMessageHandler
+    {
+        public List<(string Path, string Body)> Requests { get; } = [];
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancel)
+        {
+            string body = request.Content is null ? "" : await request.Content.ReadAsStringAsync(cancel);
+            Requests.Add((request.RequestUri!.AbsolutePath, body));
+            var (status, json) = answer(request);
+            return new HttpResponseMessage((System.Net.HttpStatusCode)status) { Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json") };
+        }
+    }
+
+    private const string Extensions = "{\"subsonic-response\":{\"status\":\"ok\",\"openSubsonicExtensions\":[{\"name\":\"apiKeyAuthentication\",\"versions\":[1]},{\"name\":\"sonusDeviceLogin\",\"versions\":[1]}]}}";
+
+    [Fact]
+    public async Task ProbeSaysWhetherTheServerOffersIt()
+    {
+        using var with = new HttpClient(new FakeServer(_ => (200, Extensions)));
+        Assert.Equal(("http://192.168.1.10:4533", true), await DeviceLogin.ProbeAsync("192.168.1.10:4533", with));
+        using var without = new HttpClient(new FakeServer(_ => (200, "{\"subsonic-response\":{\"status\":\"ok\",\"openSubsonicExtensions\":[]}}")));
+        Assert.Equal(("https://music.example.com", false), await DeviceLogin.ProbeAsync("https://music.example.com/", without));
+    }
+
+    [Fact]
+    public async Task StartsPollsAndGetsAKey()
+    {
+        int polls = 0;
+        var server = new FakeServer(r => r.RequestUri!.AbsolutePath switch
+        {
+            "/music/auth/device/start" => (200, "{\"deviceCode\":\"dev-1\",\"userCode\":\"BCDF-GHJK\",\"verificationPath\":\"/music/app/#/device?code=BCDF-GHJK\",\"expiresIn\":600,\"interval\":1}"),
+            "/music/auth/device/poll" => (200, ++polls < 2 ? "{\"status\":\"pending\"}" : "{\"status\":\"approved\",\"apiKey\":\"the-key\",\"username\":\"alice\"}"),
+            _ => (404, "{}"),
+        });
+        using var http = new HttpClient(server);
+        var start = await DeviceLogin.StartAsync("https://h/music", "Sonus", "书房电脑", http);
+        Assert.Equal("BCDF-GHJK", start.UserCode);
+        Assert.Equal("https://h/music/app/#/device?code=BCDF-GHJK", start.VerificationUrl.ToString());
+        Assert.Equal("书房电脑", System.Text.Json.JsonDocument.Parse(server.Requests[0].Body).RootElement.GetProperty("device").GetString());
+
+        var (state, login) = await DeviceLogin.WaitAsync(start, http);
+        Assert.Equal(DeviceLoginState.Approved, state);
+        Assert.Equal(Login.WithApiKey("https://h/music", "alice", "the-key"), login);
+        Assert.Equal(2, polls);
+        Assert.All(server.Requests.Skip(1), r => Assert.Contains("dev-1", r.Body));
+    }
+
+    [Theory]
+    [InlineData("{\"status\":\"denied\"}", DeviceLoginState.Denied)]
+    [InlineData("{\"status\":\"expired\"}", DeviceLoginState.Expired)]
+    [InlineData("{\"status\":\"approved\"}", DeviceLoginState.Pending)] // approved without a key: not a sign-in
+    public async Task PollReadsTheDecision(string answer, DeviceLoginState expected)
+    {
+        using var http = new HttpClient(new FakeServer(_ => (200, answer)));
+        var start = new DeviceLoginStart("https://h", "dev-1", "BCDF-GHJK", new Uri("https://h/app/#/device"), TimeSpan.FromSeconds(1), DateTimeOffset.UtcNow.AddMinutes(1));
+        Assert.Equal(expected, (await DeviceLogin.PollAsync(start, http)).State);
+    }
+
+    [Fact]
+    public async Task RevokeGivesTheKeyBackAndSkipsPasswordSignIns()
+    {
+        var server = new FakeServer(_ => (200, "{}"));
+        using var http = new HttpClient(server);
+        Assert.True(await DeviceLogin.RevokeAsync(Login.WithApiKey("https://h", "alice", "the-key"), http));
+        Assert.Equal("/auth/device/revoke", server.Requests.Single().Path);
+        Assert.Contains("the-key", server.Requests.Single().Body);
+        Assert.False(await DeviceLogin.RevokeAsync(new Login("https://h", "alice", "s", "t"), http));
+        Assert.Single(server.Requests);
+    }
 }
 
 public class LyricsTests

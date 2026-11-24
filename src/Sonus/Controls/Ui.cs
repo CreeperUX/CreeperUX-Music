@@ -20,6 +20,7 @@ public static class Glyphs
     public const string Error = "";
     public const string Refresh = "", Download = "";
     public const string Devices = "", Headphones = "";
+    public const string External = ""; // opens a page in the browser
     public const string Playlist = "", Folder = "", Sort = "", Expand = "";
 }
 

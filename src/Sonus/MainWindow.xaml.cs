@@ -151,6 +151,13 @@ public sealed partial class MainWindow : Window, IShell
         var login = new LoginView(_settings.LastServer, Program.DemoServer, error, IsActive);
         login.SignedIn += async l => { Interop.Credentials.Write(l.ToJson(), l.User); _settings.LastServer = l.Server; _settings.Save(); await Connect(l); };
         login.SignIn = (server, user, password) => SubsonicClient.SignInAsync(server, user, password, ClientName);
+        // the browser sign-in: the key is named after this computer on the server; a test instance only logs the page
+        login.DeviceName = (AppPaths.IsTestInstance ? "测试 " : "") + DeviceName;
+        login.OpenBrowser = async url =>
+        {
+            Log.Write($"[browser sign-in] {url}");
+            if (!AppPaths.IsTestInstance) await Launcher.LaunchUriAsync(url);
+        };
         LoginHost.Child = login;
         LoginHost.Visibility = Visibility.Visible;
         Title = "登录 · Sonus";
@@ -207,11 +214,15 @@ public sealed partial class MainWindow : Window, IShell
 
     private async Task SignOut()
     {
+        // a key from the browser sign-in is given back: it stops working on the server at once (best effort; the user
+        // can also revoke it on the server's web page)
+        if (_music?.Client.Login is { IsApiKey: true } keyed) _ = DeviceLogin.RevokeAsync(keyed);
         _connect?.Dispose(); _connect = null;
         _music?.Dispose();
         _music = null; Ready = false;
         _view?.Leave(); _view = null;
         Interop.Credentials.Delete();
+        ToastHost.Children.Clear(); // their actions ("接着播放") belong to the session just closed
         LibraryHost.Child = null; PanelHost.Child = null; BarHost.Child = null; MainHost.Child = null;
         _back.Clear(); _forward.Clear();
         ShowLogin();

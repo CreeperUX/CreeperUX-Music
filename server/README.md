@@ -508,7 +508,7 @@ On Windows on ARM (the fork's x64 binary, 0.64.2-sonus.10, `fb95b5ce`), this ser
   player's row is the same as the one Navidrome alone makes, and the last access is written. And: a player's
   `ReportRealPath`, turned on in the database while the servers run, changes the next answer on both (on Windows this
   server leaves such a player's songs to Navidrome: checked that it does).
-- `cargo test`: 230 tests (143 unit, 12 in `tests/library.rs`, 75 in the other integration tests).
+- `cargo test`: 231 tests (144 unit, 12 in `tests/library.rs`, 75 in the other integration tests).
 
 Not checked: the image and Linux binaries beyond CI building them, so `ReportRealPath` answered here (Linux only) is
 covered by unit tests and `tests/library.rs` on CI's Linux, not against the real Navidrome; the settings other than

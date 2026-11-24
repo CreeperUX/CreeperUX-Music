@@ -573,6 +573,36 @@ mod tests {
     }
 
     #[test]
+    fn the_librarys_settings_are_navidromes() {
+        let defaults = load(&[], &[], None).unwrap().shared.library;
+        assert_eq!(defaults, LibraryOptions::default());
+        assert!(defaults.append_subtitle && defaults.append_album_version && defaults.enable_average_rating && defaults.enable_media_file_cover_art);
+        assert!(
+            !defaults.prefer_sort_tags && !defaults.enable_natural_sorting && !defaults.recently_added_by_mod_time && !defaults.normalized_album_play_count
+        );
+        assert_eq!((defaults.legacy_clients.as_str(), defaults.minimal_clients.as_str()), ("DSub", "SubMusic"));
+        // from the file (a table, or dotted), and the environment over it
+        let file = "PreferSortTags = true\nAlbumPlayCountMode = 'normalized'\nSearchFullString = true\n[Subsonic]\nAppendSubtitle = false\n\
+                    LegacyClients = 'A,B'\n[Search]\nBackend = ' Legacy '";
+        let env = [
+            ("ND_SUBSONIC_APPENDALBUMVERSION", "false"),
+            ("ND_ENABLENATURALSORTING", "1"),
+            ("ND_RECENTLYADDEDBYMODTIME", "true"),
+            ("ND_SUBSONIC_LEGACYCLIENTS", "C"),
+        ];
+        let set = load(&env, &[], Some(file)).unwrap().shared.library;
+        assert!(set.prefer_sort_tags && set.normalized_album_play_count && set.enable_natural_sorting && set.recently_added_by_mod_time);
+        assert!(!set.append_subtitle && !set.append_album_version);
+        assert_eq!(set.legacy_clients, "C", "the environment outranks the file");
+        assert!(set.legacy_search, "trimmed and in any case, as Navidrome reads it");
+        assert!(set.search_full_string, "the option's old name still counts");
+        // anything but "normalized" counts plays as they are; a yes-or-no setting must be one
+        assert!(!load(&[("ND_ALBUMPLAYCOUNTMODE", "Normalized")], &[], None).unwrap().shared.library.normalized_album_play_count);
+        assert!(load(&[("ND_PREFERSORTTAGS", "maybe")], &[], None).is_err());
+        assert!(!load(&[("ND_SEARCH_FULLSTRING", "false")], &[], Some("SearchFullString = true")).unwrap().shared.library.search_full_string);
+    }
+
+    #[test]
     fn defaults_take_navidromes_place() {
         let c = load(&[], &["--nobanner"], None).unwrap();
         assert_eq!(c.listen, "0.0.0.0:4533".parse().unwrap());

@@ -1,5 +1,6 @@
-//! A database as the frozen Navidrome leaves it, as far as sign-ins go: the tables are created with the statements
-//! of a database the fork made (0.64.2-sonus.10, `tools/fixtures`), at its last migration, with one library.
+//! A database as the frozen Navidrome leaves it, as far as sign-ins and a song's name go: the tables are created with
+//! the statements of a database the fork made (0.64.2-sonus.10, `tools/fixtures`), at its last migration, with one
+//! library. `media_file` has the columns up to `bit_rate`, then `library_id` and `missing` (of its 70).
 
 use std::path::Path;
 
@@ -62,6 +63,29 @@ CREATE TABLE sonus_app_password (
 , secret_hash TEXT NOT NULL DEFAULT '');
 CREATE INDEX sonus_app_password_user ON sonus_app_password(user_id);
 CREATE INDEX sonus_app_password_hash ON sonus_app_password(secret_hash);
+CREATE TABLE "media_file"
+(
+    id                      varchar(255)                         not null
+        primary key,
+    path                    varchar(255)           default ''    not null,
+    title                   varchar(255)           default ''    not null,
+    album                   varchar(255)           default ''    not null,
+    artist                  varchar(255)           default ''    not null,
+    artist_id               varchar(255)           default ''    not null,
+    album_artist            varchar(255)           default ''    not null,
+    album_id                varchar(255)           default ''    not null,
+    has_cover_art           bool                   default FALSE not null,
+    track_number            integer                default 0     not null,
+    disc_number             integer                default 0     not null,
+    year                    integer                default 0     not null,
+    size                    integer                default 0     not null,
+    suffix                  varchar(255)           default ''    not null,
+    duration                real                   default 0     not null,
+    bit_rate                integer                default 0     not null,
+    library_id              integer                default 1     not null
+        references library
+            on delete cascade
+, missing boolean default false not null);
 "#;
 
 /// A new database file at `path`, at `version` (the known one: `SCHEMA_VERSION`).
@@ -106,4 +130,23 @@ pub fn add_app_password(conn: &Connection, keys: &Keys, user_id: &str, id: &str,
 pub fn add_two_factor(conn: &Connection, user_id: &str, confirmed: bool) {
     let at = confirmed.then_some("2026-11-24 20:01:53.6128455+00:00");
     conn.execute("INSERT INTO sonus_two_factor (user_id, secret, confirmed_at) VALUES (?1, 'sealed', ?2)", (user_id, at)).unwrap();
+}
+
+/// Makes the user an admin (who sees every library).
+pub fn make_admin(conn: &Connection, user_id: &str) {
+    conn.execute("UPDATE user SET is_admin = TRUE WHERE id = ?1", [user_id]).unwrap();
+}
+
+/// Grants the user the library, as Navidrome does for a new user.
+pub fn grant_library(conn: &Connection, user_id: &str) {
+    conn.execute("INSERT INTO user_library (user_id, library_id) VALUES (?1, 1)", [user_id]).unwrap();
+}
+
+/// A song in the library: `duration` in seconds; its cover is its own (`has_cover_art`), its disc's or its album's.
+pub fn add_song(conn: &Connection, id: &str, title: &str, album_id: &str, duration: f64, has_cover_art: bool, disc_number: i64) {
+    conn.execute(
+        "INSERT INTO media_file (id, title, artist, album, album_id, duration, has_cover_art, disc_number) VALUES (?1, ?2, 'The Artist', 'The Album', ?3, ?4, ?5, ?6)",
+        (id, title, album_id, duration, has_cover_art, disc_number),
+    )
+    .unwrap();
 }

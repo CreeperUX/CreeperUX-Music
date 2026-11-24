@@ -1,11 +1,12 @@
 # Sonus server: security decisions and trust boundaries
 
 For whoever reviews this server's security: what it decides, what Navidrome still decides, whom each believes, and
-what could go wrong. It describes the code as it is after phase 2 (`docs/server-roadmap.md`): the gateway (phase 0),
-Subsonic sign-ins checked here, and the `/auth` routes answered here (web sign-in, two-step verification, app
-passwords, the browser sign-in for apps), with session tokens Navidrome accepts.
+what could go wrong. It describes the code as it is after phases 1 and 2 (`docs/server-roadmap.md`): the gateway
+(phase 0), Subsonic sign-ins checked here, the `/auth` routes answered here (web sign-in, two-step verification, app
+passwords, the browser sign-in for apps), with session tokens Navidrome accepts, and Sonus Connect version 2 answered
+here (one playback session per user, on a WebSocket).
 
-Code: `src/gateway.rs`, `src/trust.rs`, `src/routes.rs`, `src/subsonic/`, `src/auth/`, `src/jwt.rs`, `src/id.rs`,
+Code: `src/gateway.rs`, `src/trust.rs`, `src/routes.rs`, `src/subsonic/`, `src/auth/`, `src/connect/`, `src/jwt.rs`, `src/id.rs`,
 `src/secrets.rs`, `src/db.rs`, `src/startup.rs`, `src/config.rs`. What the behaviour is checked with: `README.md`, "Tests" and "Checked against the
 real Navidrome".
 
@@ -25,7 +26,7 @@ client ──► [ trusted proxy ] ──► Sonus server (gateway) ──► Na
 - Both open the same database file. The gateway reads users, their encrypted passwords, the two-step verification
   state, app passwords and the session secret from it, and writes what the sign-in routes write (below).
 - Both sign and verify session tokens with the same secret. In the gateway's memory only: the sign-ins of apps
-  waiting for approval, and the two limiters' counts.
+  waiting for approval, the two limiters' counts, and Sonus Connect's devices (its sessions are in the database).
 
 ## What the gateway decides
 
@@ -44,7 +45,11 @@ client ──► [ trusted proxy ] ──► Sonus server (gateway) ──► Na
 6. **Session tokens**: it issues them (at sign-in and after the setup), with the secret Navidrome verifies them with.
 7. **How much a request to Navidrome's own API may send** (4 MiB, uploads apart).
 8. **Whether to run at all**: only on the database schema it knows (goose version 20260922230428, the fork's
-   `sonus_*` tables, one library) and with the session secret readable. Otherwise it stops, and stops Navidrome.
+   `sonus_*` tables, one library; its own tables at the version it writes) and with the session secret readable.
+   Otherwise it stops, and stops Navidrome.
+9. **Sonus Connect version 2** (`connect/`): who a WebSocket at `rest/connect?protocol=2` belongs to, each user's
+   playback session and what its devices are sent, and what of it is kept in the database.
+10. **What `getOpenSubsonicExtensions` lists**: Navidrome's answer, with `sonusConnect` version 2 added.
 
 ## What Navidrome still decides
 
@@ -216,6 +221,65 @@ user code the app shows (8 letters of 20, about 34 bits, valid ten minutes, read
   it is rate-limited so it does not become a way to test keys quickly (the Subsonic limiter does not see it).
 - Waiting sign-ins are in memory: lost at a restart, never written anywhere.
 
+## Sonus Connect version 2
+
+`src/connect/`; the protocol is `docs/protocol/connect.md`. A WebSocket at `rest/connect?protocol=2`, answered here
+whole: Navidrome never sees it.
+
+**Who a connection is.** The user whose Subsonic credentials are in the upgrade request's query, checked by
+`Subsonic::sign_in`: the same function, limiter and answers as for every Subsonic request ("One place decides every
+credential check" holds). There is no connection without a signed-in user: a refused sign-in is answered before any
+upgrade, with Navidrome's error. A session token (`jwt`) is not taken (401), and neither is a trusted proxy's user
+header: version 2 asks for credentials even behind a proxy that signs users in. Credentials are in the query, so the
+log lines carry the path only, as everywhere; the user's name and the device's id are logged at debug level.
+
+**What a signed-in device can do.** Everything to its own user's session: play, queue, seek, transfer, set the
+volume of any of that user's devices, close that user's other connections by connecting with their device id (4000)
+or as a 33rd device (4001). That is the protocol: every device of a user steers the one session.
+
+**What it can do to another user's session: nothing.** A connection is bound to its user's room when it is accepted
+(`Inner::attach`, by the user id the sign-in gave) and never to another: no message carries a user, and device ids
+are looked up in that room only, so another user's device id is "offline" (`transfer`, `volume`), even when two
+users' devices have the same id. Broadcasts go to the room's own connections. Song ids a user sends are checked
+against the library as that user sees it (admin: all; otherwise `user_library`), so a session never holds, and `now`
+never shows, a song the user could not read through the Subsonic API; an id they cannot see is the same as one that
+does not exist. The stored row is keyed by the user id.
+
+**What comes from a device and goes back out**, to that user's devices only: the device's name (80 characters),
+`client` (120), `kind` (one of six), the context's `kind`/`id`/`label` and a `loaded` report's `now` (strings, as
+sent, bounded by the frame size), `ref` (echoed to its sender), and song ids the library has. All inside JSON built
+from values. A user can show their own other devices any text; clients render it as text.
+
+**Limits.**
+
+| What | Limit |
+|---|---|
+| a message | 1 MiB (the frame and the whole message); more closes the connection (1009) |
+| JSON nesting | 128 levels (deeper is not a message: ignored) |
+| devices per user | 32 (the 33rd closes the one silent longest) |
+| connections per user that have not said hello | 8 (one more is closed, 1013), each for at most 10 s |
+| the context, the hand-queued songs | 10,000 and 1,000 ids |
+| messages waiting to be written to one device | 256; a device that does not read is dropped (as a network loss), and a write that takes over 30 s ends the connection |
+| silence | a ping every 30 s; nothing heard for 75 s cuts the connection |
+| a session in memory | only while the user has a connection, a grace period running or an unwritten change |
+| one row per user | the session without its lists (a few hundred bytes) and the lists (up to 21,000 ids) |
+
+Messages of one connection are applied one at a time (the next is not read before the last is applied), and all of
+one user's under that user's lock: a user's devices cannot race each other into an inconsistent session, and a flood
+from one device slows that user's session, not another's. What a message can cost: a `playContext` or `mode` looks
+up to 10,000 ids up in the library (one indexed read each), an `add` reads until 1,000 are found or its list ends
+(a 1 MiB list of ids nobody has is about 260,000 reads: the largest thing one message can ask for); every change
+sends the session, and a queue change the queue (up to 10,000 ids), to up to 32 devices. All of it is a signed-in
+user spending the server's time on their own session; nothing here caps messages per second.
+
+**The connection's life.** Credentials are checked when it opens, not again: changing a password or revoking an app
+password does not close the connections it opened (as with Navidrome's version 1, and any stream already running).
+Once a minute each connection's user is checked to still exist; a deleted user's connections are closed (1008), and
+their row goes with them (`ON DELETE CASCADE`).
+
+**Origins.** No `Origin` check: the WebSocket is opened with credentials in its URL, not with cookies, so a page of
+another origin has nothing to ride on (the same as the Subsonic API's open CORS).
+
 ## Secrets
 
 - **Passwords are stored reversibly**, by Navidrome's design: Subsonic's token sign-in (`t` = md5(password ‖ salt))
@@ -239,7 +303,13 @@ user code the app shows (8 letters of 20, about 34 bits, valid ten minutes, read
   before API keys existed, the first admin (a `user` row and its `user_library` rows), and the fork's own tables
   (`sonus_two_factor`, `sonus_recovery_code`, `sonus_app_password`). Each write is one short `BEGIN IMMEDIATE`
   transaction; every statement is parameterized.
-- No schema change, ever, and no VACUUM; the schema is checked at start and the server refuses any other.
+- Two tables of the server's own, made at the first start and written by nobody else: `sonus_server_schema` and
+  `sonus_connect_session` (a user's Connect session, as JSON). Sonus Connect reads `media_file`, `user` and
+  `user_library` and writes only its own table. What it stores came from the user's own devices and is read back as
+  data: parsed as JSON, checked for shape and size, and a row that does not pass starts an empty session.
+- No change to Navidrome's schema, ever, and no VACUUM; the schema is checked at start and the server refuses any
+  other. The server's own tables are additive (`CREATE TABLE IF NOT EXISTS`); a `sonus_connect_session` row refers to
+  its user (`ON DELETE CASCADE`), which adds one indexed lookup to Navidrome's deleting of a user and nothing else.
 - Until that check has passed, sign-in requests and everything under `/auth` are answered 503: they are neither
   checked against an unknown schema nor handed to Navidrome with their credentials.
 - **The start-up probe.** Navidrome settles its password encryption lazily, at its first use of the user store: when
@@ -274,6 +344,9 @@ user code the app shows (8 letters of 20, about 34 bits, valid ten minutes, read
 - Each sign-in check is a blocking database task (a few indexed reads, AES-GCM over a few short strings). A flood of
   requests queues on tokio's blocking pool; nothing here caps the total, as nothing does in Navidrome.
 - A slow client is cut after 30 s without complete headers (phase 0). Request bodies and responses stream.
+- Sonus Connect's limits per connection and per user are in its section above: only signed-in users reach them.
+- `getOpenSubsonicExtensions` (no sign-in) is read whole from Navidrome before it is answered, up to 1 MiB (it is a
+  few hundred bytes).
 
 ## Where the gateway knowingly differs from Navidrome
 
@@ -299,3 +372,6 @@ gateway alone. Everything passes through, as in phase 0; only the 4 MiB limit on
 - `EnableGravatar` and `DevAutoLoginUsername` against the real Navidrome; the QR code read by a real authenticator
   app; session tokens across a `PasswordEncryptionKey` change.
 - A database written by Navidrome while the gateway writes (both use WAL and a 15 s busy timeout; not stress-tested).
+- Sonus Connect: many users or devices at once, a device that stops reading (the outbox's limit is reasoned, not
+  tested), a flood of messages from one device, a proxy in front of the WebSocket, the real clients against this
+  server, and the 30 s ping and 75 s timeout at their real lengths.

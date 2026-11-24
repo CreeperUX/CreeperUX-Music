@@ -15,6 +15,7 @@ use tracing::info;
 
 use crate::auth::{self, Auth};
 use crate::config::Shared;
+use crate::connect::{self, Connect};
 use crate::db::{self, Db};
 use crate::jwt::Signer;
 use crate::secrets::Keys;
@@ -26,6 +27,7 @@ use crate::subsonic::{Setup, Subsonic};
 pub struct Local {
     pub subsonic: Subsonic,
     pub auth: Auth,
+    pub connect: Connect,
 }
 
 /// Navidrome's `consts.JWTSecretKey`: where the `property` table keeps the session secret, sealed.
@@ -48,7 +50,7 @@ pub async fn local(shared: &Shared, upstream: &Uri, base_path: &str) -> Result<L
     let keys = Keys::new(&shared.password_encryption_key);
     let opened = {
         let keys = keys.clone();
-        tokio::task::spawn_blocking(move || -> Result<(Arc<Db>, Signer), String> {
+        tokio::task::spawn_blocking(move || -> Result<(Arc<Db>, Signer, Connect), String> {
             let db = Db::open(&path)?;
             db.read_blocking(|conn| Ok(db::check_sqlite(conn).and_then(|()| db::check_schema(conn)))).map_err(|e| e.to_string())??;
             let hashed = credentials::fill_key_hashes(&db, &keys).map_err(|e| format!("cannot prepare app passwords as API keys: {e}"))?;
@@ -56,12 +58,14 @@ pub async fn local(shared: &Shared, upstream: &Uri, base_path: &str) -> Result<L
                 info!(hashed, "app passwords made before API keys now work as API keys");
             }
             let signer = session_secret(&db, &keys)?;
-            Ok((db, signer))
+            // the server's own tables (additive: Navidrome's are never altered), made at the first start
+            let connect = Connect::new(connect::Setup::new(db.clone()))?;
+            Ok((db, signer, connect))
         })
         .await
         .map_err(|_| "the database check did not finish".to_string())??
     };
-    let (opened, signer) = opened;
+    let (opened, signer, connect) = opened;
     info!(database = %opened.path().display(), schema = db::SCHEMA_VERSION, "Navidrome's database is the schema this server knows");
     let envelope = envelope(upstream, base_path).await?;
     let subsonic = Subsonic::new(Setup {
@@ -86,7 +90,7 @@ pub async fn local(shared: &Shared, upstream: &Uri, base_path: &str) -> Result<L
         enable_gravatar: shared.enable_gravatar,
         auto_login: shared.dev_auto_login_username.clone(),
     });
-    Ok(Local { subsonic, auth })
+    Ok(Local { subsonic, auth, connect })
 }
 
 /// The user name of the sign-in the server tries at Navidrome when it starts: nobody's.

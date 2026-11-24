@@ -52,9 +52,13 @@ export async function songId(key = 'track.mp3') {
 
 /** The OpenSubsonic extensions the server advertises (no sign-in needed). */
 let extensions;
+const listed = () => (extensions ??= anon.ok('getOpenSubsonicExtensions').then(r => new Map((r.openSubsonicExtensions ?? []).map(e => [e.name, e.versions ?? []]))));
 export async function hasExtension(name) {
-  extensions ??= anon.ok('getOpenSubsonicExtensions').then(r => new Set((r.openSubsonicExtensions ?? []).map(e => e.name)));
-  return (await extensions).has(name);
+  return (await listed()).has(name);
+}
+/** The versions of an extension the server lists ([] when it does not list it). */
+export async function extensionVersions(name) {
+  return (await listed()).get(name) ?? [];
 }
 
 // ---------------------------------------------------------------- the browser sign-in's approval step

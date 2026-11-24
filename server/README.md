@@ -5,10 +5,11 @@ CreeperUX fork of Navidrome (frozen at 0.64.2) behind it on a local port, and pa
 ways, WebSockets included. Parts of the server move here one by one behind the same APIs; the route, with the
 decisions behind it, is `docs/server-roadmap.md`.
 
-Status: phase 0's gateway, and phase 2: **Subsonic sign-ins are checked here** ([below](#sign-ins)) and **the `/auth`
+Status: phase 0's gateway, phase 2: **Subsonic sign-ins are checked here** ([below](#sign-ins)) and **the `/auth`
 routes are answered here** ([below](#the-auth-routes): the web sign-in with two-step verification, app passwords, the
-browser sign-in for apps), on Navidrome's own database, which the server opens beside Navidrome. Everything else is
-still Navidrome's. It reads
+browser sign-in for apps), on Navidrome's own database, which the server opens beside Navidrome; and phase 1:
+**Sonus Connect version 2 is answered here** ([below](#sonus-connect-version-2): one playback session per user, kept
+in the database). Everything else is still Navidrome's. It reads
 Navidrome's own settings (`navidrome.toml`, `ND_*`, the command line), has unit and integration tests, and passes the
 contract suite and the differential corpora of `tools/contract` in front of the real frozen Navidrome
 ([below](#checked-against-the-real-navidrome)). The image `ghcr.io/creeperux/sonus-server` is built by CI
@@ -228,7 +229,9 @@ answered 413 here, where Navidrome's handler would fail on the truncated JSON.
 - SQLite is rusqlite's bundled copy, with FTS5 and the JSON functions (Navidrome's triggers need FTS5 on writes to
   songs, albums and artists: later phases);
 - calls block, so they run on tokio's blocking threads;
-- the schema stays Navidrome's: checked at start (above), never created, altered or dropped here, never VACUUMed.
+- the schema stays Navidrome's: checked at start (above), never altered or dropped here, never VACUUMed. The server's
+  own tables ([Sonus Connect](#sonus-connect-version-2)) are beside it, in their own namespace with their own version
+  table.
 
 Timestamps are written as Navidrome's driver writes them (`src/gotime.rs`: `2006-01-02 15:04:05.999999999-07:00`).
 
@@ -238,6 +241,58 @@ Timestamps are written as Navidrome's driver writes them (`src/gotime.rs`: `2006
 AES-256-GCM, key sha256(`PasswordEncryptionKey`), stored as base64(nonce ‖ ciphertext ‖ tag). An API key is found by
 sha256 of the key as typed, lowercased and without dashes and spaces. The unit tests open values Navidrome's own code
 sealed, and Navidrome's code opened what this server sealed (`tests/golden/README.md`).
+
+## Sonus Connect version 2
+
+One playback session per user, as Spotify Connect has it: the protocol is `docs/protocol/connect.md`, and this server
+is its first real implementation (`src/connect/`). Version 1, Navidrome's, stays beside it until every client has
+moved: the two do not see each other.
+
+| Request | |
+|---|---|
+| `rest/connect?protocol=2`, `rest/connect.view?protocol=2` (a WebSocket) | answered here |
+| `rest/connect` without `protocol=2` | version 1: the sign-in is checked here, Navidrome answers, as any Subsonic method |
+| `rest/getOpenSubsonicExtensions` | Navidrome's answer with this server's extensions merged in: `sonusConnect` is `[1, 2]`. Only that changes: the rest of the answer is Navidrome's bytes, in JSON, JSONP and XML (asked of Navidrome uncompressed, and answered uncompressed) |
+
+- **The sign-in** is a Subsonic request's, in the query: `u` with `t`/`s` or `p`, or `apiKey`, plus `v` and `c`,
+  checked by the same code as every Subsonic request (`Subsonic::sign_in`): app passwords, the two-step rule, the
+  failed-attempt limiter with the same counts, and Navidrome's answers when it fails (error 10, 40, 43, 44 with HTTP
+  200, and no WebSocket). A session token (`jwt`) and a trusted proxy's user header do not open it: 401, and the
+  missing-parameter error. Signed in but not asking for a WebSocket: 426.
+- **The session's logic** (`session.rs`, `queue.rs`) is a port of the protocol's reference,
+  `tools/demo-server/connect-session.mjs`, statement by statement and pure: the clock, the random numbers and the
+  library are handed in. `tests/connect_vectors.rs` replays `docs/protocol/connect-vectors.json` (14 cases, 157
+  steps): the session, the queue, the devices and the direct replies after every step are exactly the file's.
+- **The connection** (`socket.rs`): JSON text frames of at most 1 MiB (more: close 1009); `hello` first, within 10 s
+  (else an error and close 1008); a ping every 30 s, and a connection silent for 75 s is cut; a second connection of
+  the same device id replaces the first (4000); a user's 33rd device closes the one silent longest (4001); a close
+  with 1000 or 1001 is a goodbye (the session stops at once if that device played), any other end a network loss
+  (the 10 s grace period, and `resume`). When the server stops, connections are closed with 1001.
+- **What a song is** (`now`, `durationMs`, whether an id exists) is read from Navidrome's `media_file`, read-only, as
+  the session's user may see it: an admin every library, anyone else the libraries granted in `user_library`
+  (Navidrome's `applyLibraryFilter`). `now.coverArt` is an id `getCoverArt` shows the song's picture for (the file's
+  own, `mf-<id>`, else its disc's, `dc-<album>:<disc>`, else its album's, `al-<album>`), without the `_<hash>`
+  Navidrome's own answers add for caches; the active device's `loaded` report replaces it.
+- **Kept in the database** (`store.rs`), in two tables of this server's own in Navidrome's file, made at the first
+  start: `sonus_server_schema (part, version)`, the version of each part of the Rust server's own schema (`connect`:
+  1), and `sonus_connect_session (user_id, session, lists, updated_at)`, one row per user. A changed session is
+  written within a second (700 ms after the change, several changes in one transaction) and when the server stops; a
+  position report rewrites the small part (`session`), not the queue's lists. After a restart the session is back
+  with no active device, paused at its position. A session nobody is connected to is only its row: it is read when
+  the user's first device connects. A row this server cannot read (not what it wrote) starts an empty session;
+  tables from a newer server (a higher version) stop the server at start, as a database of another schema does.
+- **Navidrome beside it**: the tables are additive (`CREATE TABLE IF NOT EXISTS`, never `ALTER`), in the `sonus_`
+  namespace Navidrome's migrations do not touch; the frozen Navidrome starts and runs on a database that has them
+  (`tools/contract/gateway.test.mjs` restarts it on one), and this server's start-up check accepts them.
+
+Where it knowingly differs from the reference (`connect-session.mjs`), none of it reached by the vectors:
+
+- a `hello` must come within 10 s, and a user has at most 8 connections that have not said hello (one more is closed
+  with 1013): the reference waits for a hello as long as the connection answers pings, without counting them;
+- `mode` with an arranged `order` (shuffling by album or folder) keeps at most the first 10,000 songs the library
+  has, the limit `connect.md` gives the context; the reference takes `order` whole there (`playContext` windows it);
+- a device's name is cut to 80 UTF-16 units as in the reference, but never through the middle of a character;
+- numbers shown inside an error's message (an unknown `mode` that is a number, say) are written as Rust writes them.
 
 ## The image
 
@@ -288,6 +343,18 @@ pushes linux/amd64 and linux/arm64, tagged `latest`, the Cargo version and `sha-
   authenticator codes against RFC 6238's vectors, the QR code, ids, the rate limiter's window arithmetic, JSON bodies
   decoded as Go decodes them;
 - `tests/gateway.rs` also: the 4 MiB limit on bodies to `/api` and `/jellyfin`;
+- `tests/connect_vectors.rs`: the protocol's shared vectors (`docs/protocol/connect-vectors.json`) replayed on the
+  session logic: 14 cases, 157 steps, each compared exactly;
+- `tests/connect.rs`: Sonus Connect version 2 over its real WebSocket through the gateway, with a fake Navidrome that
+  must never be asked: two devices on one session, a remote's commands, a transfer, volume; what a user may see (no
+  library granted, an admin) and that nothing reaches another user's session; every way to sign in and every
+  refusal, the limiter shared with plain Subsonic requests, a client's own user headers ignored; without
+  `protocol=2` on to Navidrome; the extensions answer; hello first and in time; the 1 MiB limit; a second connection
+  of the same device (4000); the 33rd device (4001) and the 8 waiting connections; pings and the silence timeout
+  (with short times); the grace period, a resume taken and one refused, a goodbye; the session written within a
+  second, the small part alone for a position, at shutdown, back after a restart, gone with its user; rows this
+  server did not write; tables from a newer server;
+- unit tests of the extension merge (JSON, JSONP, XML, lists it must leave alone) and of the stored session's parts;
 - `tests/supervisor.rs`: the real binary running a fake Navidrome (the test binary itself, started again, which makes
   its database first): the settings it gets (from a `navidrome.toml`), the random user header, exit codes passed on, a
   refused setting stopping it, a sign-in checked and passed on under that header, a database of another schema
@@ -300,7 +367,7 @@ node tools/fixtures/build.mjs                         # once: the test library a
 node tools/contract/run.mjs --through-gateway         # the contract suite through this server
 node tools/contract/diff.mjs --go-vs-gateway          # the same requests to Navidrome alone and to this server
 node tools/contract/diff.mjs --go-vs-gateway --corpus tools/contract/corpus/writes.json
-node --test tools/contract/gateway.test.mjs           # the limiter, and what Navidrome never sees
+node --test tools/contract/gateway.test.mjs           # the limiter, what Navidrome never sees, Connect across a restart
 node --test tools/contract/auth-routes.test.mjs       # /auth on a new server, optional and off, rate limit, body limits
 node tools/contract/web-ui.check.mjs                  # the old web UI, headless (Playwright), through this server
 ```
@@ -309,6 +376,48 @@ These start this server as its image runs it: `cargo run`, which starts Navidrom
 database.
 
 ## Checked against the real Navidrome
+
+### Sonus Connect version 2 (phase 1), 2026-11-24
+
+On Windows on ARM (the fork's x64 binary, 0.64.2-sonus.10), this server started as its image starts it:
+
+- `node tools/contract/run.mjs --through-gateway`: 129 of 129, the 8 of `test/connect2.test.mjs` among them: the
+  extension's versions; hello and welcome; a context played with ids from the library, the song filled in (`now`,
+  `durationMs`, a `coverArt` that `getCoverArt` shows), the queue, a `loaded` report; a remote's seek, next, add and
+  pause; reports only from the active device and only about the current song; a transfer; volume; refusals (`invalid`,
+  `stale`, `offline`, `notActive`); hello first; a wrong password and no credentials; a second connection of the same
+  device (4000); version 1 beside version 2, neither seeing the other's devices; a lost connection back within the
+  grace period, the session stopping after the real 10 s, a resume, a goodbye stopping it at once; a second user's
+  own session. The same 8 pass against the demo server, the protocol's reference (`run.mjs --demo connect2`), and
+  are skipped for Navidrome alone, which lists version 1 only (`run.mjs`: 121 pass, 8 skipped).
+- `node tools/contract/diff.mjs --go-vs-gateway`: 169 of 169 the same, and 34 of 34 with `corpus/writes.json`. The one
+  answer that is meant to differ, `getOpenSubsonicExtensions` (`sonusConnect` `[1, 2]` here, `[1]` from Navidrome
+  alone), is not hidden: the runner applies that one change to Navidrome's answer (`EXPECTED.connectVersion2` in
+  `diff.mjs`) and then compares the whole list.
+- `node --test tools/contract/gateway.test.mjs`: 5 of 5. The new one: the extensions answer in JSON, JSONP and XML is
+  Navidrome's byte for byte but for the version; with two users' sessions changed, the server is killed 1.5 s later
+  (nothing can be written at its end): the rows are there; the Rust server and Navidrome start again on that data
+  folder, with the two extra tables in the database, without an error in either log, and Navidrome answers as
+  before; both sessions are back as their users', with no active device, paused at their position, the queue and
+  the hand-queued song as they were; the device that presses play continues it. (That a stopped server writes the
+  last change is checked in `tests/connect.rs`, and in this test on systems with signals: Windows can only kill.)
+- `node --test tools/contract/auth-routes.test.mjs`: 6 of 6, as before.
+
+- **The Windows client against this server**: `node tools/e2e/acceptance.mjs --arch=ARM64 --only=signin,connect` with
+  `SONUS_TEST_SERVER` pointing at this server in front of the frozen Navidrome (a library of 53 generated songs of
+  one to two minutes, throwaway users, through the tests' recording proxy): 20 of 20, one skipped. The app saw
+  version 2 in the extensions and used it. Two silent instances of the app on one account: both in the device list;
+  the first plays and the second shows the same song, "正在「第一台」上播放" and the position moving, silent; the
+  second's next, add to queue, pause and play steer the first; the device list's volume slider; "这台电脑" moves
+  playback at the same song and position and stops the first; the first, now a remote, pauses and plays the second;
+  the second pauses and closes: the session stays on the server ("上次在「第二台」播放"); the first presses play and
+  continues it. Skipped: the network loss of over 10 s with a resume, which needs the demo server's hook that cuts
+  one device's connection (that sequence is checked by `connect2.test.mjs` and `tests/connect.rs`).
+
+Not checked here: the Android client against this server; the Windows app's other acceptance rounds against it
+(they do not touch Connect); the 30 s ping and 75 s timeout at their real lengths (the tests shorten them; the grace
+period's 10 s is checked at its real length); a real proxy in front of the WebSocket; many users or devices at once;
+the image (CI builds it).
 
 ### The `/auth` routes (phase 2, part 2), 2026-11-24
 
@@ -416,14 +525,17 @@ binaries (no Linux here).
   the command line.
 - `src/trust.rs`: who the client is (Navidrome's rules, reproduced).
 - `src/gateway.rs`: the proxy, and where the parts answered here branch off.
-- `src/routes.rs`: which requests the gateway answers or checks itself. A new part of the server (Connect) is a
-  variant of `Local` there, its paths in `find`, an arm in `Gateway::handle`, and a module of its own.
+- `src/routes.rs`: which requests the gateway answers or checks itself. A new part of the server is a variant of
+  `Local` there, its paths in `find`, an arm in `Gateway::handle`, and a module of its own.
 - `src/subsonic/`: Subsonic sign-ins. `mod.rs`: what happens to a request; `credentials.rs`: whose the credentials
   are (the rule, and the queries); `limiter.rs`: failed attempts; `params.rs`: the query and the form, as Go reads
   them; `respond.rs`: the answers, as Navidrome writes them.
 - `src/auth/`: the `/auth` routes. `mod.rs`: the routes and who is signed in; `store.rs`: users, two-step
   verification, recovery codes and app passwords in the database; `totp.rs`: authenticator codes and the QR code;
   `device.rs`: the sign-ins waiting for approval; `ratelimit.rs`: the per-address limit.
+- `src/connect/`: Sonus Connect version 2. `session.rs`, `queue.rs`: the protocol's logic, pure; `mod.rs`: a room per
+  user, and the upgrade; `socket.rs`: one connection; `store.rs`: the session in the database, and the library as a
+  user sees it; `extensions.rs`: the merge into `getOpenSubsonicExtensions`.
 - `src/jwt.rs`: session tokens; `src/id.rs`: ids and the random strings people type.
 - `src/db.rs`: Navidrome's database; `src/gotime.rs`: its timestamps; `src/secrets.rs`: its encryption.
 - `src/startup.rs`: what must hold before anything is answered here.
@@ -433,6 +545,12 @@ binaries (no Linux here).
 - `examples/seal.rs`, `tests/golden/`: checking the encryption against Navidrome's own code.
 
 Code ported from Navidrome's (the sign-in rule, the limiter, the encryption) is a derived work of Navidrome
-(GPL-3.0) and says so in its header; GPL-3.0 and AGPL-3.0 combine (section 13 of both).
+(GPL-3.0) and says so in its header; GPL-3.0 and AGPL-3.0 combine (section 13 of both). Sonus Connect is Sonus's own:
+written from its protocol and its reference implementation in this repository.
+
+The WebSocket's framing is `tokio-tungstenite` (tungstenite): the WebSocket library most Rust servers stand on (axum
+and warp among them), maintained, and usable on the connection hyper hands over after an upgrade without a framework
+around it. It is built without its handshake, client and TLS features: the gateway answers the upgrade itself (it has
+SHA-1 and base64 already), so the dependency adds framing, masking, UTF-8 and size checks and nothing else.
 
 `rustfmt.toml` keeps the width the code is written to (160).

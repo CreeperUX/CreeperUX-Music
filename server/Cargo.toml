@@ -13,6 +13,7 @@ aes-gcm = "0.11.1"
 base64 = "0.23.1"
 bytes = "1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 getrandom = "0.4.3"
 hmac = "0.13.0"
 http-body-util = "0.1"
@@ -27,10 +28,15 @@ serde_json = "1.0.154"
 sha1 = "0.11.0"
 sha2 = "0.11.0"
 subtle = "2.6.1"
+tokio-tungstenite = { version = "0.30", default-features = false }
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+# the tests' WebSocket client (the server itself needs neither the client nor the handshake)
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

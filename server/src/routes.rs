@@ -18,6 +18,16 @@ pub enum Local {
     /// Everything under `/auth` (auth/mod.rs): the web sign-in, two-step verification, app passwords, the browser
     /// sign-in for apps. Answered here whole, unknown paths included; the path after `/auth`.
     Auth(String),
+    /// `getOpenSubsonicExtensions`: Navidrome answers it, and the gateway adds what this server speaks itself to the
+    /// list (connect/extensions.rs).
+    Extensions,
+}
+
+/// Whether a request to the Subsonic method `connect` is Sonus Connect version 2's (`protocol=2` in the query),
+/// which is answered here whole (connect/mod.rs). Without it the WebSocket is version 1's: checked here and passed
+/// to Navidrome, as any Subsonic method.
+pub fn is_connect_v2(local: &Local, query: Option<&str>) -> bool {
+    *local == Local::Subsonic("connect") && crate::connect::asks_for_v2(query)
 }
 
 /// What the gateway does itself with a request, None for what is Navidrome's alone. `base_path` is `BaseURL`'s path
@@ -30,6 +40,9 @@ pub fn find(method: &Method, path: &str, headers: &HeaderMap, base_path: &str) -
         // any sign-in (its CORS middleware), and carries none.
         if method == Method::OPTIONS && headers.contains_key(header::ACCESS_CONTROL_REQUEST_METHOD) {
             return None;
+        }
+        if name == "getOpenSubsonicExtensions" || name == "getOpenSubsonicExtensions.view" {
+            return Some(Local::Extensions);
         }
         return subsonic::protected_method(name).map(Local::Subsonic);
     }
@@ -80,8 +93,31 @@ mod tests {
     }
 
     #[test]
+    fn the_extensions_answer_is_navidromes_with_this_servers_added() {
+        assert_eq!(get("/rest/getOpenSubsonicExtensions", ""), Some(Local::Extensions));
+        assert_eq!(get("/rest/getOpenSubsonicExtensions.view", ""), Some(Local::Extensions));
+        assert_eq!(get("/music/rest/getOpenSubsonicExtensions", "/music"), Some(Local::Extensions));
+        let mut preflight = HeaderMap::new();
+        preflight.insert(header::ACCESS_CONTROL_REQUEST_METHOD, "GET".parse().unwrap());
+        assert_eq!(find(&Method::OPTIONS, "/rest/getOpenSubsonicExtensions", &preflight, ""), None);
+    }
+
+    #[test]
+    fn connect_is_version_2_only_when_the_query_asks_for_it() {
+        let connect = get("/rest/connect.view", "").unwrap();
+        assert!(is_connect_v2(&connect, Some("u=a&protocol=2&c=x")));
+        assert!(is_connect_v2(&connect, Some("protocol=2&protocol=1")), "the first value, as the reference reads it");
+        assert!(!is_connect_v2(&connect, Some("u=a&c=x")));
+        assert!(!is_connect_v2(&connect, None));
+        assert!(!is_connect_v2(&connect, Some("protocol=1&protocol=2")));
+        assert!(!is_connect_v2(&connect, Some("protocol=02")));
+        assert!(!is_connect_v2(&connect, Some("protocol=2;x")), "a query Go refuses is Navidrome's to answer");
+        assert!(!is_connect_v2(&get("/rest/ping", "").unwrap(), Some("protocol=2")));
+    }
+
+    #[test]
     fn everything_else_is_navidromes() {
-        assert_eq!(get("/rest/getOpenSubsonicExtensions", ""), None, "no sign-in needed");
+        assert_eq!(get("/rest/getOpenSubsonicExtensionsX", ""), None);
         assert_eq!(get("/rest/nothing", ""), None);
         assert_eq!(get("/rest/ping/", ""), None);
         assert_eq!(get("/rest/Ping", ""), None);

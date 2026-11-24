@@ -15,7 +15,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::header::{self, HeaderMap, HeaderName, HeaderValue};
 use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode, Uri, Version};
+use hyper::{Method, Request, Response, StatusCode, Uri, Version};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
@@ -32,8 +32,24 @@ pub struct Settings {
     /// Navidrome's address: `http://127.0.0.1:4534`.
     pub upstream: Uri,
     pub trusted: TrustList,
-    pub user_header: HeaderName,
+    /// The header trusted proxies name the signed-in user with (`Remote-User`); None: no user header is believed.
+    pub user_header: Option<HeaderName>,
+    /// The header Navidrome takes the user from (see `Config::upstream_user_header`): set by the gateway alone.
+    pub upstream_user_header: HeaderName,
 }
+
+/// Headers the gateway sets or removes itself, whatever the client sent: none of them can be the user header.
+pub fn is_managed_header(name: &HeaderName) -> bool {
+    let name = name.as_str();
+    FORWARDING.contains(&name) || HOP_BY_HOP.contains(&name) || name == "host" || name == "expect"
+}
+
+/// Who the client is: decided here (trust.rs), so a client's own claims never reach Navidrome.
+const FORWARDING: [&str; 3] = ["true-client-ip", "x-real-ip", "x-forwarded-for"];
+
+/// The headers that belong to one connection, not to the request (RFC 9110 7.6.1), with the two older ones.
+const HOP_BY_HOP: [&str; 9] =
+    ["connection", "te", "trailer", "transfer-encoding", "upgrade", "proxy-authorization", "proxy-authenticate", "keep-alive", "proxy-connection"];
 
 /// Cheap to clone: one per connection.
 #[derive(Clone)]
@@ -53,10 +69,7 @@ impl Gateway {
         let mut connector = HttpConnector::new();
         connector.set_nodelay(true);
         connector.set_connect_timeout(Some(Duration::from_secs(5)));
-        let client = Client::builder(TokioExecutor::new())
-            .pool_idle_timeout(Duration::from_secs(30))
-            .pool_timer(TokioTimer::new())
-            .build(connector);
+        let client = Client::builder(TokioExecutor::new()).pool_idle_timeout(Duration::from_secs(30)).pool_timer(TokioTimer::new()).build(connector);
         Gateway { inner: Arc::new(Inner { settings, client, ready }) }
     }
 
@@ -66,6 +79,10 @@ impl Gateway {
         let method = req.method().clone();
         // the path only: queries carry Subsonic credentials (p, t, s, apiKey)
         let path = req.uri().path().to_string();
+        if method == Method::CONNECT {
+            // not a proxy for anywhere else
+            return text(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed");
+        }
 
         let upgrade = upgrade_protocol(req.headers());
         let client_upgrade = upgrade.as_ref().map(|_| hyper::upgrade::on(&mut req));
@@ -92,15 +109,24 @@ impl Gateway {
         strip_hop_by_hop(&mut headers);
         headers.remove(header::EXPECT); // answered here already
         let client = client_ip(peer, &headers, &settings.trusted);
-        for name in ["true-client-ip", "x-real-ip", "x-forwarded-for"] {
+        for name in FORWARDING {
             headers.remove(name);
         }
         let client_value = HeaderValue::from_str(&client.to_string()).expect("an address is a header value");
         headers.insert("x-real-ip", client_value.clone());
         headers.insert("x-forwarded-for", client_value);
-        if !settings.trusted.contains(peer) {
-            // anyone could claim to be signed in by a proxy: only the trusted proxies' claim reaches Navidrome
-            headers.remove(&settings.user_header);
+        // Anyone could claim to be signed in by a proxy: only a trusted proxy's claim reaches Navidrome, under the
+        // name Navidrome reads, which nobody else can set. Navidrome reads the first value, as here.
+        let user = match &settings.user_header {
+            Some(name) if settings.trusted.contains(peer) => headers.get(name).cloned(),
+            _ => None,
+        };
+        if let Some(name) = &settings.user_header {
+            headers.remove(name);
+        }
+        headers.remove(&settings.upstream_user_header);
+        if let Some(user) = user {
+            headers.insert(settings.upstream_user_header.clone(), user);
         }
         if let Some(protocol) = &upgrade {
             headers.insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
@@ -217,15 +243,14 @@ fn strip_hop_by_hop(headers: &mut HeaderMap) {
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(','))
         .filter_map(|token| HeaderName::try_from(token.trim()).ok())
+        .filter(|name| name != header::HOST)
         .collect();
     for name in named {
         headers.remove(name);
     }
-    for name in [header::CONNECTION, header::TE, header::TRAILER, header::TRANSFER_ENCODING, header::UPGRADE, header::PROXY_AUTHORIZATION, header::PROXY_AUTHENTICATE] {
+    for name in HOP_BY_HOP {
         headers.remove(name);
     }
-    headers.remove("keep-alive");
-    headers.remove("proxy-connection");
 }
 
 fn text(status: StatusCode, message: &'static str) -> Response<Body> {

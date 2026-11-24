@@ -1,6 +1,7 @@
 //! Runs Navidrome behind the gateway: on a local port, trusting the gateway alone, with the container's environment
-//! otherwise as it was. Its output goes where the gateway's goes (the container's log). When it stops, the gateway
-//! stops too, so the container restarts as it did when Navidrome was the container.
+//! otherwise as it was (the gateway's decisions on top, see `NavidromeProcess::env`). Its output goes where the
+//! gateway's goes (the container's log). When it stops, the gateway stops too, so the container restarts as it did
+//! when Navidrome was the container.
 
 use std::io;
 use std::process::{ExitStatus, Stdio};
@@ -17,17 +18,14 @@ pub struct Navidrome {
 impl Navidrome {
     pub fn start(p: &NavidromeProcess) -> io::Result<Navidrome> {
         let mut cmd = Command::new(&p.bin);
-        cmd.args(&p.args)
-            .env("ND_ADDRESS", "127.0.0.1")
-            .env("ND_PORT", p.port.to_string())
-            // Only the gateway reaches it, and the gateway has already decided who the client is (trust.rs): its
-            // X-Real-IP is the client's address, and a user header it passes on came from a trusted proxy.
-            .env("ND_EXTAUTH_TRUSTEDSOURCES", "127.0.0.1/32")
-            .env_remove("ND_REVERSEPROXYWHITELIST")
-            .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true);
+        cmd.args(&p.args);
+        for name in &p.env_remove {
+            cmd.env_remove(name);
+        }
+        for (name, value) in &p.env {
+            cmd.env(name, value);
+        }
+        cmd.stdin(Stdio::null()).stdout(Stdio::inherit()).stderr(Stdio::inherit()).kill_on_drop(true);
         let child = cmd.spawn().map_err(|e| io::Error::new(e.kind(), format!("cannot start Navidrome ({}): {e}", p.bin.display())))?;
         Ok(Navidrome { child })
     }
@@ -53,4 +51,21 @@ impl Navidrome {
             let _ = self.child.kill().await;
         }
     }
+}
+
+/// The gateway's exit code when Navidrome stopped on its own: Navidrome's, so the container's log and restart policy
+/// see what they saw before; 128 + the signal when a signal ended it (as a shell reports it); and 1 for a clean exit,
+/// since the server stopping by itself is a failure (a restart policy of `on-failure` restarts it).
+pub fn exit_code(status: ExitStatus) -> u8 {
+    if let Some(code) = status.code() {
+        return u8::try_from(code).ok().filter(|c| *c != 0).unwrap_or(1);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return u8::try_from(128 + signal).unwrap_or(1);
+        }
+    }
+    1
 }

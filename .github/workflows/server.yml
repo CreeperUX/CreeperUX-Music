@@ -1,0 +1,104 @@
+# The Sonus server (server/): its checks on every change, and its Docker image, ghcr.io/creeperux/sonus-server: the
+# frozen Navidrome image (ghcr.io/creeperux/navidrome) with the Rust gateway in front, for linux/amd64 and linux/arm64.
+# Tags: latest, the Cargo version (0.1.0) and sha-<commit>. Every Monday the image is built again an hour after the
+# Navidrome image's own weekly rebuild (01:30 UTC), so it carries that image's fresh Alpine packages; Unraid's daily
+# update then picks it up.
+name: "Server"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "server/**"
+      - ".github/workflows/server.yml"
+  pull_request:
+    paths:
+      - "server/**"
+      - ".github/workflows/server.yml"
+  schedule:
+    - cron: "30 2 * * 1" # Mondays 02:30 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Format, lint, test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustc --version
+
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+
+  image:
+    name: Image
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: server-image
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Version
+        id: version
+        run: |
+          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/sonus-server" >> "$GITHUB_OUTPUT"
+          echo "version=$(cargo metadata --manifest-path server/Cargo.toml --no-deps --format-version 1 | jq -r '.packages[0].version')" >> "$GITHUB_OUTPUT"
+
+      # no QEMU: the Rust stage cross-compiles on the runner, and the final stage only copies a file
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v6
+        id: meta
+        with:
+          images: ${{ steps.version.outputs.image }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest
+            type=sha,prefix=sha-
+          labels: |
+            org.opencontainers.image.source=https://github.com/CreeperUX/Sonus
+            org.opencontainers.image.licenses=AGPL-3.0-only
+            org.opencontainers.image.title=Sonus server
+            org.opencontainers.image.description=The Sonus music server: a Rust gateway in front of Navidrome (frozen at 0.64.2), taking its parts over one by one
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: server
+          file: server/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          pull: true # the newest Navidrome image and Rust
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SONUS_GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Inspect
+        run: docker buildx imagetools inspect "${{ steps.version.outputs.image }}:${{ steps.version.outputs.version }}"

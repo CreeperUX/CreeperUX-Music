@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,9 +15,13 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // SONUS_LOG=debug: one line per request; the HTTP library's own debug lines (its connection pool) only when named
+    let filter = std::env::var("SONUS_LOG").ok().filter(|f| !f.trim().is_empty()).unwrap_or_else(|| "info".into());
+    let filter = if filter.contains("hyper") { filter } else { format!("{filter},hyper=info,hyper_util=info") };
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_env("SONUS_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(EnvFilter::try_new(&filter).unwrap_or_else(|_| EnvFilter::new("info")))
         .with_target(false)
+        .with_ansi(std::io::stdout().is_terminal())
         .init();
 
     let config = match Config::from_env() {
@@ -27,8 +32,12 @@ async fn main() -> ExitCode {
         }
     };
     info!(version = %sonus_server::version(), listen = %config.listen, navidrome = %config.upstream, "Sonus server starting");
+    if let Some(file) = &config.config_file {
+        info!(file = %file.display(), "read Navidrome's config file");
+    }
     if !config.trusted.is_empty() {
-        info!(user_header = %config.user_header, "forwarding headers believed from ND_EXTAUTH_TRUSTEDSOURCES");
+        let user_header = config.user_header.as_ref().map(|h| h.as_str()).unwrap_or("none");
+        info!(user_header, "forwarding headers believed from ExtAuth.TrustedSources");
     }
 
     // the port first: when it is taken, Navidrome is not started for nothing
@@ -55,7 +64,9 @@ async fn main() -> ExitCode {
         tokio::spawn(watch_until_ready(config.upstream.clone(), ready.clone()));
     }
 
-    let gateway = Gateway::new(Settings { upstream: config.upstream, trusted: config.trusted, user_header: config.user_header }, ready);
+    let settings =
+        Settings { upstream: config.upstream, trusted: config.trusted, user_header: config.user_header, upstream_user_header: config.upstream_user_header };
+    let gateway = Gateway::new(settings, ready);
     let (stop_tx, mut stop_rx) = watch::channel(false);
     let server = tokio::spawn(gateway::serve(listener, gateway, async move {
         let _ = stop_rx.wait_for(|stop| *stop).await;
@@ -73,7 +84,7 @@ async fn main() -> ExitCode {
             match status {
                 Ok(status) => {
                     error!(%status, "Navidrome stopped: stopping too");
-                    ExitCode::from(status.code().and_then(|c| u8::try_from(c).ok()).filter(|c| *c != 0).unwrap_or(1))
+                    ExitCode::from(sonus_server::supervisor::exit_code(status))
                 }
                 Err(e) => {
                     error!("lost Navidrome: {e}");

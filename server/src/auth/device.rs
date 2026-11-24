@@ -4,8 +4,9 @@
 //! it. The app, polling meanwhile with its device code, then gets an API key: an app password made for it. The app
 //! never sees the account password.
 //!
-//! Sign-ins that wait are kept here, in memory: a restart only means asking again. At most 200 wait at a time, each
-//! for ten minutes.
+//! Sign-ins that wait are kept here, in memory: a restart only means asking again. Each waits ten minutes. Asking
+//! needs no credentials, so nobody may take all the places: an address has five, and when all 2000 are taken the
+//! oldest that nobody approved gives way to the newest.
 //!
 //! Ported from the CreeperUX fork of Navidrome (GPL-3.0).
 
@@ -18,7 +19,9 @@ use crate::id;
 pub const LIFETIME: Duration = Duration::from_secs(600);
 /// Seconds between an app's polls.
 pub const INTERVAL: u64 = 2;
-const MAX_WAITING: usize = 200;
+const MAX_WAITING: usize = 2000;
+/// Of one address (`subsonic::limiter_address`: an IPv6 /64 is one).
+const MAX_WAITING_PER_ADDRESS: usize = 5;
 
 #[derive(Debug, Clone, PartialEq)]
 enum State {
@@ -32,6 +35,10 @@ struct Login {
     user_code: String,
     client: String,
     device: String,
+    /// Who asked.
+    address: String,
+    /// Counts up with every sign-in asked for: which is older, when the clock cannot tell.
+    order: u64,
     created: Instant,
     state: State,
 }
@@ -40,6 +47,7 @@ struct Login {
 pub struct DeviceLogins {
     /// By device code.
     waiting: Mutex<HashMap<String, Login>>,
+    asked: std::sync::atomic::AtomicU64,
 }
 
 /// What an app gets when it asks to sign in.
@@ -99,11 +107,22 @@ impl DeviceLogins {
     }
 
     /// An app asks to sign in, naming itself and its device.
-    pub fn start(&self, client: &str, device: &str) -> Result<Started, StartError> {
+    pub fn start(&self, client: &str, device: &str, address: &str) -> Result<Started, StartError> {
         let device_code = id::random_hex(32).map_err(|_| StartError::Random)?;
         let mut waiting = self.lock();
-        if waiting.len() >= MAX_WAITING {
-            return Err(StartError::TooMany);
+        // the address's own oldest give way first, then everyone's oldest: never one already approved, which an app
+        // is about to collect
+        let oldest_pending = |waiting: &HashMap<String, Login>, of: Option<&str>| {
+            let pending = waiting.iter().filter(|(_, login)| login.state == State::Pending && of.is_none_or(|address| login.address == address));
+            pending.min_by_key(|(_, login)| login.order).map(|(code, _)| code.clone())
+        };
+        while waiting.values().filter(|login| login.address == address).count() >= MAX_WAITING_PER_ADDRESS {
+            let Some(code) = oldest_pending(&waiting, Some(address)) else { return Err(StartError::TooMany) };
+            waiting.remove(&code);
+        }
+        while waiting.len() >= MAX_WAITING {
+            let Some(code) = oldest_pending(&waiting, None) else { return Err(StartError::TooMany) };
+            waiting.remove(&code);
         }
         let user_code = loop {
             let code = id::user_code().map_err(|_| StartError::Random)?;
@@ -115,7 +134,15 @@ impl DeviceLogins {
             empty if empty.is_empty() => "App".to_string(),
             client => client,
         };
-        let login = Login { user_code: user_code.clone(), client, device: clip(device, 64), created: Instant::now(), state: State::Pending };
+        let login = Login {
+            user_code: user_code.clone(),
+            client,
+            device: clip(device, 64),
+            address: address.to_string(),
+            order: self.asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            created: Instant::now(),
+            state: State::Pending,
+        };
         waiting.insert(device_code.clone(), login);
         Ok(Started { device_code, user_code })
     }
@@ -195,7 +222,7 @@ mod tests {
     #[test]
     fn the_app_gets_its_key_once_its_user_allows_it_only_once() {
         let logins = DeviceLogins::default();
-        let s = logins.start(" Sonus ", "书房电脑").unwrap();
+        let s = logins.start(" Sonus ", "书房电脑", "203.0.113.1").unwrap();
         assert_eq!(s.device_code.len(), 64);
         assert_eq!(logins.poll(&s.device_code), Poll::Pending);
         let info = logins.info(&s.user_code.to_lowercase()).unwrap();
@@ -210,7 +237,7 @@ mod tests {
     #[test]
     fn a_refusal_reaches_the_app_and_cannot_be_turned_into_an_approval() {
         let logins = DeviceLogins::default();
-        let s = logins.start("Sonus", "").unwrap();
+        let s = logins.start("Sonus", "", "203.0.113.1").unwrap();
         assert!(logins.deny(&s.user_code.replace('-', "")), "the code without its dash");
         assert_eq!(logins.approve(&s.user_code, "alice", key), None);
         assert!(!logins.deny(&s.user_code));
@@ -221,7 +248,7 @@ mod tests {
     #[test]
     fn a_key_that_cannot_be_made_leaves_the_sign_in_waiting() {
         let logins = DeviceLogins::default();
-        let s = logins.start("", "").unwrap();
+        let s = logins.start("", "", "203.0.113.1").unwrap();
         assert_eq!(logins.approve(&s.user_code, "alice", |name| Err::<String, _>(name.to_string())), Some(Err("App".to_string())), "no name: App");
         assert_eq!(logins.poll(&s.device_code), Poll::Pending);
         assert_eq!(logins.approve(&s.user_code, "alice", key), Some(Ok(())));
@@ -230,7 +257,7 @@ mod tests {
     #[test]
     fn sign_ins_are_forgotten_after_ten_minutes() {
         let logins = DeviceLogins::default();
-        let s = logins.start("Sonus", "PC").unwrap();
+        let s = logins.start("Sonus", "PC", "203.0.113.1").unwrap();
         logins.age(&s.device_code, Duration::from_secs(601));
         assert_eq!(logins.poll(&s.device_code), Poll::Expired);
         assert_eq!(logins.info(&s.user_code), None);
@@ -238,15 +265,31 @@ mod tests {
     }
 
     #[test]
-    fn at_most_two_hundred_wait_and_names_are_cut() {
+    fn an_address_has_five_places_and_its_oldest_gives_way() {
+        let logins = DeviceLogins::default();
+        let own: Vec<Started> = (0..5).map(|_| logins.start("Sonus", "PC", "203.0.113.1").unwrap()).collect();
+        let other = logins.start("Sonus", "PC", "203.0.113.2").unwrap();
+        let sixth = logins.start("Sonus", "PC", "203.0.113.1").unwrap();
+        assert_eq!(logins.poll(&own[0].device_code), Poll::Expired, "the address's oldest made room");
+        assert_eq!(logins.poll(&own[1].device_code), Poll::Pending);
+        assert_eq!(logins.poll(&sixth.device_code), Poll::Pending);
+        assert_eq!(logins.poll(&other.device_code), Poll::Pending, "another address's is not touched");
+    }
+
+    #[test]
+    fn when_every_place_is_taken_the_oldest_gives_way_and_names_are_cut() {
         let logins = DeviceLogins::default();
         let mut codes = std::collections::HashSet::new();
-        for _ in 0..200 {
-            assert!(codes.insert(logins.start("Sonus", "PC").unwrap().user_code), "no user code twice");
+        let first = logins.start("Sonus", "PC", "a0").unwrap();
+        for i in 1..MAX_WAITING {
+            assert!(codes.insert(logins.start("Sonus", "PC", &format!("a{}", i / MAX_WAITING_PER_ADDRESS)).unwrap().user_code), "no user code twice");
         }
-        assert_eq!(logins.start("Sonus", "PC"), Err(StartError::TooMany));
+        assert_eq!(logins.poll(&first.device_code), Poll::Pending);
+        let newest = logins.start("Sonus", "PC", "another").unwrap();
+        assert_eq!(logins.poll(&first.device_code), Poll::Expired);
+        assert_eq!(logins.poll(&newest.device_code), Poll::Pending, "a new sign-in always gets a place");
         let logins = DeviceLogins::default();
-        let s = logins.start(&"c".repeat(100), &"设".repeat(100)).unwrap();
+        let s = logins.start(&"c".repeat(100), &"设".repeat(100), "203.0.113.1").unwrap();
         let info = logins.info(&s.user_code).unwrap();
         assert_eq!((info.client.chars().count(), info.device.chars().count()), (40, 64));
     }

@@ -37,6 +37,9 @@ use crate::secrets::Keys;
 pub use credentials::SignedIn;
 use limiter::Limiter;
 use params::{CREDENTIALS, MAX_FORM_BYTES, Params};
+
+/// How long a form post's body may take to arrive.
+const FORM_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
 use respond::{Envelope, Format, Payload};
 
 /// The methods Navidrome's router has behind its sign-in (`server/subsonic/api.go`, the "Protected" group), each also
@@ -230,7 +233,13 @@ impl Subsonic {
                 if declared.is_some_and(|length| length > MAX_FORM_BYTES as u64) {
                     return Outcome::Untouched(stream(body)); // Navidrome refuses it, unread
                 }
-                let bytes = match Limited::new(body, MAX_FORM_BYTES).collect().await {
+                // Read before anyone is signed in, so not waited for long: a client that sends most of a form and
+                // stops would hold what it sent for as long as it kept the connection.
+                let Ok(read) = tokio::time::timeout(FORM_WITHIN, Limited::new(body, MAX_FORM_BYTES).collect()).await else {
+                    let format = Format::of(from_query.get("f"), from_query.get("callback"));
+                    return self.error(&format, headers, respond::GENERIC, "i/o timeout");
+                };
+                let bytes = match read {
                     Ok(read) => read.to_bytes(),
                     Err(e) => {
                         // sent without a length and too long (Navidrome's answer, in the format the query asks for),

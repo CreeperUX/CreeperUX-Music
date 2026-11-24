@@ -419,7 +419,7 @@ async fn a_trusted_proxy_is_believed() {
     let req = Request::get("/app/").header(header::HOST, "h").header("x-real-ip", "203.0.113.5").header("true-client-ip", "203.0.113.6").body(empty()).unwrap();
     assert_eq!(send(gw, req).await.status(), StatusCode::OK);
     let seen = within("the request upstream", requests.recv()).await.unwrap();
-    assert_eq!(values(&seen.headers, "x-real-ip"), ["203.0.113.6"], "True-Client-IP first, as Navidrome");
+    assert_eq!(values(&seen.headers, "x-real-ip"), ["127.0.0.1"], "only X-Forwarded-For is believed: these two a proxy passes on from the client");
     assert!(!seen.headers.contains_key("true-client-ip"));
     assert!(!seen.headers.contains_key("x-navidrome-user"), "no user from the proxy: none at all");
 }

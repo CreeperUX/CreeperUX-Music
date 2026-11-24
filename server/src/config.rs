@@ -32,8 +32,8 @@ pub struct Config {
     pub navidrome: Option<NavidromeProcess>,
     /// The proxies in front of the gateway whose forwarding headers are believed (see `trust`).
     pub trusted: TrustList,
-    /// Navidrome's external-auth user header (`Remote-User`), believed from trusted proxies only. None when the setting
-    /// is empty: no user header is believed.
+    /// Navidrome's external-auth user header, believed from trusted proxies only. None unless the setting names one:
+    /// no user header is believed.
     pub user_header: Option<HeaderName>,
     /// The header Navidrome takes the signed-in user from. The gateway alone sets it, from `user_header` of a trusted
     /// proxy, and removes it from every other request. When no proxy is trusted it is a random name, so nothing that
@@ -204,9 +204,13 @@ impl Config {
 
         // not trimmed: Navidrome checks the peer against the entries as they are written (trust.rs)
         let trusted = TrustList::parse(&nd.get_renamed("extauth.trustedsources", "reverseproxywhitelist")?.unwrap_or_default());
-        let user_header = nd.get_renamed("extauth.userheader", "reverseproxyuserheader")?.unwrap_or_else(|| "Remote-User".into());
+        // Unlike Navidrome, no default: naming the proxy (so that clients have their own addresses) must not also
+        // let a header sign users in, which a proxy passes on from the client unless it was told not to. An empty
+        // environment value reads as not set, so "none" says it there.
+        let user_header = nd.get_renamed("extauth.userheader", "reverseproxyuserheader")?.unwrap_or_default();
         let user_header = match user_header.trim() {
             "" => None,
+            none if none.eq_ignore_ascii_case("none") => None,
             name => Some(HeaderName::try_from(name).map_err(|_| format!("ExtAuth.UserHeader={name} is not a header name"))?),
         };
         if let Some(name) = &user_header {
@@ -495,7 +499,7 @@ mod tests {
         assert_eq!(c.listen, "0.0.0.0:4533".parse().unwrap());
         assert_eq!(c.upstream, "http://127.0.0.1:4534");
         assert!(c.trusted.is_empty());
-        assert_eq!(c.user_header, Some(HeaderName::from_static("remote-user")));
+        assert_eq!(c.user_header, None, "no header signs anyone in unless one is named");
         assert_eq!(c.base_path, "");
         assert_eq!(c.config_file, None);
         let nd = c.navidrome.as_ref().unwrap();
@@ -516,12 +520,22 @@ mod tests {
         assert_eq!(a.upstream_user_header.as_str().len(), "x-sonus-user-".len() + 32);
         assert_ne!(a.upstream_user_header, b.upstream_user_header);
         assert_eq!(env(&a)["ND_EXTAUTH_USERHEADER"], a.upstream_user_header.as_str());
-        let trusted = load(&[("ND_EXTAUTH_TRUSTEDSOURCES", "10.0.0.0/8")], &[], None).unwrap();
+        let trusted = load(&[("ND_EXTAUTH_TRUSTEDSOURCES", "10.0.0.0/8"), ("ND_EXTAUTH_USERHEADER", "Remote-User")], &[], None).unwrap();
         assert_eq!(trusted.upstream_user_header, "remote-user");
         assert_eq!(env(&trusted)["ND_EXTAUTH_USERHEADER"], "remote-user");
-        let off = load(&[("ND_EXTAUTH_TRUSTEDSOURCES", "10.0.0.0/8")], &[], Some("[ExtAuth]\nUserHeader = ''")).unwrap();
-        assert_eq!(off.user_header, None, "an empty header name turns it off");
-        assert!(off.upstream_user_header.as_str().starts_with("x-sonus-user-"));
+        // naming the proxy alone signs nobody in by a header: Navidrome is told a name nobody can guess
+        for (variables, file) in [
+            (vec![], None),
+            (vec![("ND_EXTAUTH_USERHEADER", "")], None),
+            (vec![("ND_EXTAUTH_USERHEADER", "None")], None),
+            (vec![], Some("[ExtAuth]\nUserHeader = ''")),
+        ] {
+            let mut all = vec![("ND_EXTAUTH_TRUSTEDSOURCES", "10.0.0.0/8")];
+            all.extend(variables);
+            let off = load(&all, &[], file).unwrap();
+            assert_eq!(off.user_header, None, "{all:?} {file:?}");
+            assert!(off.upstream_user_header.as_str().starts_with("x-sonus-user-"), "{all:?} {file:?}");
+        }
     }
 
     #[test]

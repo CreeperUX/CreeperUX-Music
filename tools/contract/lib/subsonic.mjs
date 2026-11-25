@@ -1,5 +1,14 @@
 // A small Subsonic client for the contract suite, the golden-database builder and the diff runner: JSON only, every
 // way of signing in Sonus clients use, GET or form POST.
+/**
+ * What a manifest user's API calls are signed with when a test just needs that user signed in. A user without
+ * two-step verification (the fixtures' listener) signs with its app password: where two-step verification is
+ * required, the Rust server takes no account password on the API, set up or not (the frozen Navidrome took the
+ * listener's). A user with two-step verification keeps its account password here, which both servers refuse: the
+ * tests that mean such a user's app password or key name it.
+ */
+export const apiSecret = u => (u.totpSecret ? u.password : u.appPassword ?? u.password);
+
 import { createHash, randomBytes } from 'node:crypto';
 
 export const API_VERSION = '1.16.1';

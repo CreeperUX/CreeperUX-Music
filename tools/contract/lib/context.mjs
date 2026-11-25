@@ -2,7 +2,7 @@
 // golden database, the ids of the fixture entities by key), clients signed in as its users, and the library as the
 // server lists it. run.mjs sets both variables.
 import { readFileSync } from 'node:fs';
-import { Subsonic } from './subsonic.mjs';
+import { Subsonic, apiSecret } from './subsonic.mjs';
 import { signIn, webJson, withCode } from './web.mjs';
 
 const base = process.env.CONTRACT_BASE_URL;
@@ -16,14 +16,16 @@ export const CLIENT = 'sonus-contract';
 const primary = manifest.users[manifest.primaryUser];
 /** The primary user (signs in with a token), as Sonus clients sign in. */
 export const me = primary;
-export const api = new Subsonic(BASE, { u: primary.username, password: primary.password }, { client: CLIENT });
+/** What the primary user signs the API with (`apiSecret`): its app password where the fixtures gave it one. */
+export const secret = apiSecret(primary);
+export const api = new Subsonic(BASE, { u: primary.username, password: secret }, { client: CLIENT });
 /** No sign-in at all. */
 export const anon = new Subsonic(BASE, {}, { client: CLIENT });
 
 /** A client signed in as a manifest user ('listener', 'secure', …), with a password, token or app password. */
 export function as(userKey, { as: how = 'token', password, client = CLIENT } = {}) {
   const u = manifest.users[userKey];
-  return new Subsonic(BASE, { u: u.username, password: password ?? u.password, as: how }, { client });
+  return new Subsonic(BASE, { u: u.username, password: password ?? apiSecret(u), as: how }, { client });
 }
 
 /** The id the manifest gives a key ('track.cjk', 'album.compilation', …), or undefined. */

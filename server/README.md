@@ -61,7 +61,7 @@ The gateway reads Navidrome's settings as Navidrome reads them, so a container k
 | `PasswordEncryptionKey` (`ND_PASSWORDENCRYPTIONKEY`) | Navidrome's built-in key | what stored passwords and app passwords are encrypted with; never logged |
 | `AuthRequestLimit`, `AuthWindowLength` | `5`, `20s` | failed Subsonic sign-ins allowed per address and user in a window, and requests to the sign-in routes under `/auth` per address; `0` turns both limits off |
 | `SessionTimeout` (`ND_SESSIONTIMEOUT`) | `48h` | how long a web session's token is good; Navidrome renews it at every use of its API |
-| `Sonus.TwoFactor` (`ND_SONUS_TWOFACTOR`) | `required` | `off`: an account password signs the API even with two-step verification set up |
+| `Sonus.TwoFactor` (`ND_SONUS_TWOFACTOR`) | `required` | which account passwords sign the Subsonic API: `required`, none (app passwords and API keys only); `optional`, those of users who have not set two-step verification up; `off`, all |
 | `SONUS_NAVIDROME_BIN` | `/app/navidrome`, else `navidrome` | the Navidrome to run |
 | `SONUS_NAVIDROME_PORT` | `4534` | its port, on 127.0.0.1 |
 | `SONUS_NAVIDROME_URL` | none | an `http://` Navidrome (or demo server) to proxy instead of running one; nothing is checked here then |
@@ -137,11 +137,11 @@ checks it (`server/subsonic/middlewares.go` and the fork's `sonus_auth.go`):
 |---|---|
 | lacks `u`, `v` or `c` (with `apiKey`: `v` or `c`) | error 10, `missing parameter: 'u'`, answered here |
 | `u` with a wrong `p` or `t`/`s`, or an unknown `u`, or `u` alone | error 40, answered here |
-| `u` with the account password, of a user with two-step verification set up (unless `Sonus.TwoFactor` is `off`) | error 40: only an app password signs for them |
+| `u` with the account password, where `Sonus.TwoFactor` is `required` (any user, two-step verification set up or not), or `optional` for a user who has set it up | error 40, as a wrong password: only an app password or an API key signs |
 | `apiKey` with `u`, `p`, `t`, `s` or `jwt` | error 43, answered here |
 | an `apiKey` that is no one's | error 44, answered here |
 | too many failures from this address (`AuthRequestLimit` in `AuthWindowLength`) | error 40 (or 44 for keys), right credentials included |
-| right credentials: the password as `p`, `p=enc:<hex>` or `t`+`s`; an app password the same three ways, with or without its dashes; an API key | goes on to Navidrome **without** `p`, `t`, `s`, `apiKey`, with the user named in the header only the gateway sets ([What Navidrome is told](#what-navidrome-is-told)); `tokenInfo` is answered here |
+| right credentials: the account password where it signs (`off`; `optional` for a user without two-step verification) as `p`, `p=enc:<hex>` or `t`+`s`; an app password the same three ways, with or without its dashes; an API key | goes on to Navidrome **without** `p`, `t`, `s`, `apiKey`, with the user named in the header only the gateway sets ([What Navidrome is told](#what-navidrome-is-told)); `tokenInfo` is answered here |
 | `jwt=` (the web UI's session), without `apiKey` | Navidrome's to check, as it came |
 | a user header from a trusted proxy (`ExtAuth`) | Navidrome's to look up, as it came |
 | a query or form Go's parser refuses (`%zz`, a `;`), a form over 10 MiB | Navidrome's to answer with its error (it checks no sign-in for these), as it came |
@@ -162,6 +162,15 @@ are answered here too rather than left to Navidrome, so that one place decides e
 
 Where the gateway differs from Navidrome, knowingly:
 
+- **Where two-step verification is required, no account password signs the API**, whether or not its user has set
+  two-step verification up (`credentials::password_alone`). The fork took the account password of a user who had not
+  set it up yet, so that clients kept working until then; here such a user's password gets what the web sign-in
+  gives it, a set-up token, and nothing on the API, Sonus Connect included (it opens with the same check). The
+  answer is error 40 with the wrong-password text, and counts against the limiter as one, so from outside a user
+  who has set it up, one who has not, and a wrong password look alike. What such a user does: sign in on the web,
+  set two-step verification up with the enrolment code, and give each player an app password (the web client and
+  the apps' browser sign-in do this by themselves). An app password or API key the account already has keeps
+  working. `optional` and `off` are as they were.
 - Navidrome compresses answers when the client accepts it; the gateway's own (a few hundred bytes) are sent as they
   are.
 - Secrets are compared in constant time (Navidrome compares the account password and tokens with `==`).

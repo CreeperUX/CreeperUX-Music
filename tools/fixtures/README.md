@@ -48,7 +48,7 @@ for each build, valid only on this machine's localhost copies; never printed, ne
 |---|---|
 | `server` | Navidrome's version, extensions, the settings to serve it with (`env`), how a browser sign-in is approved |
 | `users.admin` | the first admin, made by `/auth/createAdmin`; two-step verification (required) set up; an app password |
-| `users.listener` | a plain user (`/api/user`), never signed in on the web, so no two-step verification yet: the password opens the API. **The primary user** the tests sign in as |
+| `users.listener` | a plain user (`/api/user`) without two-step verification, with an `appPassword` (made in a second run of Navidrome with the policy `optional`, where the password alone gets a session). **The primary user** the tests sign in as, with the app password: where two-step verification is required the Rust server takes no account password on the API (the frozen Navidrome takes the listener's) |
 | `users.secure` | two-step verification set up (`totpSecret`, `recoveryCodes`), an app password, and an API key from the browser sign-in (`/auth/device/start`, approved on the web, `/poll`) |
 | `ids` | entity ids by stable key (below) |
 | `expect` | what each key's tags say (title, artists, genres, ReplayGain, …) |

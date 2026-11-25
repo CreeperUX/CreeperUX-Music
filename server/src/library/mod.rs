@@ -24,6 +24,7 @@ pub mod natural;
 pub mod player;
 pub mod query;
 pub mod search;
+pub mod writes;
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -60,6 +61,11 @@ pub const METHODS: &[&str] = &[
     "getPlayQueue",
     "getLyricsBySongId",
     "getCoverArt",
+    // phase 4: writes (writes.rs)
+    "star",
+    "unstar",
+    "setRating",
+    "savePlayQueue",
 ];
 
 /// Whether a method is one of the library's.
@@ -233,6 +239,7 @@ impl Library {
         }
         // a cover is a picture whatever format the request names, and Navidrome registers no player for it
         let cover = method == "getCoverArt";
+        let writing = writes::METHODS.contains(&method);
         if !cover && Format::of(params.get("f"), params.get("callback")) != Format::Json {
             return Err("not JSON");
         }
@@ -243,10 +250,11 @@ impl Library {
             // Navidrome registers the player before the method runs (getPlayer), and answers with its cookie
             let registration = Registration { user_id: &user.user_id, user: user_header, client: params.get("c"), version: params.get("v"), headers };
             let Some(player) = self.players.register(registration).await else { return Err("Navidrome registered no player") };
-            if player.transcodes {
+            // (a write's answer holds no song: the player's transcoding and real paths do not matter to it)
+            if player.transcodes && !writing {
                 return Err("the player has a transcoding set");
             }
-            if player.report_real_path && !entities::REAL_PATHS {
+            if player.report_real_path && !entities::REAL_PATHS && !writing {
                 return Err("the player reports real paths, which Go builds by this system's rules");
             }
             Some(player)
@@ -257,7 +265,7 @@ impl Library {
         let (db, options, seeds) = (self.db.clone(), self.options.clone(), self.seeds.clone());
         let (user_id, client, params) = (user.user_id.clone(), client.to_string(), params.clone());
         let reply = tokio::task::spawn_blocking(move || {
-            db.read_blocking(|conn| {
+            let run = |conn: &rusqlite::Connection| {
                 let Some(viewer) = Viewer::load(conn, &user_id)? else { return Ok(Ok(Reply::Navidrome("the user is gone"))) };
                 let scope = Scope {
                     conn,
@@ -269,7 +277,16 @@ impl Library {
                     if_none_match: if_none_match.as_deref(),
                 };
                 Ok(browse::answer(method, &scope))
-            })
+            };
+            // a write: one BEGIN IMMEDIATE transaction, committed when the method answers (an error answer has
+            // written nothing), rolled back when it fails
+            if writing {
+                // kept when the method answered (an error answer has written nothing either way); a failure or a
+                // request left to Navidrome is rolled back, and Navidrome then does the whole write itself
+                db.write_blocking_if(|tx| run(tx), |reply| matches!(reply, Ok(r) if !matches!(r, Reply::Navidrome(_))))
+            } else {
+                db.read_blocking(run)
+            }
         })
         .await;
         let reply = match reply {

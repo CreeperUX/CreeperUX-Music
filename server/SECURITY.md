@@ -403,6 +403,29 @@ of it.
 **When this server is not sure**, it does not answer: the request goes to Navidrome, signed in, as before this phase
 (the list is in the README). That path adds nothing: it is the path every method took until now.
 
+## The library's writes
+
+`src/library/writes.rs`; what is answered is in `README.md`, "The library's writes". Only a request the sign-in check
+let through gets here, as the user it signed in as, the same path as the reads.
+
+**What a signed-in user can write: their own rows, nothing else.**
+
+- `annotation`: only rows whose `user_id` is the signed-in user's. The user is never a parameter: it is who signed in.
+- The item's `average_rating` (`setRating`): the one column of a shared row written, recomputed from every user's
+  ratings in the database, as Navidrome does; the user only adds or changes their own rating.
+- `playqueue`: only the signed-in user's row (deleted and written again, as Navidrome does).
+- An item is looked up as the user sees it (the library filter; a playlist their own or public, all for an admin), as
+  Navidrome's `GetEntityByID` does: what a user cannot see they cannot star or rate (a rating answers 70, a star skips
+  it), so a write tells them nothing they could not read.
+- The queue's ids are kept as given, unchecked, as Navidrome keeps them: the column is the user's own, and what reads
+  it back (`getPlayQueue`) shows only songs that are there and that the user sees.
+
+**How.** Every value is a bound parameter; the only names put into SQL text are table names from a fixed list (the
+kind of item found). One `BEGIN IMMEDIATE` transaction per request, rolled back on any error. A request's ids are as
+many as its query or form holds (a form is read up to 10 MiB, as Navidrome reads it); each is one indexed lookup.
+
+**Not sent:** the `refreshResource` events Navidrome's web UI gets on a star or a rating (decision 2).
+
 ## Secrets
 
 - **Passwords are stored reversibly**, by Navidrome's design: Subsonic's token sign-in (`t` = md5(password ‖ salt))
@@ -432,7 +455,9 @@ of it.
   data: parsed as JSON, checked for shape and size, and a row that does not pass starts an empty session.
 - The library's reads (above) read `album`, `media_file`, `artist`, `library_artist`, `annotation`, `bookmark`,
   `item_artwork`, `album_tags`, `tag`, `playlist`, `playlist_tracks`, `playqueue`, the three FTS5 tables, `library`,
-  `user`, `user_library` and `player`, and write none of them. Covers read `item_artwork` and `artwork`, and files:
+  `user`, `user_library` and `player`, and write none of them. The library's writes (above) write `annotation` (the
+  user's own rows), the `average_rating` of `media_file`, `album`, `artist` and `playlist`, and `playqueue` (the user's
+  own row), and read `radio` to find an id as Navidrome does. Covers read `item_artwork` and `artwork`, and files:
   the pictures Navidrome's state names, its image store and its cache of resized pictures. Nothing is written there
   either.
 - No change to Navidrome's schema, ever, and no VACUUM; the schema is checked at start and the server refuses any

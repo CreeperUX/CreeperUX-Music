@@ -452,6 +452,33 @@ Where it knowingly differs from Navidrome:
   taken: the plain OFFSET gives the same rows.
 - **An error reading the database** hands the request to Navidrome instead of answering "Internal Server Error".
 
+## The library's writes
+
+`src/library/writes.rs` (roadmap, phase 4; part 1: stars, ratings and the play queue). Answered here, in JSON, as a
+GET or a form post, also as `.view`, and written to Navidrome's tables as Navidrome writes them, so that either server
+reads them back the same:
+
+| Method | |
+|---|---|
+| `star`, `unstar` | every `id`, `albumId` and `artistId`, taken together; each looked up as Navidrome's `GetEntityByID` does it (artist, album, playlist, song, radio station, as the user sees them: a radio station's star is kept as a song's, as in Navidrome), one nobody sees skipped; the user's `annotation` row updated, else inserted, with `starred` and `starred_at` (also set when unstarring); 10 `Required id parameter is missing` |
+| `setRating` | the user's `rating` and `rated_at`, then the item's `average_rating` over every user's rating above 0, rounded to two places; any integer kept as given, as Navidrome keeps it; 10 without `id` or `rating`, 0 for a rating that is not a number, 70 `data not found` for an item the user does not see |
+| `savePlayQueue` | the user's queue replaced: `items` the ids as given, joined by commas (not checked, as in Navidrome), `current` the index of the first `current` among them (else 0), `position` (0 when it is not a number), `changed_by` the client's name; a queue saved again keeps its id, and its `created_at` becomes Go's zero time, as Navidrome writes it then; no ids: no queue |
+
+- **One transaction per request** (`BEGIN IMMEDIATE`), as Navidrome's `star` is; its `setRating` and `savePlayQueue`
+  are two or three statements of their own there, with the same end state. A write waits for Navidrome's write lock
+  (a scan) up to the 15 s busy timeout Navidrome's connections have; an error, or a request this server leaves to
+  Navidrome after all, is rolled back and Navidrome then makes the whole write.
+- **Times** are written as Navidrome's driver writes a Go `time.Time`, in the server's local time zone (`gotime.rs`).
+- **Navidrome caches none of these tables** (its persistence layer caches only library paths), so a write made by
+  either server is read by the other at once: `tools/contract/writes.test.mjs` checks it both ways, through
+  Navidrome's web UI API too.
+- **Navidrome's web UI is not told.** Navidrome sends its web UI a `refreshResource` event on a star or a rating; a
+  write made here sends none, so an open old web UI shows it once it reloads the item (decision 2 of the roadmap).
+- **A player's settings do not matter to a write** (its answer has no song in it): a player with a transcoding set,
+  which keeps the reads with Navidrome, does not keep the writes there.
+- **Still Navidrome's:** playlists (part 2), `scrobble` and now playing (part 3), `savePlayQueueByIndex`,
+  `getPlayQueueByIndex`, bookmarks and `reportPlayback` (no Sonus client sends them).
+
 ## Sonus Connect version 2
 
 One playback session per user, as Spotify Connect has it: the protocol is `docs/protocol/connect.md`, and this server
@@ -620,6 +647,32 @@ These start this server as its image runs it: `cargo run`, which starts Navidrom
 database.
 
 ## Checked against the real Navidrome
+
+### The library's writes (phase 4, part 1), 2026-11-25
+
+Windows on ARM, Navidrome 0.64.2-sonus.10 (the frozen fork), `cargo run` (a debug build) in front of it:
+
+- `node tools/contract/diff.mjs --go-vs-gateway --state --corpus tools/contract/corpus/writes.json`: 84 of 84 the
+  same, 76 answered here; then the two databases table by table (`annotation`, `playqueue`, `playlist`,
+  `playlist_tracks`, `scrobbles`, the averages, the playlists' artwork state): the same, row for row, times written
+  during the run and new ids normalized (`db-state.mjs`). 50 requests were added: every parameter form the clients
+  send, ids nobody sees, an empty id, starring twice, someone else's private playlist, two users and the admin rating
+  the same song, ratings out of range, errors, queues with duplicates, unknown ids, no current, emptied and made anew.
+- A writes corpus made from the golden database (`corpus-from-db.mjs --writes`, `diff.mjs --db … --state`): 174 of
+  174, the databases the same.
+- **On two copies of the production database** (writes on the copies only; the original's hash unchanged): a writes
+  corpus made from its data, as its three users, 173 requests: 173 the same, 167 answered here (6 `getStarred2` with
+  an artist with a picture went to Navidrome, as decided); the databases the same, row for row (750 annotation rows).
+- `node --test tools/contract/writes.test.mjs`: 3 of 3: a star, unstar, rating and queue written here are seen at
+  once by Navidrome's web UI API (`/api/song`, `/api/queue`) and its Subsonic API, and Navidrome's by this server;
+  two users starring, rating and saving queues at once (128 requests, then 26 unstars) lose nothing and every average is right; a write
+  waits out another writer holding the lock for 4 s, and 120 writes during a full scan all succeed.
+- `node tools/contract/diff.mjs --go-vs-gateway`: 443 of 443, 330 answered here. `run.mjs --through-gateway`: 132 of
+  132. `gateway.test.mjs` and `auth-routes.test.mjs`: 13 of 13. `cargo test`: 272.
+- **A difference seen and accepted**: `getStarred2` right after items were starred in one call. Go on Windows reads a
+  coarse wall clock, so items starred in one call often get the very same `starred_at` there and the list's order is
+  then SQLite's; here each gets its own time. On Linux, where the server runs, Go's clock has nanoseconds too. The
+  generated writes corpora compare those lists as sets.
 
 ### The library's reads (phase 3, part 3), 2026-11-25
 

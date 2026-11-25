@@ -2,6 +2,7 @@
 // docs/server-roadmap.md), made from the data itself, as every user of that database.
 //
 //   node tools/contract/corpus-from-db.mjs --db <navidrome.db> --out <corpus.json> [--seed <n>] [--covers]
+//   node tools/contract/corpus-from-db.mjs --db <navidrome.db> --out <corpus.json> --writes   (the writes: buildWritesCorpus)
 //
 // The database is never opened where it is: it is copied (with its -wal file) to a folder of its own first and read
 // there. What the corpus holds:
@@ -215,12 +216,89 @@ export function buildCorpus(db, { seed = 1, covers = false } = {}) {
   };
 }
 
+/**
+ * A writes corpus for a database (`--writes`): the writes the Rust server answers, made from the data, as every user,
+ * each followed by the reads that show it; in order (each side runs it on its own copy, and their databases are then
+ * compared: diff.mjs --db … --state). Stars and unstars (songs, albums, artists, every playlist: someone else's
+ * private one is skipped), the same items rated by several users (averages), ratings cleared, the user's own stars
+ * and ratings from before undone, unknown ids, the play queue saved, saved again, and emptied.
+ */
+export function buildWritesCorpus(db, { seed = 1 } = {}) {
+  const rnd = random(seed);
+  const all = sql => db.prepare(sql).all();
+  const users = all('select id from user order by created_at, id').map(r => r.id);
+  const keys = users.map((_, i) => `u${i + 1}`);
+  const songs = all('select id from media_file where missing = 0 order by id').map(r => r.id);
+  const albums = all('select id from album where missing = 0 order by id').map(r => r.id);
+  const artists = all('select id from artist where missing = 0 order by id').map(r => r.id);
+  const playlists = all('select id from playlist order by id').map(r => r.id);
+  const requests = [];
+  const req = (user, name, method, params, extra = {}) => requests.push({ name: `${name} ${user}`, method, params, auth: { user }, ...extra });
+  // items several users rate, so that averages are over more than one rating
+  const shared = { songs: sample(songs, 12, rnd), albums: sample(albums, 4, rnd), artists: sample(artists, 3, rnd) };
+  keys.forEach((user, u) => {
+    const mine = (list, n) => sample(list, n, rnd);
+    const starSongs = mine(songs, 20), starAlbums = mine(albums, 5), starArtists = mine(artists, 3);
+    req(user, `star ${starSongs.length} songs`, 'star', { id: starSongs.slice(0, 10) });
+    req(user, 'star more songs as a form post', 'star', { id: starSongs.slice(10) }, { post: true });
+    req(user, 'star albums and artists', 'star', { albumId: starAlbums, artistId: starArtists });
+    req(user, 'star an album and an artist by id, an unknown id, a song twice', 'star.view', { id: [starAlbums[0], starArtists[0], 'not-an-id', starSongs[0], starSongs[0]] });
+    req(user, `star every playlist (${playlists.length})`, 'star', { id: playlists.length ? playlists : ['not-a-playlist'] });
+    req(user, 'getStarred2 after the stars', 'getStarred2', {});
+    // undo some of them, and the user's own stars from before
+    const before = all(`select item_id, item_type from annotation where user_id = '${users[u].replaceAll("'", "''")}' and starred = 1 order by item_id`);
+    const undo = [...starSongs.slice(0, 5), ...sample(before.filter(b => b.item_type === 'media_file').map(b => b.item_id), 5, rnd)];
+    if (undo.length) req(user, `unstar ${undo.length} songs`, 'unstar', { id: undo }, { post: true });
+    const undoAlbums = [starAlbums[1], ...sample(before.filter(b => b.item_type === 'album').map(b => b.item_id), 2, rnd)].filter(Boolean);
+    req(user, `unstar ${undoAlbums.length} albums and an artist`, 'unstar', { albumId: undoAlbums, artistId: starArtists.slice(0, 1) });
+    req(user, 'unstar what was never starred', 'unstar', { id: mine(songs, 2) });
+    req(user, 'getStarred2 after the unstars', 'getStarred2', {});
+    // ratings: the shared items (each user another rating), own ones, cleared ones
+    shared.songs.forEach((id, i) => req(user, `setRating shared song ${i}`, 'setRating', { id, rating: String((i + u) % 6) }));
+    shared.albums.forEach((id, i) => req(user, `setRating shared album ${i}`, 'setRating', { id, rating: String(1 + ((i + 2 * u) % 5)) }, { post: true }));
+    shared.artists.forEach((id, i) => req(user, `setRating shared artist ${i}`, 'setRating.view', { id, rating: String(5 - ((i + u) % 5)) }));
+    if (playlists.length) req(user, 'setRating a playlist (another user\'s private one: data not found)', 'setRating', { id: playlists[u % playlists.length], rating: '3' });
+    const rated = all(`select item_id from annotation where user_id = '${users[u].replaceAll("'", "''")}' and rating > 0 and item_type = 'media_file' order by item_id`).map(r => r.item_id);
+    sample(rated, 3, rnd).forEach((id, i) => req(user, `setRating 0 on an own rating from before ${i}`, 'setRating', { id, rating: '0' }));
+    req(user, 'setRating an unknown id', 'setRating', { id: 'not-an-id', rating: '2' });
+    req(user, 'setRating without a rating', 'setRating', { id: shared.songs[0] });
+    shared.songs.forEach((id, i) => req(user, `getSong shared ${i} after the ratings`, 'getSong', { id }));
+    shared.albums.forEach((id, i) => req(user, `getAlbum shared ${i} after the ratings`, 'getAlbum', { id }));
+    req(user, 'getAlbumList2 highest after the ratings', 'getAlbumList2', { type: 'highest', size: '500' });
+    // the play queue: saved, saved again (the same queue id, Go's zero creation time), read
+    const queue = mine(songs, 50);
+    req(user, `savePlayQueue ${queue.length} songs`, 'savePlayQueue', { id: queue, current: queue[17], position: '123456' }, { post: true });
+    req(user, 'getPlayQueue after the save', 'getPlayQueue', {});
+    req(user, 'savePlayQueue again, current not in it', 'savePlayQueue', { id: queue.slice(5, 25), current: 'not-an-id', position: String(1000 * (u + 1)) }, { post: true });
+    req(user, 'getPlayQueue after saving again', 'getPlayQueue', {});
+    if (u === keys.length - 1) {
+      req(user, 'savePlayQueue empty', 'savePlayQueue', {}, { post: true });
+      req(user, 'getPlayQueue after the empty save', 'getPlayQueue', {});
+    }
+  });
+  // every user's view of the shared items once all have rated them
+  keys.forEach(user => shared.songs.slice(0, 4).forEach((id, i) => req(user, `getSong shared ${i} at the end`, 'getSong', { id })));
+  return {
+    generated: new Date().toISOString(),
+    users: Object.fromEntries(keys.map((k, i) => [k, users[i]])),
+    counts: { users: users.length, requests: requests.length, byMethod: Object.fromEntries(Object.entries(Object.groupBy(requests, r => r.method.replace(/\.view$/, ''))).map(([m, l]) => [m, l.length])) },
+    // when a star or a queue was written differs between the servers; the database comparison checks those times
+    volatile: ['subsonic-response.serverVersion', 'subsonic-response.**.starred', 'subsonic-response.playQueue.changed'],
+    // getStarred2 lists by starred_at, newest first. Go on Windows reads a coarse wall clock: items starred in one
+    // call often get the very same time there, and their order is then SQLite's; the Rust server's times differ, so
+    // its order is the call's. (On Linux Go's clock has nanoseconds, as here.) The lists are compared as sets.
+    unordered: ['subsonic-response.**.artist.*.roles', 'subsonic-response.**.contributors', 'subsonic-response.starred2.song', 'subsonic-response.starred2.album', 'subsonic-response.starred2.artist'],
+    requests,
+  };
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const { values } = parseArgs({ options: { db: { type: 'string' }, out: { type: 'string' }, seed: { type: 'string' }, covers: { type: 'boolean' } } });
+  const { values } = parseArgs({ options: { db: { type: 'string' }, out: { type: 'string' }, seed: { type: 'string' }, covers: { type: 'boolean' }, writes: { type: 'boolean' } } });
   if (!values.db || !values.out) throw new Error('--db and --out are needed');
   const copy = await openCopy(resolve(values.db));
   try {
-    const corpus = buildCorpus(copy.db, { seed: Number(values.seed ?? 1), covers: !!values.covers });
+    const seed = Number(values.seed ?? 1);
+    const corpus = values.writes ? buildWritesCorpus(copy.db, { seed }) : buildCorpus(copy.db, { seed, covers: !!values.covers });
     await mkdir(dirname(resolve(values.out)), { recursive: true });
     await writeFile(resolve(values.out), JSON.stringify(corpus, null, 1));
     // counts only: the corpus holds words from the data

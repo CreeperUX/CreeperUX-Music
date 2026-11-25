@@ -12,7 +12,7 @@ use crate::subsonic::respond::{GENERIC, MISSING_PARAMETER};
 
 use super::json::Json;
 use super::query::{self, Cond, ListOptions, QueryError, Table, not_missing};
-use super::{NOT_FOUND, Reply, Scope, entities, lists, media, seeded_order};
+use super::{NOT_FOUND, Reply, Scope, entities, lists, media, seeded_order, writes};
 
 /// The answer of one of `super::METHODS`.
 pub fn answer(method: &str, scope: &Scope) -> Result<Reply, QueryError> {
@@ -28,6 +28,10 @@ pub fn answer(method: &str, scope: &Scope) -> Result<Reply, QueryError> {
         "getPlayQueue" => lists::get_play_queue(scope),
         "getLyricsBySongId" => media::get_lyrics_by_song_id(scope),
         "getCoverArt" => media::get_cover_art(scope),
+        "star" => writes::star(scope, true),
+        "unstar" => writes::star(scope, false),
+        "setRating" => writes::set_rating(scope),
+        "savePlayQueue" => writes::save_play_queue(scope),
         _ => Ok(Reply::Navidrome("not a method answered here")),
     }
 }
@@ -57,7 +61,7 @@ fn parse_int(text: &str) -> Option<i64> {
 }
 
 /// `req.Params.Int`: error 10 when missing, error 0 when it is not a number.
-fn required_int(params: &Params, name: &str) -> Result<i64, Reply> {
+pub(super) fn required_int(params: &Params, name: &str) -> Result<i64, Reply> {
     let text = required(params, name)?;
     parse_int(text).ok_or_else(|| Reply::error(GENERIC, format!("invalid parameter '{name}': expected integer, got '{text}'")))
 }

@@ -60,7 +60,11 @@ const COMPARED_JSON_HEADERS = ['x-total-count'];
 /** The header a debug build of the Rust server marks its own answers with (server/src/library/mod.rs). */
 export const ANSWERED_HEADER = 'x-sonus-answered';
 /** The Subsonic methods the Rust server answers itself from the database, in JSON, once the request is signed in. */
-export const ANSWERED_BY_RUST = ['ping', 'getSong', 'getAlbum', 'getAlbumList2', 'search3', 'getStarred2', 'getPlaylists', 'getPlaylist', 'getPlayQueue', 'getLyricsBySongId', 'getCoverArt'];
+export const ANSWERED_BY_RUST = [
+  'ping', 'getSong', 'getAlbum', 'getAlbumList2', 'search3', 'getStarred2', 'getPlaylists', 'getPlaylist', 'getPlayQueue', 'getLyricsBySongId', 'getCoverArt',
+  // phase 4: writes
+  'star', 'unstar', 'setRating', 'savePlayQueue',
+];
 
 // ---------------------------------------------------------------- the corpus
 
@@ -304,8 +308,26 @@ export async function startPairOnDatabase(file, { env = {}, navidrome, release =
       const d = new DatabaseSync(c.db, { readOnly: true });
       try { return d.prepare('select count(*) as songs, coalesce(sum(missing), 0) as missing from media_file').get(); } finally { d.close(); }
     });
-    return { a: go.url, b: gw.url, manifest, stop, holds, gatewayLog: gw.log, navidromeLog: go.log };
+    return { a: go.url, b: gw.url, manifest, stop, holds, files: copies.map(c => c.db), gatewayLog: gw.log, navidromeLog: go.log };
   } catch (e) { await stop(); throw e; }
+}
+
+/**
+ * The two sides' databases after a corpus, table by table (db-state.mjs): prints the counts and every row one side has
+ * and the other has not (quiet: the tables and how many rows, not the rows), and returns those rows.
+ */
+export async function stateReport(files, { since, before, quiet = false, log = console.log }) {
+  const { dumpState, compareState, counts } = await import('./db-state.mjs');
+  const [sa, sb] = files.map(f => dumpState(f, { since, before }));
+  const diffs = compareState(sa, sb);
+  log(`
+The databases after the corpus (rows per table, A / B):`);
+  const ca = counts(sa), cb = counts(sb);
+  for (const t of Object.keys(ca)) log(`  ${t.padEnd(18)} ${String(ca[t]).padStart(6)} / ${cb[t]}`);
+  if (!diffs.length) log('  the same, row for row (times written during the run and new ids normalized)');
+  else if (quiet) for (const [t, list] of Object.entries(Object.groupBy(diffs, d => d.table))) log(`  ✗ ${t}: ${list.length} rows differ`);
+  else for (const d of diffs) log(`  ✗ ${d.table}  ${d.a ? `A only: ${d.a}` : `B only: ${d.b}`}`);
+  return diffs;
 }
 
 /** The requests the Rust server left to Navidrome, counted by method and reason, from its debug log. */
@@ -374,13 +396,15 @@ export async function startGatewayOnGolden({ env = {}, empty = false, copy: star
   const ready = async url => (await fetch(`${url}/rest/ping?f=json`)).status === 200;
   let gw;
   try { gw = await runGateway({ env: settings, cwd: copy.folder, port: await freePort(), ready, release }); } catch (e) { await copy.remove(); throw e; }
-  return { ...gw, data: copy.folder, manifest: copy.manifest, copy, stop: async ({ keep = false } = {}) => { await gw.stop(); if (!keep) await copy.remove(); } };
+  // navidrome: the Navidrome it runs, for a test that asks it directly (its own web UI, a write made by Go)
+  return { ...gw, data: copy.folder, manifest: copy.manifest, copy, navidrome: `http://127.0.0.1:${settings.SONUS_NAVIDROME_PORT}`, stop: async ({ keep = false } = {}) => { await gw.stop(); if (!keep) await copy.remove(); } };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const { values } = parseArgs({ options: {
     a: { type: 'string' }, b: { type: 'string' }, manifest: { type: 'string' }, corpus: { type: 'string' },
     'go-vs-gateway': { type: 'boolean' }, 'go-vs-go': { type: 'boolean' }, json: { type: 'string' }, only: { type: 'string' },
+    state: { type: 'boolean' },
     db: { type: 'string' }, env: { type: 'string', multiple: true }, release: { type: 'boolean' },
   } });
   if (values.db) {
@@ -395,7 +419,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       const show = h => h.map((x, i) => `${'AB'[i]}: ${x.songs} songs, ${x.missing} missing`).join('; ');
       console.log(`Before: ${show(pair.holds())}`);
       // quiet: request names and paths only (the database may be private); one server at a time, for the timings
+      const before = values.state ? (await import('./db-state.mjs')).knownIds(pair.files[0]) : null, since = Date.now();
       const report = await runDiff({ a: pair.a, b: pair.b, manifest: pair.manifest, corpus, only: values.only, whoAnswered: values.release ? false : 'count', quiet: true, sequential: true });
+      if (values.state) report.state = await stateReport(pair.files, { since, before, quiet: true });
       report.passedToNavidrome = passThroughReasons(pair.gatewayLog());
       if (values.release) {
         const left = Object.values(report.passedToNavidrome).reduce((x, y) => x + y, 0);
@@ -417,23 +443,26 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     process.exit();
   }
   const corpus = JSON.parse(await readFile(values.corpus ? resolve(values.corpus) : join(here, 'corpus', 'read-only.json'), 'utf8'));
-  const stops = [];
+  const stops = [], files = [];
   let a = values.a, b = values.b, manifest, expected = [], whoAnswered = false;
   try {
     if (values['go-vs-gateway'] || values['go-vs-go']) {
       const { serveGolden } = await import('../fixtures/serve.mjs');
       const goA = await serveGolden(); stops.push(goA.stop);
+      files.push(join(goA.data, 'navidrome.db'));
       manifest = goA.manifest;
       a = goA.url;
       if (values['go-vs-gateway']) {
         console.log('Starting the Rust server (cargo run in server/; the first build takes a while)…');
         const gw = await startGatewayOnGolden(); stops.push(gw.stop);
+        files.push(join(gw.data, 'navidrome.db'));
         b = gw.url;
         expected = [EXPECTED.connectVersion2];
         whoAnswered = true;
         console.log(`A: Navidrome ${manifest.server.serverVersion} at ${a}\nB: the Rust server at ${b}, running its own Navidrome on another copy of the golden database\n`);
       } else {
         const goB = await serveGolden(); stops.push(goB.stop);
+        files.push(join(goB.data, 'navidrome.db'));
         b = goB.url;
         console.log(`A: Navidrome at ${a}\nB: Navidrome at ${b} (another copy of the golden database)\n`);
       }
@@ -442,7 +471,13 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       manifest = JSON.parse(await readFile(resolve(values.manifest), 'utf8'));
       console.log(`A: ${a}\nB: ${b}\n`);
     }
+    const before = values.state && files.length === 2 ? (await import('./db-state.mjs')).knownIds(files[0]) : null, since = Date.now();
     const report = await runDiff({ a, b, manifest, corpus, only: values.only, expected, whoAnswered });
+    if (values.state) {
+      if (files.length !== 2) throw new Error('--state needs --go-vs-gateway, --go-vs-go or --db: the databases of both sides');
+      report.state = await stateReport(files, { since, before });
+      if (report.state.length) process.exitCode = 1;
+    }
     if (values.json) await writeFile(resolve(values.json), JSON.stringify(report, null, 2));
     process.exitCode = report.different ? 1 : 0;
   } finally {

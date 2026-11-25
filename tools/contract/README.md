@@ -110,6 +110,35 @@ server with the same settings, sends both the same requests, and compares the tw
 `serveGolden({ empty: true })` and `startGatewayOnGolden({ empty: true })` start a server on no database at all
 (Navidrome makes a new one), with the golden settings.
 
+## Writes: `writes.test.mjs`, `--state` and `db-state.mjs`
+
+The writes corpus compares the answers; what a write leaves in the database is compared too:
+
+```sh
+node tools/contract/diff.mjs --go-vs-gateway --state --corpus tools/contract/corpus/writes.json
+node tools/contract/diff.mjs --db <navidrome.db> --corpus <writes corpus> --state
+```
+
+`--state` dumps both sides' databases after the corpus (`db-state.mjs`): `annotation`, `playqueue`, `playlist`,
+`playlist_tracks`, `scrobbles`, every `average_rating` that is not 0, and the playlists' artwork state, every row,
+sorted. Explicitly normalized: a time written during the run becomes `<now OFFSET>` (its shape is checked, Navidrome's
+`2006-01-02 15:04:05.999999999-07:00`, and its time zone kept; Go's zero time and times from before the run are kept
+as they are), and an id made during the run (a new queue's or playlist's, random on each side) becomes
+`<new playqueue of USER>` or `<new playlist OWNER NAME>` wherever it appears. Every row one side has and the other has
+not is listed (with `--db`: the tables and counts only).
+
+`corpus-from-db.mjs --writes` makes a writes corpus from any database: stars and unstars as every user (songs, albums,
+artists, every playlist), the user's own stars and ratings from before undone, items several users rate, unknown ids,
+the queue saved, saved again and emptied, each followed by the reads that show it.
+
+`node --test tools/contract/writes.test.mjs` (each test on its own golden copy, two-step verification off):
+
+- a write made by the Rust server is seen at once by Navidrome's web UI API (`/api/song`, `/api/queue`, signed in as
+  the web UI signs in) and its Subsonic API, and Navidrome's writes by the Rust server: Navidrome caches none of these
+  tables;
+- two users starring, rating and saving queues at the same time lose nothing, and each song's average is right;
+- a write waits out another writer holding the lock (4 s) and a full scan, and none fails.
+
 ## The old web UI: `web-ui.check.mjs`
 
 ```sh
@@ -210,7 +239,7 @@ server that runs on its own: then it only passes requests through.
 | File | |
 |---|---|
 | `corpus/read-only.json` | every sign-in and every way it fails: in JSON, XML and JSONP (compared byte for byte, with `Accept-Encoding: identity`), in the query and as a form, by every HTTP method, mixed credentials, missing `v`/`c`, `tokenInfo`, a CORS preflight, queries Go refuses; extensions, scan status; album lists (every type but random: whole and paged, as three users, the paging boundaries, `byYear` both ways round, `byGenre` in another case and with wildcards, every error), `search3` (the empty query whole and paged to its boundaries, for songs, albums and artists; words in every script, in any case, as prefixes and phrases, with accents, the Turkish I, sort names, punctuated names, FTS5's own syntax typed as words, LIKE's wildcards; Chinese, Japanese and Korean; MusicBrainz ids); `getAlbum`, `getSong` for every fixture case (and without an id, with the wrong kind of id, as the admin, as a user with no state, for the legacy and minimal client names, as `.view` and as form posts); playlists, the play queue and stars as three users (nothing starred, no queue saved, someone else's private playlist); what stays Navidrome's (XML, JSONP, `musicFolderId`, a smart playlist); playlists, the play queue, stars; lyrics (from the tags, from a file beside the song, none; `enhanced`), similar songs, artist info; cover art (as is from a folder and from Navidrome's image store, by hash, with `If-None-Match`, resized the first time and again from the cache, square, a playlist's, a disc's, without a picture, unknown), `stream` (every format, ranges, errors); two device sign-in calls |
-| `corpus/writes.json` | stars, ratings, plays, the play queue, changing and deleting a playlist; each followed by the reads that show it |
+| `corpus/writes.json` | stars, ratings, plays, the play queue, changing and deleting a playlist, each followed by the reads that show it; for the writes the Rust server answers, every parameter form the clients send and the edge cases (ids nobody sees, an empty id, starring twice, someone else's private playlist, several users rating one song, ratings out of range, every error, queues with duplicates, unknown ids, no current, emptied); run with `--state` |
 
 ### Any Navidrome database: `corpus-from-db.mjs` and `--db`
 

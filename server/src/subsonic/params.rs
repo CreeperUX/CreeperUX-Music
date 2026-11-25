@@ -34,6 +34,11 @@ impl Params {
         self.pairs.iter().find(|(key, _)| key == name.as_bytes()).map(|(_, value)| value.as_slice()).unwrap_or(b"")
     }
 
+    /// Every value of the parameter, in order, empty ones too (Go: `r.URL.Query()[name]`).
+    pub fn all(&self, name: &str) -> Vec<&[u8]> {
+        self.pairs.iter().filter(|(key, _)| key == name.as_bytes()).map(|(_, value)| value.as_slice()).collect()
+    }
+
     pub fn has(&self, name: &str) -> bool {
         !self.get(name).is_empty()
     }

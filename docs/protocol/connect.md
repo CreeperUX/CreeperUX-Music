@@ -4,7 +4,10 @@ Status: specification, 2026-11-24. The server half has a reference implementatio
 (served by the demo server at `rest/connect?protocol=2`, `connect2.mjs`), and test vectors made from it,
 `docs/protocol/connect-vectors.json`: sequences of messages with the session, queue, devices and replies expected after
 each step. A server implementing this protocol (the Rust server, `server/`, roadmap phase 1) must give exactly those.
-The Windows client implements the client half; the web and Android clients follow. Version 1 (`sonusConnect` v1, the Go
+The Rust server is the one deployed; the vectors cover the session, not the connection around it, and where the demo
+server does less than this document says (it does not bound `mode`'s `order`, has no `hello` deadline and does not
+count connections waiting for one), the Rust server is the one that does it.
+The Windows and Android clients implement the client half; the web client follows. Version 1 (`sonusConnect` v1, the Go
 fork's `server/connect`, the demo's `connect.mjs`) stays for clients that have not moved yet; the two do not see each
 other.
 
@@ -43,7 +46,7 @@ reports what really happens (it started, paused, reached the end, failed). The q
   "playing": true,
   "positionMs": 83500, "at": 1764001234567,   // position at server time `at`; while playing, now = positionMs + (serverNow - at)
   "durationMs": 241000,           // 0: not known
-  "now": { "title": "…", "artist": "…", "album": "…", "albumId": "…", "coverArt": "…" },  // so any device can show it without a lookup
+  "now": { "title": "…", "artist": "…", "album": "…", "albumId": "…", "coverArt": "…" },  // so any device can show it without a lookup; coverArt: see below
   "mode": "default",             // default | repeatAll | repeatOne | shuffleTracks | shuffleAlbums | shuffleFolders | random
   "stopAfterCurrent": false,
   "context": { "kind": "album", "id": "…", "label": "…" },  // what the songs came from; null for none
@@ -54,6 +57,12 @@ reports what really happens (it started, paused, reached the end, failed). The q
 Whenever the current song changes, the server fills `now` and `durationMs` from its library (so every device can show
 the new song even when no device plays, after a remote's `next`); the active device's `loaded` report corrects them.
 Without an active device the session is never playing: `activeDevice: null` means `playing: false`.
+
+`now.coverArt` is an id to pass to `getCoverArt` as it is, and nothing more: clients do not parse it or compare it with
+ids from other answers. Filled in by the server it is the song's own picture (`mf-<songId>`), else its disc's
+(`dc-<albumId>:<disc>`), else its album's (`al-<albumId>`), without the `_<hash>` suffix the same ids carry in
+`getSong` and other Subsonic answers (`getCoverArt` takes them either way); after a `loaded` it is whatever id the
+active device sent.
 
 ### Queue
 
@@ -71,10 +80,19 @@ by hand (**manual**), which play before the context continues.
 
 The server also keeps the context in its own order (to come back from shuffling); devices never need it.
 
+**The 10 000.** `playContext` takes a window of the `ids` it is sent, and of `order` when it is used: all of them up
+to 10 000; of a longer list, 10 000 in their own order that hold `startId`, from 100 before it (or the first 10 000
+without `startId`). Senders window the same way, so the song they start with is in it. Of the window, the songs the
+library does not have (or the user may not see) are left out. `mode` with an arranged `order` takes the first 10 000
+songs of `order` that the library has (no window: there is no start song), and they become the context as sent.
+
 **Entries** are what the queue panel lists, and what commands point at, by key, as in `PlayQueue.Entries`: manual
 entries first (`q<n>`), then the context after the pointer (`c<index>:<trackId>`). A context key names a place and the
 song expected there; a command whose key no longer matches (the queue moved on meanwhile) does nothing to that entry
 and is answered with `error stale` for it. Keys of manual entries are stable until the entry plays or is removed.
+Keys are opaque to clients: they send them back exactly as the server wrote them, never one they made or rewrote. A
+key written differently is not that entry's key (`c05:x` is not `c5:x`) and gets `error stale`; what else such a
+key does is not specified (today `remove` of `c05:x` also removes the entry `c5:x`, as the reference does).
 
 `current.key` is the entry key the song had when it became current (`c<index>:<trackId>` for a context song, its `q<n>`
 for a song queued by hand), and it does not change while the song plays: a new order moves the pointer, not the key. So
@@ -89,7 +107,9 @@ to 0 says that it starts again.
   "connectedAt": 1764000000000, "volume": 0.62, "muted": false }
 ```
 
-`kind`: `desktop`, `web`, `phone`, `tablet`, `speaker`, `other`. `canPlay: false` is a remote that never plays.
+`kind`: `desktop`, `web`, `phone`, `tablet`, `speaker`, `other` (anything else is `other`). `canPlay: false` is a remote
+that never plays. `name` is trimmed and kept to its first 80 UTF-16 code units, `client` to 120, never cutting a
+character in two (a name of only spaces keeps the device's earlier name, or its id).
 `volume` (0–1) and `muted` are what the device said in its `hello` or its last `device` message; until it says, 1 and
 not muted. The active device stays listed through its grace period (below), even while its connection is down.
 A device's **id is its own**: a random id the client makes once per installation (per browser profile for the web
@@ -97,19 +117,35 @@ client) and keeps, `[A-Za-z0-9_-]{8,64}`. The same id reconnecting is the same d
 
 ## Connecting
 
-A WebSocket at `rest/connect?protocol=2` (or `rest/connect.view?protocol=2`), authenticated like a Subsonic request:
-`u` with `t`/`s` (or `p`), or `apiKey`, plus `v`, `c`, in the query string. Without `protocol=2` the server speaks
-version 1 (or refuses, once version 1 is gone). The server advertises the versions it speaks in the OpenSubsonic
+A WebSocket at `rest/connect?protocol=2` (or `rest/connect.view?protocol=2`), signed in with Subsonic credentials in
+the query string: `u` with `t`/`s` (or `p`, `enc:` included), or `apiKey` alone, plus `v`, `c`. They are checked as
+any Subsonic request's are (the same rules, and failed attempts counted with the others); refused, the request gets
+the Subsonic error a Subsonic request would (code 40 for a wrong password, …) and no WebSocket. Only these sign in to
+version 2: a web session's token (`jwt`) is answered HTTP 401, and a reverse proxy's user header (`Remote-User`)
+signs no one in here. Credentials are checked when the connection opens, not again while it stays open (a deleted
+user's connections are closed within a minute). Without `protocol=2` the server speaks version 1 (or refuses, once
+version 1 is gone). The server advertises the versions it speaks in the OpenSubsonic
 extension `sonusConnect` (`versions: [1, 2]`); a client uses 2 only when it is listed, and plays locally on its own
 otherwise, exactly as without Connect.
 
-The first message is the client's `hello`; the server answers `welcome` with everything a device needs to show the
-session at once (rule 2). The server pings every 30 s; a connection silent for 75 s is closed. A second connection
-with the same device id replaces the first (close code 4000). At most 32 devices per user: a 33rd closes the connection
-of the one silent longest (close code 4001). A client that closes its connection on purpose (the app closes, the user
-signs out) says goodbye with close code 1000 or 1001; see Grace for what that changes.
-JSON text frames, at most 1 MiB each; times are milliseconds since the Unix epoch on the server's clock (each message
-that carries `serverTime` lets a client keep the offset to its own clock).
+The first message is the client's `hello`, within 10 s of the connection opening; the server answers `welcome` with
+everything a device needs to show the session at once (rule 2). Any other first message, or a `hello` the server
+refuses (a device id that is not one), is answered `error invalid` and the connection closed (1008); a connection
+with no `hello` after 10 s is closed too (1008). At most 8 connections of a user may be waiting for their `hello` at once: one
+more is closed at once (1013). The server pings every 30 s; a connection silent for 75 s is closed. A second
+connection with the same device id replaces the first (close code 4000). At most 32 devices per user: a 33rd closes
+the connection of the one silent longest (close code 4001). JSON text frames, at most 1 MiB each (a longer message
+closes the connection, 1009); times are milliseconds since the Unix epoch on the server's clock (each message that
+carries `serverTime` lets a client keep the offset to its own clock).
+
+**Goodbye.** A client that closes its connection on purpose (the app closes, the user signs out) says goodbye with
+close code 1000 or 1001; see Grace for what that changes. Anything else is a network loss: a connection that breaks,
+times out, or is closed with another code or **with no code at all**. A browser's `ws.close()` without arguments sends
+no code (1005, a network loss), so the web client says goodbye with `ws.close(1000)`.
+
+The server's close codes: 1001 the server is stopping, 1008 no (valid) `hello` or the user no longer exists, 1009 a
+message over 1 MiB, 1011 the server failed, 1013 too many connections waiting for `hello`, 4000 replaced by a newer
+connection of the same device, 4001 the 33rd device took its place.
 
 ## Messages
 
@@ -140,9 +176,9 @@ the one exception is `remove`, below.
 | `jump` | `entry` | play that queue entry (`PlayQueue.Jump`) |
 | `add` | `ids`, `next` | queue by hand, at the end or first (`PlayQueue.Add`) |
 | `move` | `order`, `keys`, `manual` | a drag in the queue panel (`PlayQueue.Move`). All or nothing: `order` must list exactly the current entries and `keys` must be among them, else `error stale` (`PlayQueue.Move` drops entries missing from `order`, so a move made on an older queue would delete what was queued since) |
-| `remove` | `entries` | `PlayQueue.Remove`. Keys that no longer match are answered `error stale` with `entries` (those keys); the others are removed all the same |
+| `remove` | `entries` | `PlayQueue.Remove`. Keys that no longer match are answered `error stale` with `entries` (those keys); the others are removed all the same. Keys are compared as text, so a client sends them exactly as it got them (see Entries) |
 | `clear` | `manual` | the hand-queued songs, or the rest of the context (`PlayQueue.Clear`) |
-| `mode` | `mode`, `order?` | the playback order (`PlayQueue.SetOrder`); `order` as for `playContext` when shuffling by album or folder |
+| `mode` | `mode`, `order?` | the playback order (`PlayQueue.SetOrder`); `order` as for `playContext` when shuffling by album or folder (required then, unless the context is empty), bounded as in The 10 000 |
 | `stopAfterCurrent` | `on` | |
 | `transfer` | `to`, `play?` | the only way to change the active device (rule 4): `to` becomes active at the current position, playing as before or as `play` says; the device it leaves stops. `to` may be the sender ("play here") |
 | `volume` | `device`, `volume?`, `muted?` | that device's volume (rule 8): the server passes it to that device as `deviceCommand` |
@@ -183,8 +219,9 @@ song unless the queue changed meanwhile, in which case the device follows the `s
 | `ack` | `ref`, `rev` | a message with `ref` was applied |
 | `error` | `ref?`, `code`, `message`, … | `stale` (an entry key or `rev` that no longer matches; `entries?`: the keys), `cannotPlay`, `nothing`, `notActive` (a report from a device that isn't active), `offline` (a transfer to or `volume` for a device that isn't connected), `unplayable` (`trackId`, `stopped`: the failed song, and whether the session stopped), `invalid` |
 
-`message` is for people (Chinese for now). Clients show errors to the user, except `stale` and `notActive`: the session
-moved on meanwhile, and what it is now is on its way.
+`message` is for people (Chinese for now) and its wording may change: clients act on `code` and the other fields,
+never on `message`. Clients show errors to the user, except `stale` and `notActive`: the session moved on meanwhile,
+and what it is now is on its way.
 
 ### What each device does with a `session`
 
@@ -211,7 +248,7 @@ it: the device is made active again, `playing` and `positionMs` as it says (it n
 loss). In every other case it stops and shows the session as it now is.
 
 **A goodbye is not a network loss.** A device that closes its connection with close code 1000 or 1001 left on purpose:
-there is no grace period. If it was the active device the session stops at once where it is (`activeDevice: null`,
+there is no grace period. (A close with no code is a network loss: see Goodbye, under Connecting.) If it was the active device the session stops at once where it is (`activeDevice: null`,
 `playing: false`), so another device can play it straight away instead of sending it to a device that is gone.
 
 **Devices keep playing through a network loss.** The active device does not stop its audio because its connection

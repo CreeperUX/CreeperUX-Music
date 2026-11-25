@@ -1283,3 +1283,113 @@ async fn a_playlist_is_changed_and_deleted_as_navidrome_does_it() {
     w.db().execute("UPDATE playlist SET uploaded_image = 'pl-shared.jpg' WHERE id = 'pl-shared'", []).unwrap();
     w.navidromes(&format!("/rest/deletePlaylist?{ADMIN}&id=pl-shared")).await;
 }
+
+/// A user's play count and last play of an item: (play_count, play_date).
+fn plays(conn: &Connection, user: &str, item: &str, kind: &str) -> Option<(i64, Option<String>)> {
+    conn.query_row(
+        "SELECT play_count, play_date FROM annotation a JOIN user u ON u.id = a.user_id WHERE u.user_name = ?1 AND item_id = ?2 AND item_type = ?3",
+        (user, item, kind),
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .ok()
+}
+
+#[tokio::test]
+async fn a_play_is_counted_as_navidrome_counts_it() {
+    let w = world().await;
+    // s-2 has two artists (its `artist` role); its album is al-b
+    w.db().execute(r#"UPDATE media_file SET participants = '{"artist":[{"id":"ar-x","name":"X"},{"id":"ar-y","name":"Y"}],"albumartist":[{"id":"ar-Abe","name":"Abe"}]}' WHERE id = 's-2'"#, []).unwrap();
+    w.here(&format!("/rest/scrobble?{ALICE}&id=s-2&time=1767484800123&id=not-a-song&time=1767484800000")).await;
+    let at = plays(&w.db(), "alice", "s-2", "media_file").unwrap();
+    assert_eq!(at.0, 1);
+    assert!(go_time(at.1.as_deref().unwrap()) && at.1.as_deref().unwrap().contains(".123"), "the time, with its milliseconds: {at:?}");
+    assert_eq!(plays(&w.db(), "alice", "al-b", "album").map(|p| p.0), Some(5), "the album's count goes on from 4");
+    assert_eq!(plays(&w.db(), "alice", "ar-x", "artist").map(|p| p.0), Some(1));
+    assert_eq!(plays(&w.db(), "alice", "ar-y", "artist").map(|p| p.0), Some(1));
+    assert_eq!(plays(&w.db(), "alice", "ar-Abe", "artist"), None, "the album artist is not the song's artist");
+    let history: Vec<(String, i64)> = {
+        let conn = w.db();
+        let mut s = conn.prepare("SELECT media_file_id, submission_time FROM scrobbles ORDER BY id").unwrap();
+        s.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
+    };
+    assert_eq!(history, [("s-2".to_string(), 1767484800)], "one history row, in whole seconds; the unknown id skipped");
+    // an earlier play: counted, the last play stays the later one
+    w.here(&format!("/rest/scrobble?{ALICE}&id=s-2&time=1735689600000")).await;
+    let later = plays(&w.db(), "alice", "s-2", "media_file").unwrap();
+    assert_eq!((later.0, later.1), (2, at.1));
+    // bob sees no song: nothing is counted, and he is answered ok
+    w.here(&format!("/rest/scrobble?{BOB}&id=s-2")).await;
+    assert_eq!(plays(&w.db(), "bob", "s-2", "media_file"), None);
+    // Navidrome's errors
+    assert_eq!(w.get(&format!("/rest/scrobble?{ALICE}")).await.1, failed(10, "missing parameter: 'id'"));
+    assert_eq!(w.get(&format!("/rest/scrobble?{ALICE}&id=s-1&id=s-2&time=1")).await.1, failed(0, "Wrong number of timestamps: 1, should be 2"));
+}
+
+#[tokio::test]
+async fn what_is_playing_now_is_kept_here_until_its_time_is_up() {
+    let w = world().await;
+    let (_, none) = w.here(&format!("/rest/getNowPlaying?{ALICE}")).await;
+    assert_eq!(none["nowPlaying"], serde_json::json!({}));
+    // near the end of a 61.9 s song: 1 s left (whole seconds), plus 5 s
+    w.here(&format!("/rest/scrobble?{ALICE}&id=s-1&submission=false&position=60")).await;
+    assert_eq!(plays(&w.db(), "alice", "s-1", "media_file").map(|p| p.0), Some(3), "now playing counts no play");
+    let (_, playing) = w.here(&format!("/rest/getNowPlaying?{ADMIN}")).await;
+    let entry = &playing["nowPlaying"]["entry"][0];
+    assert_eq!(
+        (entry["id"].as_str(), entry["username"].as_str(), entry["playerName"].as_str(), entry["state"].as_str()),
+        (Some("s-1"), Some("alice"), Some("test"), Some("playing"))
+    );
+    // it began 60 s ago (now less the position, as Navidrome reckons it): a minute ago
+    assert_eq!((entry["playerId"].as_i64(), entry["minutesAgo"].as_i64(), entry["playbackRate"].as_f64()), (Some(1), Some(1), Some(1.0)));
+    assert!(entry["positionMs"].as_i64().unwrap() >= 60_000);
+    // bob is granted no library: he sees none of it
+    let (_, bobs) = w.here(&format!("/rest/getNowPlaying?{BOB}")).await;
+    assert_eq!(bobs["nowPlaying"], serde_json::json!({}));
+    tokio::time::sleep(Duration::from_millis(6_500)).await;
+    let (_, gone) = w.here(&format!("/rest/getNowPlaying?{ALICE}")).await;
+    assert_eq!(gone["nowPlaying"], serde_json::json!({}), "its time is up");
+}
+
+#[tokio::test]
+async fn playback_reports_follow_navidromes_rules() {
+    let w = world().await;
+    let report = |query: &str| format!("/rest/reportPlayback?{ALICE}&mediaType=song&{query}");
+    // paused on one web UI tab, starting on another: two sessions of one user
+    let tab = |id: &str, target: &str| Request::get(target).header("X-ND-Client-Unique-Id", id).body(empty()).unwrap();
+    let (_, headers, _) = w.request(tab("tab-1", &report("mediaId=s-1&positionMs=1500&state=paused"))).await;
+    assert_eq!(headers[library::ANSWERED_HEADER], "rust");
+    w.request(tab("tab-2", &report("mediaId=s-2&positionMs=0&state=starting"))).await;
+    let (_, playing) = w.here(&format!("/rest/getNowPlaying?{ALICE}")).await;
+    let states: Vec<(&str, &str, i64)> = playing["nowPlaying"]["entry"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| (e["id"].as_str().unwrap(), e["state"].as_str().unwrap(), e["positionMs"].as_i64().unwrap()))
+        .collect();
+    assert_eq!(states, [("s-2", "starting", 0), ("s-1", "paused", 1500)], "the latest started first; positions as reported");
+    // stopped: a play only past half the song (61.9 s: 30.95 s), when the player sends plays on and it is not ignored
+    w.request(tab("tab-2", &report("mediaId=s-2&positionMs=30000&state=stopped"))).await;
+    assert_eq!(plays(&w.db(), "alice", "s-2", "media_file"), None, "not past half");
+    w.request(tab("tab-1", &report("mediaId=s-1&positionMs=31000&state=stopped&ignoreScrobble=true"))).await;
+    assert_eq!(plays(&w.db(), "alice", "s-1", "media_file").map(|p| p.0), Some(3), "ignored");
+    w.db().execute("UPDATE player SET scrobble_enabled = 0", []).unwrap();
+    w.here(&report("mediaId=s-3&positionMs=60000&state=stopped")).await;
+    assert_eq!(plays(&w.db(), "alice", "s-3", "media_file"), None, "a player that sends no plays on");
+    w.db().execute("UPDATE player SET scrobble_enabled = 1", []).unwrap();
+    w.here(&report("mediaId=s-3&positionMs=31000&state=stopped")).await;
+    assert_eq!(plays(&w.db(), "alice", "s-3", "media_file").map(|p| p.0), Some(1), "past half");
+    let (_, after) = w.here(&format!("/rest/getNowPlaying?{ALICE}")).await;
+    assert_eq!(after["nowPlaying"], serde_json::json!({}), "the stops ended both sessions");
+    // Navidrome's errors, in its words
+    for (query, code, message) in [
+        ("positionMs=0&state=playing", 10, "missing parameter: 'mediaId'"),
+        ("mediaId=s-1&positionMs=x&state=playing", 0, "invalid parameter 'positionMs': expected integer, got 'x'"),
+        ("mediaId=s-1&positionMs=-1&state=playing", 0, "positionMs must be non-negative"),
+        ("mediaId=s-1&positionMs=0&state=rewinding", 0, "Invalid state: rewinding"),
+        ("mediaId=s-1&positionMs=0&state=playing&playbackRate=0", 0, "playbackRate must be a finite positive number"),
+        ("mediaId=nope&positionMs=0&state=starting", 70, "data not found"),
+    ] {
+        assert_eq!(w.get(&report(query)).await.1, failed(code, message), "{query}");
+    }
+    assert_eq!(w.get(&format!("/rest/reportPlayback?{ALICE}&mediaId=s-1&positionMs=0&state=playing")).await.1, failed(10, "missing parameter: 'mediaType'"));
+}

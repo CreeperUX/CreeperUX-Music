@@ -200,3 +200,33 @@ test('playlists: made by either server and seen by the other at once; appends at
     assert.equal(d.prepare('SELECT song_count FROM playlist WHERE id = ?').get(id).song_count, 62, 'the count');
   } finally { d.close(); }
 });
+
+test('plays: counted by the Rust server, seen by Navidrome at once, never shown to Navidrome (so never sent on)', { timeout: 600_000 }, async t => {
+  // Navidrome logs at debug level: every request it gets and every play it counts or hears of shows in its log
+  const { rust, users, ids, as, db } = await server(t, { ND_LOGLEVEL: 'debug' });
+  const me = as('listener');
+  const go = await navidromeUi(rust.navidrome, users.listener);
+  const before = (await go.api(`/song/${ids['track.feat']}`)).playCount ?? 0;
+  await rustOk(me, 'scrobble', { id: ids['track.feat'], time: 1767484800000 }, { post: true });
+  await rustOk(me, 'scrobble', { id: ids['track.korean'], submission: false });
+  const song = await go.api(`/song/${ids['track.feat']}`);
+  assert.equal(song.playCount, before + 1, 'the play, in /api');
+  assert.ok(song.playDate?.startsWith('2026-01-04'), `its time, in /api: ${song.playDate}`);
+  const playing = await rustOk(me, 'getNowPlaying', {});
+  assert.deepEqual(playing.nowPlaying.entry.map(e => [e.id, e.username, e.playerName, e.state]), [[ids['track.korean'], users.listener.username, CLIENT, 'playing']]);
+  // what Navidrome saw of it: nothing (a Sonus client's plays and "now playing" no longer reach its scrobblers)
+  const log = rust.log();
+  // (its settings, printed at start, mention EnableNowPlaying: not looked for)
+  for (const sign of ['/rest/scrobble', 'msg=Scrobbled', 'msg="Now Playing"', 'Buffering Scrobble', 'PlaybackSession']) {
+    assert.ok(!log.includes(sign), `Navidrome's log has no "${sign}"`);
+  }
+  const d = new DatabaseSync(db, { readOnly: true });
+  try {
+    assert.equal(d.prepare('SELECT count(*) AS n FROM scrobble_buffer').get().n, 0, 'nothing buffered for Last.fm or ListenBrainz');
+    assert.equal(d.prepare('SELECT count(*) AS n FROM scrobbles WHERE media_file_id = ? AND submission_time = 1767484800').get(ids['track.feat']).n, 1, 'the play\'s history row');
+  } finally { d.close(); }
+  // the control: a play Navidrome does get (its web UI's own call) shows in that log
+  await go.subsonic.ok('scrobble', { id: ids['track.feat'], time: 1767484900000 });
+  await sleep(500);
+  assert.ok(rust.log().includes('msg=Scrobbled'), 'a play Navidrome counts itself is logged as such');
+});

@@ -12,7 +12,7 @@ use crate::subsonic::respond::{GENERIC, MISSING_PARAMETER};
 
 use super::json::Json;
 use super::query::{self, Cond, ListOptions, QueryError, Table, not_missing};
-use super::{NOT_FOUND, Reply, Scope, entities, lists, media, seeded_order, writes};
+use super::{NOT_FOUND, Reply, Scope, entities, lists, media, playing, seeded_order, writes};
 
 /// The answer of one of `super::METHODS`.
 pub fn answer(method: &str, scope: &Scope) -> Result<Reply, QueryError> {
@@ -35,6 +35,9 @@ pub fn answer(method: &str, scope: &Scope) -> Result<Reply, QueryError> {
         "createPlaylist" => writes::create_playlist(scope),
         "updatePlaylist" => writes::update_playlist(scope),
         "deletePlaylist" => writes::delete_playlist(scope),
+        "scrobble" => playing::scrobble(scope, scope.now_playing, scope.client_id),
+        "getNowPlaying" => playing::get_now_playing(scope, scope.now_playing),
+        "reportPlayback" => playing::report_playback(scope, scope.now_playing, scope.client_id),
         _ => Ok(Reply::Navidrome("not a method answered here")),
     }
 }

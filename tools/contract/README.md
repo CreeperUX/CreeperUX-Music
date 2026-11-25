@@ -147,7 +147,10 @@ reasons.
 - two users starring, rating and saving queues at the same time lose nothing, and each song's average is right;
 - playlists made and changed by either server are seen by the other at once (`/api/playlist/:id/tracks` too), and 60
   appends to one playlist at the same time, with another user filling their own, are all kept, numbered without a gap;
-- a write waits out another writer holding the lock (4 s) and a full scan, and none fails.
+- a write waits out another writer holding the lock (4 s) and a full scan, and none fails;
+- a play counted by the Rust server is seen at once by Navidrome's web UI API, shows in `getNowPlaying`, and leaves no
+  trace in Navidrome's debug log nor in its buffer for Last.fm and ListenBrainz (with a control: a play Navidrome does
+  get is logged).
 
 ## The old web UI: `web-ui.check.mjs`
 

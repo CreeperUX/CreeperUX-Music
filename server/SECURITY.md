@@ -430,7 +430,15 @@ let through gets here, as the user it signed in as, the same path as the reads.
 kind of item found). One `BEGIN IMMEDIATE` transaction per request, rolled back on any error. A request's ids are as
 many as its query or form holds (a form is read up to 10 MiB, as Navidrome reads it); each is one indexed lookup.
 
-**Not sent:** the `refreshResource` events Navidrome's web UI gets on a star or a rating (decision 2).
+**Plays and now playing.** A play is counted only for the signed-in user (their annotation rows, their `scrobbles`
+rows) and only for a song they see; the time is theirs to give, as in Navidrome (a client may count a play at any
+time, past or future). What is playing now is kept in memory, one session per player (or web UI tab id, a value the
+client chooses, as Navidrome takes it), replaced by the next report of that client: at most one per player and tab,
+each a song row and a few numbers, dropped at its time to live. `getNowPlaying` shows a user only the sessions in the
+libraries they see (every one to an admin), with the name of the user who plays, as Navidrome does.
+
+**Not sent:** the `refreshResource` events Navidrome's web UI gets on a star, a rating or a play, the now-playing
+count (decision 2), and anything to Last.fm, ListenBrainz or plugins (decision 3).
 
 ## Secrets
 
@@ -463,8 +471,9 @@ many as its query or form holds (a form is read up to 10 MiB, as Navidrome reads
   `item_artwork`, `album_tags`, `tag`, `playlist`, `playlist_tracks`, `playqueue`, the three FTS5 tables, `library`,
   `user`, `user_library` and `player`, and write none of them. The library's writes (above) write `annotation` (the
   user's own rows), the `average_rating` of `media_file`, `album`, `artist` and `playlist`, `playqueue` (the user's
-  own row), `playlist` and `playlist_tracks` (the user's own playlists, an admin's: any) and `artwork_queue` (a changed
-  playlist's cover), and read `radio` to find an id as Navidrome does. Covers read `item_artwork` and `artwork`, and files:
+  own row), `playlist` and `playlist_tracks` (the user's own playlists, an admin's: any), `artwork_queue` (a changed
+  playlist's cover) and `scrobbles` (the user's own plays), and read `radio` to find an id as Navidrome does and
+  `player.scrobble_enabled` for a stopped playback. Covers read `item_artwork` and `artwork`, and files:
   the pictures Navidrome's state names, its image store and its cache of resized pictures. Nothing is written there
   either.
 - No change to Navidrome's schema, ever, and no VACUUM; the schema is checked at start and the server refuses any

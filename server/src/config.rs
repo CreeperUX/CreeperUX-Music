@@ -85,6 +85,8 @@ pub struct LibraryOptions {
     pub append_album_version: bool,
     /// `Subsonic.EnableAverageRating` (default on): `averageRating` is part of the answers.
     pub enable_average_rating: bool,
+    /// `EnableScrobbleHistory`: a play also writes a row in `scrobbles`.
+    pub enable_scrobble_history: bool,
     /// `Subsonic.ArtistParticipations` (default off): an artist's albums include those they only appear on.
     pub artist_participations: bool,
     /// `Subsonic.LegacyClients` (default `DSub`): clients that get no OpenSubsonic fields.
@@ -128,6 +130,7 @@ impl Default for LibraryOptions {
             append_subtitle: true,
             append_album_version: true,
             enable_average_rating: true,
+            enable_scrobble_history: true,
             artist_participations: false,
             legacy_clients: "DSub".into(),
             minimal_clients: "SubMusic".into(),
@@ -333,6 +336,7 @@ impl Config {
                     append_subtitle: nd.get_bool("subsonic.appendsubtitle")?.unwrap_or(d.append_subtitle),
                     append_album_version: nd.get_bool("subsonic.appendalbumversion")?.unwrap_or(d.append_album_version),
                     enable_average_rating: nd.get_bool("subsonic.enableaveragerating")?.unwrap_or(d.enable_average_rating),
+                    enable_scrobble_history: nd.get_bool("enablescrobblehistory")?.unwrap_or(d.enable_scrobble_history),
                     artist_participations: nd.get_bool("subsonic.artistparticipations")?.unwrap_or(d.artist_participations),
                     legacy_clients: nd.get("subsonic.legacyclients")?.unwrap_or(d.legacy_clients),
                     minimal_clients: nd.get("subsonic.minimalclients")?.unwrap_or(d.minimal_clients),

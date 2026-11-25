@@ -22,6 +22,7 @@ pub mod lists;
 pub mod media;
 pub mod natural;
 pub mod player;
+pub mod playing;
 pub mod query;
 pub mod search;
 pub mod writes;
@@ -69,6 +70,10 @@ pub const METHODS: &[&str] = &[
     "createPlaylist",
     "updatePlaylist",
     "deletePlaylist",
+    // phase 4, part 3: plays and now playing (playing.rs)
+    "scrobble",
+    "getNowPlaying",
+    "reportPlayback",
 ];
 
 /// Whether a method is one of the library's.
@@ -102,6 +107,9 @@ pub struct Library {
     /// The seeds of the random lists, per table and user: Navidrome keeps the same in its memory (`utils/hasher`), so
     /// that a random list's pages belong together until its first page is asked for again.
     seeds: Arc<Mutex<HashMap<String, u64>>>,
+    /// What is playing now (`scrobble` without `submission`, `getNowPlaying`): kept here, as Navidrome kept it in
+    /// its memory.
+    now_playing: Arc<playing::NowPlaying>,
     /// How many requests were answered here, and how many went on to Navidrome.
     answered: AtomicU64,
     passed: AtomicU64,
@@ -173,6 +181,11 @@ pub struct Scope<'a> {
     pub seeds: &'a Mutex<HashMap<String, u64>>,
     /// The request's `If-None-Match`, for what is answered with a validator.
     pub if_none_match: Option<&'a str>,
+    /// What is playing now, and the client this request's session is kept for.
+    pub now_playing: &'a playing::NowPlaying,
+    pub client_id: &'a str,
+    /// The player Navidrome registered for the request (empty: none).
+    pub player_id: &'a str,
 }
 
 impl Scope<'_> {
@@ -209,6 +222,7 @@ impl Library {
             envelope: setup.envelope,
             frame_options: HeaderValue::from_str(&setup.frame_options).unwrap_or(HeaderValue::from_static("DENY")),
             seeds: Arc::new(Mutex::new(HashMap::new())),
+            now_playing: Arc::new(playing::NowPlaying::default()),
             answered: AtomicU64::new(0),
             passed: AtomicU64::new(0),
         }
@@ -265,7 +279,17 @@ impl Library {
         let report_real_path = player.as_ref().is_some_and(|player| player.report_real_path);
         let if_none_match = headers.get(header::IF_NONE_MATCH).and_then(|value| value.to_str().ok()).map(str::to_string);
 
-        let (db, options, seeds) = (self.db.clone(), self.options.clone(), self.seeds.clone());
+        // the client a session is kept for: the web UI's unique id (header, else its cookie), else the player
+        let client_id = headers
+            .get("x-nd-client-unique-id")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| cookie(headers, "X-ND-Client-Unique-Id"))
+            .or_else(|| player.as_ref().map(|player| player.id.clone()))
+            .unwrap_or_default();
+        let player_id = player.as_ref().map(|player| player.id.clone()).unwrap_or_default();
+        let (db, options, seeds, now_playing) = (self.db.clone(), self.options.clone(), self.seeds.clone(), self.now_playing.clone());
         let (user_id, client, params) = (user.user_id.clone(), client.to_string(), params.clone());
         let reply = tokio::task::spawn_blocking(move || {
             let run = |conn: &rusqlite::Connection| {
@@ -278,6 +302,9 @@ impl Library {
                     context: entities::Context { options: &options, client: &client, report_real_path },
                     seeds: &seeds,
                     if_none_match: if_none_match.as_deref(),
+                    now_playing: &now_playing,
+                    client_id: &client_id,
+                    player_id: &player_id,
                 };
                 Ok(browse::answer(method, &scope))
             };
@@ -420,6 +447,14 @@ fn compress(body: &[u8]) -> Option<Vec<u8>> {
     let mut encoder = flate2::write::GzEncoder::new(Vec::with_capacity(body.len() / 4 + 64), flate2::Compression::new(5));
     encoder.write_all(body).ok()?;
     encoder.finish().ok()
+}
+
+/// A request cookie's value (Go: `r.Cookie(name)`).
+fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers.get_all(header::COOKIE).iter().filter_map(|value| value.to_str().ok()).flat_map(|value| value.split(';')).find_map(|pair| {
+        let (key, value) = pair.trim().split_once('=')?;
+        (key == name && !value.is_empty()).then(|| value.to_string())
+    })
 }
 
 #[cfg(test)]

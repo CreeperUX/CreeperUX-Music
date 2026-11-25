@@ -454,7 +454,8 @@ Where it knowingly differs from Navidrome:
 
 ## The library's writes
 
-`src/library/writes.rs` (roadmap, phase 4; part 1: stars, ratings and the play queue; part 2: playlists). Answered here, in JSON, as a
+`src/library/writes.rs` and `src/library/playing.rs` (roadmap, phase 4; part 1: stars, ratings and the play queue; part 2:
+playlists; part 3: plays and what is playing now). Answered here, in JSON, as a
 GET or a form post, also as `.view`, and written to Navidrome's tables as Navidrome writes them, so that either server
 reads them back the same:
 
@@ -466,6 +467,9 @@ reads them back the same:
 | `createPlaylist` | a new playlist named `name` (new id, owner the user, created now) with the `songId`s, or with `playlistId` that playlist's songs replaced (no songs given: its songs stay, as in Navidrome; a `name` is then not used); a song id the user cannot read is left out (one who sees every library: kept as given, unchecked, as Navidrome keeps it); tracks numbered 1, 2, …; the counters (`song_count`, `duration`, `size`: what is there, through float32s as Navidrome reads them) and `updated_at` written anew; the cover queued for Navidrome's artwork worker; answered with the playlist as `getPlaylist` answers; 0 `Internal Server Error: required parameter name is missing`, 70 for one the user does not see, 50 for someone else's (an admin may change anyone's) or one kept in sync with a file |
 | `updatePlaylist` | `songIndexToRemove` (0-based; out of range or not a number: nothing) removed and the rest numbered 1, 2, … again, then `songIdToAdd` appended after the last, then `name` (empty: unchanged), `comment` (given empty: emptied) and `public` (`true`, `on`, `1`, in any case) written back with every other column, as Navidrome's `Put` does; the cover queued when the songs changed; 10 without `playlistId`, 70, 50 as above |
 | `deletePlaylist` | the playlist and, through the database's own cascade, its tracks; 10 without `id`, 70, 50 as above |
+| `scrobble` | with `submission` (the default; `true`, `on`, `1`), a play of each `id` the user sees, at its `time` (ms, local time; now, with the clock's full precision, without one or for one that is not a number): one more play of the song, its album and every artist of its `artist` role, the last play the later one (compared as text, as Navidrome's SQL does), and with `EnableScrobbleHistory` (on by default) a `scrobbles` row in whole seconds; a song nobody sees is skipped; without `submission`, the first `id` playing now at `position` (s); 10 without an id, 0 `Wrong number of timestamps: …` |
+| `reportPlayback` | Navidrome's playback states: `starting` (a late one does not undo `playing`), `playing` and `paused` (the session goes on for the same song; it ends a song's length later at its rate, plus 5 s, or 30 minutes after a pause), `stopped` (a play when the position is past half the song, at most 4 minutes, the player sends plays on, `ignoreScrobble` is not set; a late stop for an earlier song ends nothing); sessions kept per player, or per web UI tab (`X-ND-Client-Unique-Id`); Navidrome's errors for every parameter |
+| `getNowPlaying` | the sessions in the libraries the user sees, the latest started first, `minutesAgo` from the start, the position of what plays estimated from its last report and rate (at most the song's length), `playerId` the entry's place, `playerName` the client |
 
 - **One transaction per request** (`BEGIN IMMEDIATE`), as Navidrome's `star` is; its `setRating` and `savePlayQueue`
   are two or three statements of their own there, with the same end state. A write waits for Navidrome's write lock
@@ -485,8 +489,28 @@ reads them back the same:
 - **Smart playlists stay Navidrome's** (any write to one: Navidrome writes its rules back as it marshals them, and
   leaves its counters to the next evaluation), and so does deleting a playlist with an uploaded cover (Navidrome
   removes the file).
-- **Still Navidrome's:** `scrobble` and now playing (part 3), `savePlayQueueByIndex`, `getPlayQueueByIndex`,
-  bookmarks and `reportPlayback` (no Sonus client sends them).
+- **What is playing now is kept here** (`playing.rs`), in memory, as Navidrome kept it in its own: `scrobble`
+  without `submission`, `reportPlayback` and `getNowPlaying` moved together (roadmap principle 2). `reportPlayback` is
+  taken although no Sonus client sends it: Navidrome's own web UI reports its playback with it, and left with
+  Navidrome its sessions would have been missing from `getNowPlaying`, which its "now playing" panel reads. A
+  restart of the server forgets what was playing, as a restart of Navidrome did.
+- **Plays are no longer sent on** (decision 3): Navidrome never sees a play or a "now playing" any more, so nothing
+  reaches Last.fm, ListenBrainz or its plugins; their port, and the buffer for them, are not made.
+  `writes.test.mjs` checks Navidrome's debug log and its buffer table. Plays still buffered in Navidrome from before
+  are its own to send or drop.
+- **Navidrome's web UI**: its now-playing count comes over its event stream, from Navidrome, which now has no
+  sessions, so the badge no longer updates by itself; opening the panel reads `getNowPlaying` (answered here) and
+  shows the right list and count (decision 2).
+- **Player registration stays with Navidrome** (the `ping` described under the reads). Moving it would port
+  Navidrome's rules for finding or making a player (client, user agent, user), its cookie and its once-a-minute
+  write, for nothing a Sonus client would see: Navidrome's web UI still edits players through `/api`, and streams
+  (phase 5) still read them there. A write only needs the player's id (the key of its now-playing session) and its
+  `scrobble_enabled`, both read from the row Navidrome keeps. It moves with the streams.
+- **Not the same as Navidrome**: an answer to a request carrying `X-ND-Client-Unique-Id` does not set that header's
+  cookie (Navidrome's middleware does, for its web UI's later requests without the header; every request of its web
+  UI carries the header); `getNowPlaying` from a player with a transcoding set goes to Navidrome, which has no
+  sessions (no Sonus client asks for it).
+- **Still Navidrome's:** `savePlayQueueByIndex`, `getPlayQueueByIndex` and bookmarks (no Sonus client sends them).
 
 ## Sonus Connect version 2
 
@@ -656,6 +680,44 @@ These start this server as its image runs it: `cargo run`, which starts Navidrom
 database.
 
 ## Checked against the real Navidrome
+
+### The library's writes (phase 4, part 3: plays and now playing), 2026-11-25
+
+Windows on ARM, Navidrome 0.64.2-sonus.10, `cargo run` (a debug build) in front of it:
+
+- `node tools/contract/diff.mjs --go-vs-gateway --state --corpus tools/contract/corpus/writes.json`: 187 of 187 the
+  same, 185 answered here; the databases the same, row for row, `scrobbles` included. 55 requests were added: plays
+  at times with and without milliseconds, without a time, with a time that is not a number, several in one call, an
+  earlier one, songs with two artists, an unknown id, another user's; every error; now playing for an unknown id,
+  `submission` as `yes`, `false`, `0`, two ids, three users, the same song again; `getNowPlaying` before, during (the
+  latest first), once the songs have played to their end (positions capped) and once their time is up (gone);
+  `reportPlayback` with every parameter error, an unknown id, starting and paused on two web UI tabs, playing at
+  double speed, a late `starting` ignored, a late `stopped` for another song ignored, stopped early (no play), past
+  half (a play), with `ignoreScrobble`, as another user.
+- A writes corpus made from the golden database, now with plays and playback reports: 255 of 255, the databases the
+  same.
+- **On two copies of the production database** (writes on the copies only; the original's hash unchanged): 250
+  requests made from its data: 250 the same, 244 answered here (6 `getStarred2` with artists with pictures went to
+  Navidrome, as decided); the databases the same, row for row (854 annotation rows, 2,332 plays in `scrobbles`).
+- `node --test tools/contract/writes.test.mjs`: 5 of 5, the new one: a play counted here is seen at once by
+  Navidrome's web UI API, `getNowPlaying` shows the session, and Navidrome's debug log has no trace of either (no
+  `/rest/scrobble`, no "Scrobbled", no "Now Playing", nothing buffered for Last.fm or ListenBrainz; the control, a play
+  Navidrome gets itself, is logged).
+- The writes corpus with `--state` once more, and two Navidromes against each other (`--go-vs-go --state`): 187 of
+  187 and the databases the same each time. `diff.mjs --go-vs-gateway` (reads): 443 of 443, 331 answered here.
+  `run.mjs --through-gateway`: 132 of 132. `writes.test.mjs`, `gateway.test.mjs`, `auth-routes.test.mjs`,
+  `diff.test.mjs` and the three `security/` tests: 38 of 38. `cargo test`: 277.
+- **The Windows client against this server, end of phase 4**: `node tools/e2e/acceptance.mjs --arch=ARM64`, all 14
+  rounds, `SONUS_TEST_SERVER` at a debug build of this server in front of the frozen Navidrome, on a fresh library of
+  53 generated songs, throwaway users: **92 of 92, four skipped** (the same four as at the end of phase 3: no DSD song;
+  every large cover already fetched; two Connect checks for version 1 or the demo server's hook). This server
+  answered 348 of the library's requests itself: 176 covers, 32 `search3`, 25 `getPlaylist`, 22 `scrobble`, 21
+  `getPlaylists`, 19 `getAlbumList2`, 15 `getLyricsBySongId`, 14 `ping`, 4 `getStarred2`, 4 `createPlaylist`, 4
+  `deletePlaylist`, 3 `updatePlaylist`, 3 `getSong`, 3 `getAlbum`, a `star`, an `unstar` and a `getNowPlaying`; and
+  left 29 to Navidrome, for the reasons written down (23 covers not resized yet, 4 disc covers, 2 songs with a lyrics
+  file). The play it counted is in `scrobbles`; Navidrome's buffer for Last.fm and ListenBrainz stayed empty. Its log
+  had two warnings, both the run's own (the first admin made; a wrong password the client's tests type on purpose).
+  The client saved no play queue during the run (`savePlayQueue` is covered by the corpora and tests above).
 
 ### The library's writes (phase 4, part 2: playlists), 2026-11-25
 

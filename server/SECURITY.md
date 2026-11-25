@@ -414,6 +414,12 @@ let through gets here, as the user it signed in as, the same path as the reads.
 - The item's `average_rating` (`setRating`): the one column of a shared row written, recomputed from every user's
   ratings in the database, as Navidrome does; the user only adds or changes their own rating.
 - `playqueue`: only the signed-in user's row (deleted and written again, as Navidrome does).
+- `playlist` and `playlist_tracks`: a new playlist is the user's own; an existing one only when the user owns it (an
+  admin: any), as Navidrome's `checkWritable`; one the user does not see is "not found", someone else's they see
+  (public) is refused (50). The songs added are only those the user can read (Navidrome's `keepAccessible`), so a
+  playlist cannot be used to learn of songs in a library the user is not granted. `artwork_queue`: one row per
+  changed playlist, for Navidrome's artwork worker, as Navidrome writes it. Smart playlists, and a playlist with an
+  uploaded cover being deleted (a file), stay Navidrome's.
 - An item is looked up as the user sees it (the library filter; a playlist their own or public, all for an admin), as
   Navidrome's `GetEntityByID` does: what a user cannot see they cannot star or rate (a rating answers 70, a star skips
   it), so a write tells them nothing they could not read.
@@ -456,8 +462,9 @@ many as its query or form holds (a form is read up to 10 MiB, as Navidrome reads
 - The library's reads (above) read `album`, `media_file`, `artist`, `library_artist`, `annotation`, `bookmark`,
   `item_artwork`, `album_tags`, `tag`, `playlist`, `playlist_tracks`, `playqueue`, the three FTS5 tables, `library`,
   `user`, `user_library` and `player`, and write none of them. The library's writes (above) write `annotation` (the
-  user's own rows), the `average_rating` of `media_file`, `album`, `artist` and `playlist`, and `playqueue` (the user's
-  own row), and read `radio` to find an id as Navidrome does. Covers read `item_artwork` and `artwork`, and files:
+  user's own rows), the `average_rating` of `media_file`, `album`, `artist` and `playlist`, `playqueue` (the user's
+  own row), `playlist` and `playlist_tracks` (the user's own playlists, an admin's: any) and `artwork_queue` (a changed
+  playlist's cover), and read `radio` to find an id as Navidrome does. Covers read `item_artwork` and `artwork`, and files:
   the pictures Navidrome's state names, its image store and its cache of resized pictures. Nothing is written there
   either.
 - No change to Navidrome's schema, ever, and no VACUUM; the schema is checked at start and the server refuses any

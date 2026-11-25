@@ -1186,3 +1186,100 @@ async fn the_play_queue_is_stored_as_navidrome_stores_it() {
     w.here(&format!("/rest/savePlayQueue?{ALICE}&id=s-1")).await;
     assert_ne!(queue(&w).unwrap().0, id);
 }
+
+/// A playlist's tracks in order: (position, song).
+fn tracks(conn: &Connection, playlist: &str) -> Vec<(i64, String)> {
+    let mut statement = conn.prepare("SELECT id, media_file_id FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY id").unwrap();
+    statement.query_map([playlist], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
+}
+
+/// A playlist's counters: (song_count, duration, size).
+fn counters(conn: &Connection, playlist: &str) -> (i64, f64, i64) {
+    conn.query_row("SELECT song_count, duration, size FROM playlist WHERE id = ?1", [playlist], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap()
+}
+
+fn queued(conn: &Connection, playlist: &str) -> bool {
+    conn.query_row("SELECT count(*) FROM artwork_queue WHERE item_kind = 'pl' AND item_id = ?1 AND priority = 50 AND image_type = 'primary'", [playlist], |r| {
+        r.get::<_, i64>(0)
+    })
+    .unwrap()
+        == 1
+}
+
+#[tokio::test]
+async fn a_playlist_is_made_and_replaced_as_navidrome_does_it() {
+    let w = world_with_lists().await;
+    // new, with songs: answered with the playlist, as getPlaylist answers
+    let (_, made) = w.here(&format!("/rest/createPlaylist?{ALICE}&name=Mine&songId=s-3&songId=s-1&songId=s-3&songId=not-a-song")).await;
+    let id = made["playlist"]["id"].as_str().unwrap().to_string();
+    assert_eq!(made["playlist"]["name"], "Mine");
+    assert_eq!(names(&made["playlist"]["entry"]), ["Three", "One", "Three"], "the unknown id is kept, unseen (alice sees every library)");
+    assert_eq!(tracks(&w.db(), &id), [(1, "s-3".into()), (2, "s-1".into()), (3, "s-3".into()), (4, "not-a-song".into())]);
+    // the counters count the songs that are there, as float32s
+    assert_eq!(counters(&w.db(), &id), (3, f64::from((61.9f64 * 3.0) as f32), 3000));
+    assert!(queued(&w.db(), &id), "its cover is queued for Navidrome's artwork worker");
+    let (created, updated, owner): (String, String, String) =
+        w.db().query_row("SELECT created_at, updated_at, owner_id FROM playlist WHERE id = ?1", [&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+    assert!(go_time(&created) && go_time(&updated));
+    assert_eq!(owner, "id-alice");
+    // its songs replaced (playlistId); without songs the old ones stay
+    w.here(&format!("/rest/createPlaylist?{ALICE}&playlistId={id}&songId=s-2")).await;
+    assert_eq!(tracks(&w.db(), &id), [(1, "s-2".into())]);
+    w.here(&format!("/rest/createPlaylist?{ALICE}&playlistId={id}")).await;
+    assert_eq!(tracks(&w.db(), &id), [(1, "s-2".into())]);
+    // Navidrome's errors, in its words
+    assert_eq!(w.get(&format!("/rest/createPlaylist?{ALICE}&songId=s-1")).await.1, failed(0, "Internal Server Error: required parameter name is missing"));
+    assert_eq!(
+        w.get(&format!("/rest/createPlaylist?{ALICE}&playlistId=pl-shared&songId=s-1")).await.1,
+        failed(50, "User is not authorized for the given operation")
+    );
+    assert_eq!(
+        w.get(&format!("/rest/createPlaylist?{ALICE}&playlistId=pl-secret&songId=s-1")).await.1,
+        failed(70, "data not found"),
+        "a private one alice does not see"
+    );
+    // the admin may change anyone's; a smart playlist is Navidrome's
+    w.here(&format!("/rest/createPlaylist?{ADMIN}&playlistId={id}&songId=s-1")).await;
+    assert_eq!(tracks(&w.db(), &id), [(1, "s-1".into())]);
+    w.navidromes(&format!("/rest/createPlaylist?{ADMIN}&playlistId=pl-smart&songId=s-1")).await;
+}
+
+#[tokio::test]
+async fn a_playlist_is_changed_and_deleted_as_navidrome_does_it() {
+    let w = world_with_lists().await;
+    // pl-own: s-2, s-gone, s-1. Remove the first (0-based), out of range ones and not numbers left alone, then add
+    w.here(&format!("/rest/updatePlaylist?{ALICE}&playlistId=pl-own&songIndexToRemove=0&songIndexToRemove=9&songIndexToRemove=x&songIdToAdd=s-3")).await;
+    assert_eq!(tracks(&w.db(), "pl-own"), [(1, "s-gone".into()), (2, "s-1".into()), (3, "s-3".into())], "renumbered, then appended");
+    assert_eq!(counters(&w.db(), "pl-own").0, 2, "a song that is gone is not counted");
+    assert!(queued(&w.db(), "pl-own"));
+    // the name, the comment (empty: set), public as Navidrome reads a bool
+    w.here(&format!("/rest/updatePlaylist?{ALICE}&playlistId=pl-own&name=Renamed&comment=&public=ON")).await;
+    let (name, comment, public): (String, String, bool) =
+        w.db().query_row("SELECT name, comment, public FROM playlist WHERE id = 'pl-own'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+    assert_eq!((name.as_str(), comment.as_str(), public), ("Renamed", "", true));
+    w.here(&format!("/rest/updatePlaylist?{ALICE}&playlistId=pl-own&name=&public=yes")).await;
+    let (name, public): (String, bool) = w.db().query_row("SELECT name, public FROM playlist WHERE id = 'pl-own'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!((name.as_str(), public), ("Renamed", false), "an empty name is no name; yes is not true");
+    // bob sees no library: the songs he adds to his own playlist are left out
+    w.db().execute("INSERT INTO playlist (id, name, owner_id, created_at, updated_at) VALUES ('pl-bob', 'Bob''s', (SELECT id FROM user WHERE user_name = 'bob'), '', '')", []).unwrap();
+    w.here(&format!("/rest/updatePlaylist?{BOB}&playlistId=pl-bob&songIdToAdd=s-1")).await;
+    assert_eq!(tracks(&w.db(), "pl-bob"), []);
+    // errors
+    assert_eq!(w.get(&format!("/rest/updatePlaylist?{ALICE}&name=x")).await.1, failed(10, "missing parameter: 'playlistId'"));
+    assert_eq!(
+        w.get(&format!("/rest/updatePlaylist?{ALICE}&playlistId=pl-shared&name=x")).await.1,
+        failed(50, "User is not authorized for the given operation")
+    );
+    assert_eq!(w.get(&format!("/rest/updatePlaylist?{ALICE}&playlistId=nope&name=x")).await.1, failed(70, "data not found"));
+    w.navidromes(&format!("/rest/updatePlaylist?{ADMIN}&playlistId=pl-smart&name=x")).await;
+    // delete: its tracks go with it
+    assert_eq!(w.get(&format!("/rest/deletePlaylist?{ALICE}&id=pl-shared")).await.1, failed(50, "User is not authorized for the given operation"));
+    assert_eq!(w.get(&format!("/rest/deletePlaylist?{ALICE}")).await.1, failed(10, "missing parameter: 'id'"));
+    w.here(&format!("/rest/deletePlaylist?{ALICE}&id=pl-own")).await;
+    assert_eq!(w.db().query_row("SELECT count(*) FROM playlist WHERE id = 'pl-own'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(tracks(&w.db(), "pl-own"), []);
+    assert_eq!(w.get(&format!("/rest/deletePlaylist?{ALICE}&id=pl-own")).await.1, failed(70, "data not found"));
+    // one with an uploaded cover is Navidrome's: it removes the file too
+    w.db().execute("UPDATE playlist SET uploaded_image = 'pl-shared.jpg' WHERE id = 'pl-shared'", []).unwrap();
+    w.navidromes(&format!("/rest/deletePlaylist?{ADMIN}&id=pl-shared")).await;
+}

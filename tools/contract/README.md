@@ -129,7 +129,15 @@ not is listed (with `--db`: the tables and counts only).
 
 `corpus-from-db.mjs --writes` makes a writes corpus from any database: stars and unstars as every user (songs, albums,
 artists, every playlist), the user's own stars and ratings from before undone, items several users rate, unknown ids,
-the queue saved, saved again and emptied, each followed by the reads that show it.
+the queue saved, saved again and emptied, playlists made, changed, replaced and deleted (the user's own from before
+too, someone else's refused), each followed by the reads that show it.
+
+A request's `save` keeps the id of the playlist each side's server made, for later requests as `{{saved.NAME}}`; each
+side's answers then show its own id as that placeholder, so the two compare. A playlist's cover is queued for
+Navidrome's artwork worker when its songs change; `--state` waits until both workers have taken every playlist from
+their queues (they poll every 5 s), and a cover made anew during the run is compared as made, not by its hash: the
+grid's albums are picked at random. A playlist's `coverArt` and `created` are volatile in the corpora for the same
+reasons.
 
 `node --test tools/contract/writes.test.mjs` (each test on its own golden copy, two-step verification off):
 
@@ -137,6 +145,8 @@ the queue saved, saved again and emptied, each followed by the reads that show i
   the web UI signs in) and its Subsonic API, and Navidrome's writes by the Rust server: Navidrome caches none of these
   tables;
 - two users starring, rating and saving queues at the same time lose nothing, and each song's average is right;
+- playlists made and changed by either server are seen by the other at once (`/api/playlist/:id/tracks` too), and 60
+  appends to one playlist at the same time, with another user filling their own, are all kept, numbered without a gap;
 - a write waits out another writer holding the lock (4 s) and a full scan, and none fails.
 
 ## The old web UI: `web-ui.check.mjs`

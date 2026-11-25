@@ -4,6 +4,7 @@
 //
 //   dumpState(file, { since, before })  → { table: [row, …] }, rows sorted
 //   compareState(a, b)                 → [{ table, a, b }] the rows only one side has
+//   settle(files)                      → waits until Navidrome's artwork worker has taken every playlist's cover from its queue
 //
 // Normalizing, explicitly:
 //   - a time written during the run (at or after `since`) becomes `<now OFFSET>`: when it was written differs between
@@ -29,7 +30,9 @@ const TABLES = {
           UNION ALL SELECT 'playlist', id, average_rating FROM playlist WHERE average_rating <> 0`,
     times: [],
   },
-  // what Navidrome does to a playlist's cover when the playlist changes
+  // what Navidrome does to a playlist's cover when the playlist changes: queued for its artwork worker...
+  artwork_queue: { sql: "SELECT * FROM artwork_queue WHERE item_kind = 'pl'", times: ['retry_at', 'enqueued_at'] },
+  // ... which makes it anew (a grid of the playlist's album covers, picked at random: see below)
   playlist_artwork: { sql: "SELECT * FROM item_artwork WHERE item_kind = 'pl'", times: ['ref_mtime', 'attempted_at', 'updated_at'] },
 };
 
@@ -73,13 +76,27 @@ export function dumpState(file, { since = 0, before = { playqueue: new Set(), pl
   for (const q of t.playqueue) if (!before.playqueue.has(q.id)) names.set(q.id, `<new playqueue of ${q.user_id}>`);
   for (const p of t.playlist) if (!before.playlist.has(p.id)) names.set(p.id, `<new playlist ${p.owner_id} ${JSON.stringify(p.name)}>`);
   const rename = v => (typeof v === 'string' && names.has(v) ? names.get(v) : v);
+  // a playlist made and deleted during the run leaves its id in the artwork tables only
+  const renameItem = v => (names.has(v) ? names.get(v) : before.playlist.has(v) ? v : '<a playlist made and deleted during the run>');
   const out = {};
   for (const [table, { times }] of Object.entries(TABLES)) {
     out[table] = t[table]
       .map(row => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, times.includes(k) ? normalizeTime(v, since) : rename(v)])))
       .map(row => {
-        // a playlist's artwork state is keyed by the playlist's id
-        if (table === 'playlist_artwork') row.item_id = rename(row.item_id);
+        if (table === 'playlist_artwork') {
+          // a playlist's artwork state is keyed by the playlist's id
+          row.item_id = renameItem(row.item_id);
+          // a cover made anew during the run: Navidrome picks the grid's albums at random (resolve.go, "random()"),
+          // so two servers' new covers differ even when both made one; that one was made is compared
+          if (row.updated_at?.startsWith?.('<now')) { row.hash = '<made anew during the run>'; row.trace = '<…>'; }
+        }
+        if (table === 'artwork_queue') {
+          row.item_id = renameItem(row.item_id);
+          // an item the worker cannot find (a playlist deleted after its cover was queued) stays queued, retried on
+          // the worker's own schedule: how often it has tried by now differs between two servers
+          row.attempts = row.attempts > 0 ? '<tried>' : 0;
+          if (row.attempts) row.trace = '<…>';
+        }
         return row;
       })
       .map(row => JSON.stringify(row))
@@ -103,3 +120,20 @@ export function compareState(a, b) {
 
 /** Row counts per table, for a report. */
 export const counts = state => Object.fromEntries(Object.entries(state).map(([t, rows]) => [t, rows.length]));
+
+/**
+ * Waits (up to `ms`) until no playlist is left in any of the databases' artwork queues: Navidrome's worker polls its
+ * queue every 5 s, so a cover queued by a write is made a few seconds later, at its own moment on each side.
+ */
+export async function settle(files, { ms = 30_000 } = {}) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const left = files.map(f => {
+      const db = new DatabaseSync(f, { readOnly: true });
+      // (a deleted playlist's cover stays queued, retried: not waited for)
+      try { return db.prepare("SELECT count(*) AS n FROM artwork_queue WHERE item_kind = 'pl' AND item_id IN (SELECT id FROM playlist)").get().n; } finally { db.close(); }
+    });
+    if (left.every(n => n === 0) || Date.now() > deadline) return left;
+    await new Promise(done => setTimeout(done, 500));
+  }
+}

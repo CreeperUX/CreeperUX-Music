@@ -454,7 +454,7 @@ Where it knowingly differs from Navidrome:
 
 ## The library's writes
 
-`src/library/writes.rs` (roadmap, phase 4; part 1: stars, ratings and the play queue). Answered here, in JSON, as a
+`src/library/writes.rs` (roadmap, phase 4; part 1: stars, ratings and the play queue; part 2: playlists). Answered here, in JSON, as a
 GET or a form post, also as `.view`, and written to Navidrome's tables as Navidrome writes them, so that either server
 reads them back the same:
 
@@ -463,6 +463,9 @@ reads them back the same:
 | `star`, `unstar` | every `id`, `albumId` and `artistId`, taken together; each looked up as Navidrome's `GetEntityByID` does it (artist, album, playlist, song, radio station, as the user sees them: a radio station's star is kept as a song's, as in Navidrome), one nobody sees skipped; the user's `annotation` row updated, else inserted, with `starred` and `starred_at` (also set when unstarring); 10 `Required id parameter is missing` |
 | `setRating` | the user's `rating` and `rated_at`, then the item's `average_rating` over every user's rating above 0, rounded to two places; any integer kept as given, as Navidrome keeps it; 10 without `id` or `rating`, 0 for a rating that is not a number, 70 `data not found` for an item the user does not see |
 | `savePlayQueue` | the user's queue replaced: `items` the ids as given, joined by commas (not checked, as in Navidrome), `current` the index of the first `current` among them (else 0), `position` (0 when it is not a number), `changed_by` the client's name; a queue saved again keeps its id, and its `created_at` becomes Go's zero time, as Navidrome writes it then; no ids: no queue |
+| `createPlaylist` | a new playlist named `name` (new id, owner the user, created now) with the `songId`s, or with `playlistId` that playlist's songs replaced (no songs given: its songs stay, as in Navidrome; a `name` is then not used); a song id the user cannot read is left out (one who sees every library: kept as given, unchecked, as Navidrome keeps it); tracks numbered 1, 2, …; the counters (`song_count`, `duration`, `size`: what is there, through float32s as Navidrome reads them) and `updated_at` written anew; the cover queued for Navidrome's artwork worker; answered with the playlist as `getPlaylist` answers; 0 `Internal Server Error: required parameter name is missing`, 70 for one the user does not see, 50 for someone else's (an admin may change anyone's) or one kept in sync with a file |
+| `updatePlaylist` | `songIndexToRemove` (0-based; out of range or not a number: nothing) removed and the rest numbered 1, 2, … again, then `songIdToAdd` appended after the last, then `name` (empty: unchanged), `comment` (given empty: emptied) and `public` (`true`, `on`, `1`, in any case) written back with every other column, as Navidrome's `Put` does; the cover queued when the songs changed; 10 without `playlistId`, 70, 50 as above |
+| `deletePlaylist` | the playlist and, through the database's own cascade, its tracks; 10 without `id`, 70, 50 as above |
 
 - **One transaction per request** (`BEGIN IMMEDIATE`), as Navidrome's `star` is; its `setRating` and `savePlayQueue`
   are two or three statements of their own there, with the same end state. A write waits for Navidrome's write lock
@@ -476,8 +479,14 @@ reads them back the same:
   write made here sends none, so an open old web UI shows it once it reloads the item (decision 2 of the roadmap).
 - **A player's settings do not matter to a write** (its answer has no song in it): a player with a transcoding set,
   which keeps the reads with Navidrome, does not keep the writes there.
-- **Still Navidrome's:** playlists (part 2), `scrobble` and now playing (part 3), `savePlayQueueByIndex`,
-  `getPlayQueueByIndex`, bookmarks and `reportPlayback` (no Sonus client sends them).
+- **A playlist's cover** is made by Navidrome's artwork worker, which polls its queue every 5 s: a change to a
+  playlist's songs queues it there, as Navidrome's own change does, and the new cover (and its id in answers) shows a
+  few seconds later. Navidrome picks the grid's albums at random, so two servers (or two runs) make different covers.
+- **Smart playlists stay Navidrome's** (any write to one: Navidrome writes its rules back as it marshals them, and
+  leaves its counters to the next evaluation), and so does deleting a playlist with an uploaded cover (Navidrome
+  removes the file).
+- **Still Navidrome's:** `scrobble` and now playing (part 3), `savePlayQueueByIndex`, `getPlayQueueByIndex`,
+  bookmarks and `reportPlayback` (no Sonus client sends them).
 
 ## Sonus Connect version 2
 
@@ -647,6 +656,30 @@ These start this server as its image runs it: `cargo run`, which starts Navidrom
 database.
 
 ## Checked against the real Navidrome
+
+### The library's writes (phase 4, part 2: playlists), 2026-11-25
+
+Windows on ARM, Navidrome 0.64.2-sonus.10, `cargo run` (a debug build) in front of it:
+
+- `node tools/contract/diff.mjs --go-vs-gateway --state --corpus tools/contract/corpus/writes.json`: 132 of 132 the
+  same, 127 answered here; the two databases the same, row for row, Navidrome's artwork queue and the playlists'
+  artwork state included. 48 requests were added: new playlists with songs, empty, with duplicates and an unknown id,
+  by another user; replacing songs (own, without songs, with a name, someone else's, a public one, an unknown id, a
+  smart one, as the admin); removing out of range, negative, not-a-number and repeated indexes, every song, removing
+  and adding at once, adding an empty id, an empty name, an empty comment, `public` as `on` and `yes`; every error;
+  deleting twice, someone else's, as the admin.
+- A writes corpus made from the golden database, now with playlists: 210 of 210, the databases the same.
+- **On two copies of the production database** (writes on the copies only; the original's hash unchanged): 205
+  requests made from its data, its users' own playlists changed and replaced among them: 205 the same, 200 answered
+  here (5 `getStarred2` with artists with pictures went to Navidrome, as decided); the databases the same, row for row
+  (20 playlists, 1,382 tracks).
+- `node --test tools/contract/writes.test.mjs`: 4 of 4, the new one: playlists made and changed by either server are
+  seen by the other at once (`/api/playlist/:id/tracks` too); 60 appends to one playlist at once, with another user
+  filling their own, are all kept, numbered 1 to 62 without a gap.
+- The writes corpus with `--state` twice more, and two Navidromes against each other (`--go-vs-go --state`): 132 of
+  132 and the databases the same each time. `diff.mjs --go-vs-gateway` (reads): 443 of 443, 330 answered here.
+  `run.mjs --through-gateway`: 132 of 132. `writes.test.mjs`, `gateway.test.mjs`, `auth-routes.test.mjs`: 17 of 17.
+  `cargo test`: 274.
 
 ### The library's writes (phase 4, part 1), 2026-11-25
 

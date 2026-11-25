@@ -260,7 +260,7 @@ For a database that is not the golden one (a copy of a real server's, say), the 
 and both servers run on copies of it:
 
 ```sh
-node tools/contract/corpus-from-db.mjs --db <navidrome.db> --out tools/fixtures/.work/<name>/corpus.json [--covers]
+node tools/contract/corpus-from-db.mjs --db <navidrome.db> --out tools/fixtures/.work/<name>/corpus.json [--covers] [--streams]
 node tools/contract/diff.mjs --db <navidrome.db> --corpus tools/fixtures/.work/<name>/corpus.json \
   [--env ND_BASEURL=https://music.example.com …] [--json tools/fixtures/.work/<name>/report.json] [--release]
 ```
@@ -274,7 +274,9 @@ node tools/contract/diff.mjs --db <navidrome.db> --corpus tools/fixtures/.work/<
   as prefixes, in upper case and without accents) as the Windows client searches; `getStarred2`, `getPlaylists`,
   `getPlayQueue`, `getPlaylist` of every playlist; `getLyricsBySongId` of every song with stored lyrics and a sample
   without; with `--covers`, a few covers of each kind (the pictures need not be on the computer: both servers must then
-  fail alike). Streams are left out. It prints counts only; the corpus holds words from the data, so it belongs in
+  fail alike); with `--streams`, `stream` of a song of each format and a sample, as is, with a range, at a lower bit rate
+  and in another format, and an unknown id (without the music files both servers fail alike past the lookup, with an
+  error text naming each copy's own folder, left out of the comparison). It prints counts only; the corpus holds words from the data, so it belongs in
   `tools/fixtures/.work/`, which is never committed. The same database and `--seed` give the same corpus.
 - **The run** (`startPairOnDatabase`) copies the database (with its `-wal` file) twice under `tools/fixtures/.work/runs`
   and never opens the original. Every user gets one throwaway password, the same on both copies, through Navidrome's
@@ -294,8 +296,11 @@ node tools/contract/diff.mjs --db <navidrome.db> --corpus tools/fixtures/.work/<
 
 ### Normalizing
 
-- **Key order** never matters: JSON is compared field by field. Other answers are compared by status, `Content-Type`,
-  `Content-Length`, `Content-Range`, `Accept-Ranges`, length and a hash of the bytes.
+- **Key order** never matters: JSON is compared field by field. Other answers are compared by status, length, a hash
+  of the bytes and their headers: `Content-Type`, `Content-Length`, `Content-Range`, `Accept-Ranges`, `ETag`,
+  `Last-Modified`, `Cache-Control`, `Content-Encoding`, `Transfer-Encoding`, `Vary`, `X-Content-Type-Options`,
+  `X-Content-Duration`, `Content-Disposition`. A volatile path starting with `@` is one of the whole answer
+  (`@sha256`, `@headers.content-type`: Navidrome's multipart answer to several ranges has a random boundary).
 - **Volatile** fields are listed in the corpus (`volatile`) and left out: `serverVersion`; in the writes corpus, the
   times the server takes from its clock (`starred`, a queue's or playlist's `changed`). Plays carry their own `time`.
 - **Unordered** arrays (`unordered`) are compared sorted: an artist's `roles`, which Go lists from a map in random
@@ -315,6 +320,7 @@ To a corpus: a request (`diff.mjs`'s header has the format):
 ```json
 { "name": "getAlbum", "method": "getAlbum", "params": { "id": "{{{{$}}}}" }, "for": ["album.normal", "album.cjk"] }
 { "name": "stream Range", "method": "stream", "params": { "id": "{{track.flac}}" }, "headers": { "Range": "bytes=0-99" } }
+{ "name": "stream HEAD", "method": "stream", "params": { "id": "{{track.flac}}" }, "httpMethod": "HEAD" }
 { "name": "an app password", "method": "ping", "auth": { "user": "secure", "as": "appPassword" } }
 { "name": "device poll", "path": "/auth/device/poll", "httpMethod": "POST", "json": { "deviceCode": "x" } }
 { "name": "a form by PUT", "path": "/rest/ping", "httpMethod": "PUT", "form": "u=x&p=y&f=json" }

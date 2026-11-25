@@ -707,6 +707,17 @@ Windows on ARM, Navidrome 0.64.2-sonus.10, `cargo run` (a debug build) in front 
   187 and the databases the same each time. `diff.mjs --go-vs-gateway` (reads): 443 of 443, 331 answered here.
   `run.mjs --through-gateway`: 132 of 132. `writes.test.mjs`, `gateway.test.mjs`, `auth-routes.test.mjs`,
   `diff.test.mjs` and the three `security/` tests: 38 of 38. `cargo test`: 277.
+- **The Windows client against this server, end of phase 4**: `node tools/e2e/acceptance.mjs --arch=ARM64`, all 14
+  rounds, `SONUS_TEST_SERVER` at a debug build of this server in front of the frozen Navidrome, on a fresh library of
+  53 generated songs, throwaway users: **92 of 92, four skipped** (the same four as at the end of phase 3: no DSD song;
+  every large cover already fetched; two Connect checks for version 1 or the demo server's hook). This server
+  answered 348 of the library's requests itself: 176 covers, 32 `search3`, 25 `getPlaylist`, 22 `scrobble`, 21
+  `getPlaylists`, 19 `getAlbumList2`, 15 `getLyricsBySongId`, 14 `ping`, 4 `getStarred2`, 4 `createPlaylist`, 4
+  `deletePlaylist`, 3 `updatePlaylist`, 3 `getSong`, 3 `getAlbum`, a `star`, an `unstar` and a `getNowPlaying`; and
+  left 29 to Navidrome, for the reasons written down (23 covers not resized yet, 4 disc covers, 2 songs with a lyrics
+  file). The play it counted is in `scrobbles`; Navidrome's buffer for Last.fm and ListenBrainz stayed empty. Its log
+  had two warnings, both the run's own (the first admin made; a wrong password the client's tests type on purpose).
+  The client saved no play queue during the run (`savePlayQueue` is covered by the corpora and tests above).
 
 ### The library's writes (phase 4, part 2: playlists), 2026-11-25
 

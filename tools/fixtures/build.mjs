@@ -13,7 +13,8 @@
 //   Navidrome: --navidrome, else NAVIDROME_EXE, else .work/bin, else built from the fork (NAVIDROME_SRC, default: a
 //   `navidrome` checkout beside this repository's).
 import { createHash, randomBytes } from 'node:crypto';
-import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -162,6 +163,25 @@ async function makeGolden({ exe, music }) {
     expect['playlist.otherUser'] = { name: 'Shared Picks', owner: admin.username, public: true, songCount: 3 };
     expect['playlist.smart'] = { name: 'All FLAC', owner: admin.username, public: true, songCount: TRACKS.filter(t => t.format === 'flac').length };
 
+    // ---- every playlist's cover settled. Navidrome makes a playlist's cover when the playlist is changed through
+    // the Subsonic API; the smart playlist was not, so its cover would be made a few seconds after each start of a
+    // copy (Navidrome's sweep for items without artwork state), and its cover art id would change under the tests.
+    // Asking for the cover makes Navidrome settle it now.
+    for (const key of ['playlist.own', 'playlist.otherUser', 'playlist.smart']) {
+      await (await asAdmin.fetch('getCoverArt', { id: `pl-${ids[key]}` })).arrayBuffer();
+    }
+    {
+      const { DatabaseSync } = await import('node:sqlite');
+      const settled = () => {
+        const db = new DatabaseSync(join(build, 'navidrome.db'), { readOnly: true });
+        try { return db.prepare("SELECT count(*) AS n FROM item_artwork WHERE item_kind = 'pl' AND hash != ''").get().n; } finally { db.close(); }
+      };
+      for (let i = 0; settled() < 3; i++) {
+        check(i < 120, 'the covers of the playlists were not settled in a minute');
+        await new Promise(done => setTimeout(done, 500));
+      }
+    }
+
     // ---- let the background artwork work finish, so every copy of the database answers the same cover art ids
     const left = await waitForArtworkQueue(join(build, 'navidrome.db'));
     check(!left.length, `artwork still queued: ${JSON.stringify(left)}`);
@@ -224,6 +244,9 @@ export async function buildAll({ navidrome, rebuildNavidrome = false, keepBuild 
   await rm(GOLDEN, { recursive: true, force: true });
   await mkdir(GOLDEN, { recursive: true });
   await copyFile(join(build, 'navidrome.db'), join(GOLDEN, 'navidrome.db'));
+  // Navidrome's image store: the pictures it took out of audio files, by their hash. The database's artwork state
+  // points at them, so a copy of the database without them has covers Navidrome must work out again.
+  if (existsSync(join(build, 'artwork'))) await cp(join(build, 'artwork'), join(GOLDEN, 'artwork'), { recursive: true });
   manifest.server.navidrome = exe;
   await writeFile(join(GOLDEN, 'manifest.json'), JSON.stringify(manifest, null, 2));
   if (!keepBuild) await rm(build, { recursive: true, force: true });

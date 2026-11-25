@@ -817,3 +817,264 @@ async fn the_saved_play_queue() {
     assert_eq!(queue["playQueue"], serde_json::json!({"username": "alice", "changed": "0001-01-01T00:00:00Z", "changedBy": ""}));
     w.navidromes(&format!("/rest/getPlayQueueByIndex?{ALICE}")).await;
 }
+
+const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0x01, 0x02, 0x03, 0x04, 0x05];
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR resized";
+const FOLDER_HASH: &str = "9046b47ac73f2574";
+const STORE_HASH: &str = "33401af5b95c979a";
+
+fn mtime_nanos(path: &Path) -> i64 {
+    std::fs::metadata(path).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as i64
+}
+
+/// The world with pictures: album Blue's cover is a file in its folder, album 2's is in Navidrome's image store
+/// (taken out of a song's file), album Cyan has none, album 10 has no state yet.
+async fn world_with_pictures() -> (World, PathBuf, PathBuf) {
+    let (music, data) = {
+        let base = std::env::temp_dir().join(format!("sonus-library-disk-{}-{}", std::process::id(), WORLDS.fetch_add(1, Ordering::Relaxed)));
+        let _ = std::fs::remove_dir_all(&base);
+        (base.join("music"), base.join("data"))
+    };
+    std::fs::create_dir_all(music.join("a")).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    let options = LibraryOptions { data_folder: data.to_string_lossy().into_owned(), ..LibraryOptions::default() };
+    let w = world_with(options, true).await;
+    let db = w.db();
+    db.execute("UPDATE library SET path = ?1", [music.to_string_lossy()]).unwrap();
+    // a cover in the album's folder
+    let cover = music.join("a").join("cover.jpg");
+    std::fs::write(&cover, JPEG).unwrap();
+    db.execute("DELETE FROM item_artwork", []).unwrap();
+    let state = "INSERT INTO item_artwork (item_kind, item_id, hash, source, source_path, ref_mtime, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '2026-11-24 23:42:38.07+01:00')";
+    db.execute(state, ("al", "al-b", FOLDER_HASH, "folder", cover.to_string_lossy(), mtime_nanos(&cover))).unwrap();
+    // a cover taken out of a song's file, kept in Navidrome's image store
+    let song = music.join("a").join("One.flac");
+    std::fs::write(&song, b"not really audio").unwrap();
+    let stored = data.join("artwork").join("hashed").join("33").join("40");
+    std::fs::create_dir_all(&stored).unwrap();
+    std::fs::write(stored.join(format!("{STORE_HASH}.jpg")), [JPEG, b" from the store"].concat()).unwrap();
+    db.execute(state, ("al", "al-2", STORE_HASH, "embedded", song.to_string_lossy(), mtime_nanos(&song))).unwrap();
+    db.execute(state, ("al", "al-c", "", "", "", 0)).unwrap();
+    for (hash, mime) in [(FOLDER_HASH, "image/jpeg"), (STORE_HASH, "image/jpeg")] {
+        db.execute("INSERT INTO artwork (hash, mime, width, height, size_bytes) VALUES (?1, ?2, 600, 600, 16)", (hash, mime)).unwrap();
+    }
+    (w, music, data)
+}
+
+/// Puts an entry into Navidrome's cache of resized pictures, as Navidrome writes it: the bytes under the SHA-1 of
+/// the key, and a marker beside them once they are whole.
+fn cache_resized(data: &Path, key: &str, bytes: &[u8], complete: bool) {
+    use sha1::{Digest, Sha1};
+    let digest: String = Sha1::digest(key.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+    let folder = data.join("cache").join("images").join(&digest[0..2]).join(&digest[2..4]);
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join(&digest), bytes).unwrap();
+    if complete {
+        std::fs::write(folder.join(format!("{digest}.complete")), b"").unwrap();
+    }
+}
+
+impl World {
+    async fn cover(&self, query: &str, if_none_match: Option<&str>) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let mut request = Request::get(format!("/rest/getCoverArt?{ALICE}&{query}"));
+        if let Some(validator) = if_none_match {
+            request = request.header(header::IF_NONE_MATCH, validator);
+        }
+        self.request(request.body(empty()).unwrap()).await
+    }
+}
+
+#[tokio::test]
+async fn a_cover_navidrome_has_settled_is_served_from_where_it_is() {
+    let (w, _music, _data) = world_with_pictures().await;
+    // the picture's own file, as it is: Navidrome's headers, no length (it streams), no cookie (no player here)
+    let (status, headers, body) = w.cover("id=al-al-b", None).await;
+    assert_eq!((status, body.as_slice()), (StatusCode::OK, JPEG));
+    assert_eq!(headers["content-type"], "image/jpeg");
+    assert_eq!(headers["etag"], format!("\"{FOLDER_HASH}\""));
+    assert_eq!(headers["last-modified"], "Tue, 24 Nov 2026 22:42:38 GMT");
+    assert_eq!(headers["cache-control"], "public, no-cache");
+    assert_eq!(headers[library::ANSWERED_HEADER], "rust");
+    assert!(headers.get("content-length").is_none() && headers.get("set-cookie").is_none() && headers.get("content-encoding").is_none());
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert!(w.reached().is_empty(), "Navidrome saw nothing, not even a registration");
+    // asked for by its hash: the client may keep it for good; by another hash, or an old id's time stamp: it revalidates
+    assert_eq!(w.cover(&format!("id=al-al-b_{FOLDER_HASH}"), None).await.1["cache-control"], "public, max-age=31536000, immutable");
+    assert_eq!(w.cover(&format!("id=al-al-b_{STORE_HASH}"), None).await.1["cache-control"], "public, no-cache");
+    assert_eq!(w.cover("id=al-al-b_66f1a2b3&size=-1", None).await.0, StatusCode::OK);
+    // what the client has already: 304, with the validator and no body
+    for validator in [format!("\"{FOLDER_HASH}\""), format!("W/\"{FOLDER_HASH}\""), "*".to_string(), format!("\"x\", \"{FOLDER_HASH}\"")] {
+        let (status, headers, body) = w.cover("id=al-al-b", Some(&validator)).await;
+        assert_eq!((status, body.len()), (StatusCode::NOT_MODIFIED, 0), "{validator}");
+        assert_eq!(headers["etag"], format!("\"{FOLDER_HASH}\""));
+        assert!(headers.get("content-type").is_none());
+    }
+    assert_eq!(w.cover("id=al-al-b", Some("\"something else\"")).await.0, StatusCode::OK);
+    // a picture from Navidrome's image store
+    let (status, headers, body) = w.cover("id=al-al-2&f=xml", None).await;
+    assert_eq!((status, body), (StatusCode::OK, [JPEG, b" from the store"].concat()), "a picture whatever format is named");
+    assert_eq!(headers["etag"], format!("\"{STORE_HASH}\""));
+    assert!(w.reached().is_empty());
+    // an admin, who sees every library
+    let admin = Request::get(format!("/rest/getCoverArt.view?{ADMIN}&id=al-al-b")).body(empty()).unwrap();
+    assert_eq!(w.request(admin).await.0, StatusCode::OK);
+    // the user's last access is written, as Navidrome writes it for every request
+    let last_access: Option<String> = w.db().query_row("SELECT last_access_at FROM user WHERE user_name = 'alice'", [], |r| r.get(0)).unwrap();
+    assert!(last_access.is_some());
+}
+
+#[tokio::test]
+async fn a_resized_cover_is_served_once_navidrome_has_made_it() {
+    let (w, _music, data) = world_with_pictures().await;
+    // not resized yet: Navidrome's to make (and to cache)
+    w.navidromes(&format!("/rest/getCoverArt?{ALICE}&id=al-al-b&size=300")).await;
+    // an entry Navidrome is still writing (no marker yet) is not served
+    cache_resized(&data, &format!("h-{FOLDER_HASH}.300.false.q75"), PNG, false);
+    w.navidromes(&format!("/rest/getCoverArt?{ALICE}&id=al-al-b&size=300")).await;
+    cache_resized(&data, &format!("h-{FOLDER_HASH}.300.false.q75"), PNG, true);
+    let (status, headers, body) = w.cover("id=al-al-b&size=300", None).await;
+    assert_eq!((status, body.as_slice()), (StatusCode::OK, PNG));
+    assert_eq!(headers["content-type"], "image/png", "named by its bytes, as Go names it");
+    assert_eq!(headers["etag"], format!("\"{FOLDER_HASH}.300.false.q75\""), "a resized picture has a validator of its own");
+    assert_eq!(headers["cache-control"], "public, no-cache");
+    assert_eq!(w.cover(&format!("id=al-al-b_{FOLDER_HASH}&size=300"), None).await.1["cache-control"], "public, max-age=31536000, immutable");
+    assert_eq!(w.cover("id=al-al-b&size=300", Some(&format!("\"{FOLDER_HASH}.300.false.q75\""))).await.0, StatusCode::NOT_MODIFIED);
+    assert_eq!(w.cover("id=al-al-b&size=300", Some(&format!("\"{FOLDER_HASH}\""))).await.0, StatusCode::OK, "the full picture's validator is another");
+    // every size and shape is an entry of its own
+    w.navidromes(&format!("/rest/getCoverArt?{ALICE}&id=al-al-b&size=301")).await;
+    w.navidromes(&format!("/rest/getCoverArt?{ALICE}&id=al-al-b&size=300&square=true")).await;
+    cache_resized(&data, &format!("h-{FOLDER_HASH}.300.true.q75"), JPEG, true);
+    assert_eq!(w.cover("id=al-al-b&size=300&square=1", None).await.2, JPEG);
+    // a resized picture is served whatever became of its source since: Navidrome does not look either
+    std::fs::remove_file(_music.join("a").join("cover.jpg")).unwrap();
+    assert_eq!(w.cover("id=al-al-b&size=300", None).await.0, StatusCode::OK);
+    w.navidromes(&format!("/rest/getCoverArt?{ALICE}&id=al-al-b")).await;
+}
+
+#[tokio::test]
+async fn other_settings_other_cache_entries() {
+    // CoverArtQuality and EnableWebPEncoding are part of what a resized picture is cached under; ImageCacheSize 0
+    // means Navidrome keeps no cache, so nothing is read from one
+    for (options, key, served) in [
+        (LibraryOptions { cover_art_quality: 90, ..LibraryOptions::default() }, "q90", true),
+        (LibraryOptions { enable_webp_encoding: true, ..LibraryOptions::default() }, "webp75", true),
+        (LibraryOptions { image_cache_size: "0".into(), ..LibraryOptions::default() }, "q75", false),
+    ] {
+        let dir = std::env::temp_dir().join(format!("sonus-library-cache-{}-{}", std::process::id(), WORLDS.fetch_add(1, Ordering::Relaxed)));
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let w = world_with(LibraryOptions { data_folder: data.to_string_lossy().into_owned(), ..options }, true).await;
+        w.db().execute("INSERT INTO artwork (hash, mime) VALUES (?1, 'image/jpeg')", [FOLDER_HASH]).unwrap();
+        w.db()
+            .execute("UPDATE item_artwork SET hash = ?1, source = 'embedded', updated_at = '2026-11-24 23:42:38+01:00' WHERE item_id = 'al-b'", [FOLDER_HASH])
+            .unwrap();
+        cache_resized(&data, &format!("h-{FOLDER_HASH}.64.false.q75"), JPEG, true);
+        cache_resized(&data, &format!("h-{FOLDER_HASH}.64.false.{key}"), PNG, true);
+        let (_, headers, body) = w.cover("id=al-al-b&size=64", None).await;
+        match served {
+            true => assert_eq!((body.as_slice(), headers["etag"].to_str().unwrap()), (PNG, format!("\"{FOLDER_HASH}.64.false.{key}\"").as_str())),
+            false => assert_eq!(body, b"from navidrome"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[tokio::test]
+async fn covers_that_stay_navidromes() {
+    let (w, music, data) = world_with_pictures().await;
+    let navidromes = async |query: &str| {
+        w.navidromes(&format!("/rest/getCoverArt?{ALICE}&{query}")).await;
+    };
+    // a disc's cover (no state: a walk through the album's folders), a song's without state, an id without its kind
+    navidromes("id=dc-al-b:1").await;
+    navidromes("id=mf-s-1").await;
+    navidromes("id=al-b").await;
+    navidromes("id=s-1").await;
+    navidromes("id=ra-1").await;
+    navidromes("").await;
+    navidromes("id=").await;
+    // no state yet (Navidrome looks, and notes what it finds), no picture (its placeholder), an unknown item
+    navidromes("id=al-al-10").await;
+    navidromes("id=al-al-c").await;
+    navidromes("id=al-nope").await;
+    // state for an item that is gone, or that is not this user's to see
+    w.db()
+        .execute(
+            "INSERT INTO item_artwork (item_kind, item_id, hash, source, updated_at) VALUES ('al', 'al-gone', ?1, 'embedded', '2026-11-24 23:42:38+01:00')",
+            [STORE_HASH],
+        )
+        .unwrap();
+    navidromes("id=al-al-gone").await;
+    w.navidromes(&format!("/rest/getCoverArt?{BOB}&id=al-al-b")).await;
+    // a picture Navidrome has no row for, state without its time, a hash that is none
+    w.db().execute("UPDATE item_artwork SET hash = 'ffffffffffffffff' WHERE item_id = 'al-gone'", []).unwrap();
+    navidromes("id=al-al-gone").await;
+    // the picture's file changed since Navidrome hashed it: Navidrome looks again
+    let cover = music.join("a").join("cover.jpg");
+    w.db().execute("UPDATE item_artwork SET ref_mtime = ref_mtime + 1 WHERE item_id = 'al-b'", []).unwrap();
+    navidromes("id=al-al-b").await;
+    w.db().execute("UPDATE item_artwork SET ref_mtime = ?1 WHERE item_id = 'al-b'", [mtime_nanos(&cover)]).unwrap();
+    assert_eq!(w.cover("id=al-al-b", None).await.0, StatusCode::OK);
+    // a source that is not a picture's file; bytes that are no picture Navidrome stores
+    w.db().execute("UPDATE item_artwork SET source_path = ?1 WHERE item_id = 'al-b'", [music.join("a").join("One.flac").to_string_lossy()]).unwrap();
+    navidromes("id=al-al-b").await;
+    std::fs::write(data.join("artwork").join("hashed").join("33").join("40").join(format!("{STORE_HASH}.jpg")), b"<svg/>").unwrap();
+    navidromes("id=al-al-2").await;
+    // the store's file is gone, or the song it came from changed
+    std::fs::remove_file(data.join("artwork").join("hashed").join("33").join("40").join(format!("{STORE_HASH}.jpg"))).unwrap();
+    navidromes("id=al-al-2").await;
+    // EnableMediaFileCoverArt off: a song's own cover is not served as such
+    w.db()
+        .execute(
+            "INSERT INTO item_artwork (item_kind, item_id, hash, source, updated_at) VALUES ('mf', 's-1', ?1, 'embedded', '2026-11-24 23:42:38+01:00')",
+            [FOLDER_HASH],
+        )
+        .unwrap();
+    let off = world_with(LibraryOptions { enable_media_file_cover_art: false, ..LibraryOptions::default() }, true).await;
+    off.navidromes(&format!("/rest/getCoverArt?{ALICE}&id=mf-s-1")).await;
+}
+
+#[tokio::test]
+async fn lyrics_from_the_songs_row() {
+    let (w, music, _data) = world_with_pictures().await;
+    let stored = r#"[{"lang":"eng","line":[{"start":500,"value":"One <one>"},{"start":1500,"value":"Two"}],"offset":-250,"synced":true},{"kind":"translation","lang":"deu","line":[{"value":"Eins"}],"synced":false}]"#;
+    w.db().execute("UPDATE media_file SET lyrics = ?1 WHERE id = 's-1'", [stored]).unwrap();
+    let (headers, body) = w.get(&format!("/rest/getLyricsBySongId?{ALICE}&id=s-1")).await;
+    // Navidrome's bytes: the main lyrics only, the song's artist and title where the lyrics name none
+    let u = "\\u";
+    let expected = format!(
+        r#""lyricsList":{{"structuredLyrics":[{{"displayArtist":"Abe","displayTitle":"One","lang":"eng","line":[{{"start":500,"value":"One {u}003cone{u}003e"}},{{"start":1500,"value":"Two"}}],"offset":-250,"synced":true}}]}}"#
+    );
+    assert_eq!(body, format!("{OK},{expected}}}}}"));
+    assert_eq!(headers[library::ANSWERED_HEADER], "rust");
+    assert!(headers["set-cookie"].to_str().unwrap().starts_with("nd-player-"), "a player is registered, as for any method but covers");
+    // unsynced lines have no time; a song without lyrics has an empty list
+    w.db().execute(r#"UPDATE media_file SET lyrics = '[{"displayArtist":"X","displayTitle":"Y","lang":"xxx","line":[{"value":"la"}],"synced":false}]' WHERE id = 's-2'"#, []).unwrap();
+    assert_eq!(
+        w.here(&format!("/rest/getLyricsBySongId.view?{ALICE}&id=s-2")).await.1["lyricsList"]["structuredLyrics"],
+        serde_json::json!([{"displayArtist": "X", "displayTitle": "Y", "lang": "xxx", "line": [{"value": "la"}], "synced": false}])
+    );
+    assert_eq!(w.get(&format!("/rest/getLyricsBySongId?{ALICE}&id=s-3")).await.1, format!("{OK},\"lyricsList\":{{}}}}}}"));
+    // errors, in Navidrome's words
+    assert_eq!(w.get(&format!("/rest/getLyricsBySongId?{ALICE}")).await.1, failed(10, "missing parameter: 'id'"));
+    assert_eq!(w.get(&format!("/rest/getLyricsBySongId?{ALICE}&id=nope")).await.1, failed(70, "data not found"));
+    assert_eq!(w.get(&format!("/rest/getLyricsBySongId?{BOB}&id=s-1")).await.1, failed(70, "data not found"), "not a song bob may see");
+    // a lyrics file beside the song comes first in LyricsPriority, and Navidrome parses it
+    std::fs::write(music.join("a").join("One.lrc"), "[00:01.00]From the file").unwrap();
+    w.navidromes(&format!("/rest/getLyricsBySongId?{ALICE}&id=s-1")).await;
+    w.here(&format!("/rest/getLyricsBySongId?{ALICE}&id=s-2")).await;
+    std::fs::write(music.join("a").join("Three.txt"), "words").unwrap();
+    w.navidromes(&format!("/rest/getLyricsBySongId?{ALICE}&id=s-3")).await;
+    // enhanced lyrics (other kinds, word timings), and rows Go's decoder refuses
+    w.navidromes(&format!("/rest/getLyricsBySongId?{ALICE}&id=s-2&enhanced=true")).await;
+    w.here(&format!("/rest/getLyricsBySongId?{ALICE}&id=s-2&enhanced=false")).await;
+    w.db().execute("UPDATE media_file SET lyrics = '{' WHERE id = 's-2'", []).unwrap();
+    w.navidromes(&format!("/rest/getLyricsBySongId?{ALICE}&id=s-2")).await;
+    // with "embedded" first, the row wins over the file
+    let embedded_first = world_with(LibraryOptions { lyrics_priority: "embedded,.lrc".into(), ..LibraryOptions::default() }, true).await;
+    embedded_first.db().execute("UPDATE library SET path = ?1", [music.to_string_lossy()]).unwrap();
+    embedded_first.db().execute("UPDATE media_file SET lyrics = ?1 WHERE id = 's-1'", [stored]).unwrap();
+    assert_eq!(embedded_first.here(&format!("/rest/getLyricsBySongId?{ALICE}&id=s-1")).await.1["lyricsList"]["structuredLyrics"][0]["lang"], "eng");
+    // the scan's status is Navidrome's: its state is in Navidrome's memory
+    w.navidromes(&format!("/rest/getScanStatus?{ALICE}")).await;
+}

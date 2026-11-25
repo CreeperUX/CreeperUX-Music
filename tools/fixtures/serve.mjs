@@ -1,7 +1,7 @@
 // Runs the frozen Navidrome on a fresh copy of the golden database (build.mjs), with the settings it was made with, so
 // every run starts from the same state and nothing a test changes reaches the golden copy.
 // Usage: node tools/fixtures/serve.mjs [--port <n>] [--data <folder>]   (until Ctrl+C; prints the URL)
-import { copyFile, mkdir, readFile, rm } from 'node:fs/promises';
+import { copyFile, cp, mkdir, readFile, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,7 +27,11 @@ export async function goldenCopy({ data, empty = false } = {}) {
   const folder = data ?? join(WORK, 'runs', `${process.pid}-${Date.now()}-${runs++}`);
   await rm(folder, { recursive: true, force: true });
   await mkdir(folder, { recursive: true });
-  if (!empty) await copyFile(join(GOLDEN, 'navidrome.db'), join(folder, 'navidrome.db'));
+  if (!empty) {
+    await copyFile(join(GOLDEN, 'navidrome.db'), join(folder, 'navidrome.db'));
+    // with Navidrome's image store, which the database's artwork state points at
+    if (existsSync(join(GOLDEN, 'artwork'))) await cp(join(GOLDEN, 'artwork'), join(folder, 'artwork'), { recursive: true });
+  }
   const env = { ...manifest.server.env, ND_DATAFOLDER: folder, ND_CACHEFOLDER: join(folder, 'cache'), ND_SCANNER_SCANONSTARTUP: 'false' };
   // Windows lets go of a stopped server's files a moment after it is gone
   const remove = () => rm(folder, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });

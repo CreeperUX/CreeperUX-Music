@@ -335,6 +335,24 @@ proxy's user are still Navidrome's, as for every Subsonic method.
 - **Artists** are those with content in a library the user sees (the join over `library_artist` and
   `user_library`, as Navidrome joins them).
 
+- **Lyrics** are a song's: read only for a song the user may see.
+- **Covers.** A picture is served for an item that is there for this user (the same check Navidrome makes); for
+  anything else the request goes to Navidrome, which answers with its placeholder.
+
+**Files.** Lyrics and covers are the first answers that read files. No part of a request becomes a path:
+
+- a lyrics file is only *looked for* (does it exist?), at the song's own path from the database with one of the
+  suffixes of `LyricsPriority` from the settings; it is never read here, and the answer does not say what was found
+  (a song with such a file is answered by Navidrome, as before);
+- a picture's file is the path Navidrome's artwork state holds (`item_artwork.source_path`, written by Navidrome's
+  scanner), read only when its change time is the one Navidrome noted;
+- the image store's and the cache's paths are built from the picture's hash, which is taken from the database and
+  must be 16 hexadecimal digits before it is used, and from a SHA-1 of the cache key.
+
+What is read is sent only when its first bytes are a JPEG, PNG, GIF or WebP picture, with `nosniff`. A file is read
+whole into memory before it is sent, at most 64 MiB; a signed-in user can ask for many at once, as they can of
+Navidrome.
+
 **What is typed into a search.** It never becomes SQL: it is bound as an argument, either inside LIKE patterns or as
 one FTS5 MATCH expression. The expression is built by a port of Navidrome's `buildFTS5Query`, which keeps only
 letters, numbers, quoted phrases and a trailing `*`, and turns FTS5's operators into plain words; the port passes
@@ -403,7 +421,9 @@ of it.
   data: parsed as JSON, checked for shape and size, and a row that does not pass starts an empty session.
 - The library's reads (above) read `album`, `media_file`, `artist`, `library_artist`, `annotation`, `bookmark`,
   `item_artwork`, `album_tags`, `tag`, `playlist`, `playlist_tracks`, `playqueue`, the three FTS5 tables, `library`,
-  `user`, `user_library` and `player`, and write none of them.
+  `user`, `user_library` and `player`, and write none of them. Covers read `item_artwork` and `artwork`, and files:
+  the pictures Navidrome's state names, its image store and its cache of resized pictures. Nothing is written there
+  either.
 - No change to Navidrome's schema, ever, and no VACUUM; the schema is checked at start and the server refuses any
   other. The server's own tables are additive (`CREATE TABLE IF NOT EXISTS`); a `sonus_connect_session` row refers to
   its user (`ON DELETE CASCADE`), which adds one indexed lookup to Navidrome's deleting of a user and nothing else.
@@ -466,7 +486,9 @@ gateway alone. Everything passes through, as in phase 0; only the 4 MiB limit on
 
 ## Not covered by tests
 
-- The library's reads: an artist with a picture against the real Navidrome (unit and integration tests only);
+- The library's reads: a cache entry Navidrome removes or rewrites while this server reads it (Navidrome marks an
+  entry complete only when it is whole, and that mark is required; a removal in between fails the read, and the
+  request goes to Navidrome); an artist with a picture against the real Navidrome (unit and integration tests only);
   settings other than the defaults against the real Navidrome (unit and integration tests
   only); a scan writing while lists are read; a database of production's size; `ReportRealPath` answered here against
   the real Navidrome (Linux only: the checks ran on Windows, where such requests go to Navidrome).

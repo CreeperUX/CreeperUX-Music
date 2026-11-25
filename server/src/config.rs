@@ -108,6 +108,18 @@ pub struct LibraryOptions {
     pub search_full_string: bool,
     /// `SmartPlaylistRefreshDelay` (default 5 s): how long a smart playlist's songs are good (`validUntil`).
     pub smart_playlist_refresh_delay: Duration,
+    /// `LyricsPriority` (default `.ttml,.yaml,.yml,.elrc,.lrc,.srt,.txt,embedded`): where lyrics are looked for, in order.
+    pub lyrics_priority: String,
+    /// `CoverArtQuality` (default 75) and `EnableWebPEncoding` (default off): how resized covers are encoded, which
+    /// is part of what Navidrome caches them under.
+    pub cover_art_quality: i64,
+    pub enable_webp_encoding: bool,
+    /// `ImageCacheSize` (default `100MB`; `0`: no cache of resized covers).
+    pub image_cache_size: String,
+    /// `DataFolder`, and `CacheFolder` (empty: `cache` in the data folder): where Navidrome keeps its image store and
+    /// its cache of resized covers.
+    pub data_folder: String,
+    pub cache_folder: String,
 }
 
 impl Default for LibraryOptions {
@@ -128,6 +140,12 @@ impl Default for LibraryOptions {
             legacy_search: false,
             search_full_string: false,
             smart_playlist_refresh_delay: Duration::from_secs(5),
+            lyrics_priority: ".ttml,.yaml,.yml,.elrc,.lrc,.srt,.txt,embedded".into(),
+            cover_art_quality: 75,
+            enable_webp_encoding: false,
+            image_cache_size: "100MB".into(),
+            data_folder: ".".into(),
+            cache_folder: String::new(),
         }
     }
 }
@@ -339,6 +357,15 @@ impl Config {
                             .unwrap_or(d.smart_playlist_refresh_delay),
                         None => d.smart_playlist_refresh_delay,
                     },
+                    lyrics_priority: nd.get("lyricspriority")?.unwrap_or(d.lyrics_priority),
+                    cover_art_quality: match nd.get_renamed("coverartquality", "coverjpegquality")? {
+                        Some(v) => v.trim().parse().map_err(|_| format!("CoverArtQuality={v} is not a number"))?,
+                        None => d.cover_art_quality,
+                    },
+                    enable_webp_encoding: nd.get_bool("enablewebpencoding")?.unwrap_or(d.enable_webp_encoding),
+                    image_cache_size: nd.get("imagecachesize")?.unwrap_or(d.image_cache_size),
+                    data_folder: nd.get("datafolder")?.unwrap_or(d.data_folder),
+                    cache_folder: nd.get("cachefolder")?.unwrap_or_default(),
                 }
             },
         };

@@ -19,6 +19,7 @@ pub mod catalog;
 pub mod entities;
 pub mod json;
 pub mod lists;
+pub mod media;
 pub mod natural;
 pub mod player;
 pub mod query;
@@ -34,7 +35,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::header::{self, HeaderMap, HeaderName, HeaderValue};
-use hyper::{Response, Uri};
+use hyper::{Response, StatusCode, Uri};
 use tracing::{debug, warn};
 
 use crate::config::LibraryOptions;
@@ -47,7 +48,19 @@ use player::{Player, Players, Registration};
 use query::{QueryError, Viewer};
 
 /// The methods answered here (each also as `<name>.view`). Everything else is Navidrome's.
-pub const METHODS: &[&str] = &["ping", "getSong", "getAlbum", "getAlbumList2", "search3", "getStarred2", "getPlaylists", "getPlaylist", "getPlayQueue"];
+pub const METHODS: &[&str] = &[
+    "ping",
+    "getSong",
+    "getAlbum",
+    "getAlbumList2",
+    "search3",
+    "getStarred2",
+    "getPlaylists",
+    "getPlaylist",
+    "getPlayQueue",
+    "getLyricsBySongId",
+    "getCoverArt",
+];
 
 /// Whether a method is one of the library's.
 pub fn answers(method: &str) -> bool {
@@ -115,6 +128,16 @@ pub enum Reply {
         code: i32,
         message: String,
     },
+    /// Something that is not JSON (a picture), with its content type and the headers Navidrome gives it.
+    Bytes {
+        content_type: &'static str,
+        body: Vec<u8>,
+        headers: Vec<(HeaderName, HeaderValue)>,
+    },
+    /// The client has it already (`If-None-Match`): 304, with the headers that say what it has.
+    NotModified {
+        headers: Vec<(HeaderName, HeaderValue)>,
+    },
     Navidrome(&'static str),
 }
 
@@ -139,6 +162,8 @@ pub struct Scope<'a> {
     pub params: &'a Params,
     pub context: entities::Context<'a>,
     pub seeds: &'a Mutex<HashMap<String, u64>>,
+    /// The request's `If-None-Match`, for what is answered with a validator.
+    pub if_none_match: Option<&'a str>,
 }
 
 impl Scope<'_> {
@@ -206,22 +231,31 @@ impl Library {
         if !answers(method) {
             return Err("not a method answered here");
         }
-        if Format::of(params.get("f"), params.get("callback")) != Format::Json {
+        // a cover is a picture whatever format the request names, and Navidrome registers no player for it
+        let cover = method == "getCoverArt";
+        if !cover && Format::of(params.get("f"), params.get("callback")) != Format::Json {
             return Err("not JSON");
         }
         let Ok(client) = std::str::from_utf8(params.get("c")) else { return Err("a client name that is not text") };
-        // Navidrome registers the player before the method runs (getPlayer), and answers with its cookie
-        let registration = Registration { user_id: &user.user_id, user: user_header, client: params.get("c"), version: params.get("v"), headers };
-        let Some(player) = self.players.register(registration).await else { return Err("Navidrome registered no player") };
-        if player.transcodes {
-            return Err("the player has a transcoding set");
-        }
-        if player.report_real_path && !entities::REAL_PATHS {
-            return Err("the player reports real paths, which Go builds by this system's rules");
-        }
+        let player = if cover {
+            None
+        } else {
+            // Navidrome registers the player before the method runs (getPlayer), and answers with its cookie
+            let registration = Registration { user_id: &user.user_id, user: user_header, client: params.get("c"), version: params.get("v"), headers };
+            let Some(player) = self.players.register(registration).await else { return Err("Navidrome registered no player") };
+            if player.transcodes {
+                return Err("the player has a transcoding set");
+            }
+            if player.report_real_path && !entities::REAL_PATHS {
+                return Err("the player reports real paths, which Go builds by this system's rules");
+            }
+            Some(player)
+        };
+        let report_real_path = player.as_ref().is_some_and(|player| player.report_real_path);
+        let if_none_match = headers.get(header::IF_NONE_MATCH).and_then(|value| value.to_str().ok()).map(str::to_string);
 
         let (db, options, seeds) = (self.db.clone(), self.options.clone(), self.seeds.clone());
-        let (user_id, client, params, report_real_path) = (user.user_id.clone(), client.to_string(), params.clone(), player.report_real_path);
+        let (user_id, client, params) = (user.user_id.clone(), client.to_string(), params.clone());
         let reply = tokio::task::spawn_blocking(move || {
             db.read_blocking(|conn| {
                 let Some(viewer) = Viewer::load(conn, &user_id)? else { return Ok(Ok(Reply::Navidrome("the user is gone"))) };
@@ -232,6 +266,7 @@ impl Library {
                     params: &params,
                     context: entities::Context { options: &options, client: &client, report_real_path },
                     seeds: &seeds,
+                    if_none_match: if_none_match.as_deref(),
                 };
                 Ok(browse::answer(method, &scope))
             })
@@ -257,9 +292,11 @@ impl Library {
             Reply::Navidrome(why) => Err(why),
             Reply::Error { code, message } => {
                 let (content_type, body) = respond::render(&self.envelope, &Format::Json, &Payload::Error { code, message: &message });
-                Ok(self.response(content_type, body, headers, &player, Vec::new()))
+                Ok(self.response(content_type, body, headers, player.as_ref(), Vec::new()))
             }
-            Reply::Ok { members, headers: extra } => Ok(self.response("application/json", self.envelop(&members), headers, &player, extra)),
+            Reply::Ok { members, headers: extra } => Ok(self.response("application/json", self.envelop(&members), headers, player.as_ref(), extra)),
+            Reply::Bytes { content_type, body, headers: extra } => Ok(self.picture(StatusCode::OK, Some(content_type), body, headers, extra)),
+            Reply::NotModified { headers: extra } => Ok(self.picture(StatusCode::NOT_MODIFIED, None, Vec::new(), headers, extra)),
         }
     }
 
@@ -291,7 +328,7 @@ impl Library {
         content_type: &'static str,
         body: Vec<u8>,
         request: &HeaderMap,
-        player: &Player,
+        player: Option<&Player>,
         extra: Vec<(HeaderName, HeaderValue)>,
     ) -> Response<Body> {
         let gzip = accepts_gzip(request);
@@ -304,7 +341,44 @@ impl Library {
             h.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
             h.append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
         }
-        h.insert(header::SET_COOKIE, player.cookie.clone());
+        if let Some(player) = player {
+            h.insert(header::SET_COOKIE, player.cookie.clone());
+        }
+        for (name, value) in extra {
+            h.insert(name, value);
+        }
+        if cfg!(debug_assertions) {
+            h.insert(ANSWERED_HEADER, HeaderValue::from_static("rust"));
+        }
+        response
+    }
+}
+
+impl Library {
+    /// A picture as Navidrome sends it: never compressed, and without a length (Navidrome streams it: the body
+    /// is chunked), with Navidrome's usual headers and the picture's own.
+    fn picture(
+        &self,
+        status: StatusCode,
+        content_type: Option<&'static str>,
+        body: Vec<u8>,
+        request: &HeaderMap,
+        extra: Vec<(HeaderName, HeaderValue)>,
+    ) -> Response<Body> {
+        let body: Body = if status == StatusCode::NOT_MODIFIED {
+            Full::new(Bytes::new()).map_err(|never| match never {}).boxed()
+        } else {
+            // a stream of one piece has no length to declare
+            let piece = futures_util::stream::once(async move { Ok::<_, crate::gateway::BoxError>(hyper::body::Frame::data(Bytes::from(body))) });
+            http_body_util::StreamBody::new(piece).boxed()
+        };
+        let mut response = Response::new(body);
+        *response.status_mut() = status;
+        let h = response.headers_mut();
+        if let Some(content_type) = content_type {
+            h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+        }
+        respond::navidrome_headers(h, request, &self.frame_options);
         for (name, value) in extra {
             h.insert(name, value);
         }

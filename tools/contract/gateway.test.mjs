@@ -202,6 +202,9 @@ test('the library’s reads are answered by the Rust server: Navidrome sees a pl
     ['getPlaylist', { id: ids['playlist.own'] }],
     ['getPlaylist', { id: 'no-such-playlist' }],
     ['getPlayQueue', {}],
+    ['getLyricsBySongId', { id: ids['track.syncedLyrics'] }],
+    ['getCoverArt', { id: `al-${ids['album.folderCover']}` }],
+    ['getCoverArt', { id: `al-${ids['album.compilation']}` }],
   ].map(([method, params], i) => [method, { ...params, mark: `taken-${i}-${method}${params.type === 'random' ? '-random' : ''}` }]);
   const left = [
     ['getSong', { id: ids['track.flac'], f: 'xml', mark: 'left-xml' }],
@@ -209,6 +212,9 @@ test('the library’s reads are answered by the Rust server: Navidrome sees a pl
     ['getMusicFolders', { mark: 'left-other-method' }],
     ['getPlaylist', { id: ids['playlist.otherUser'], f: 'xml', mark: 'left-playlist-xml' }],
     ['search3', { query: 'kenji', musicFolderId: 1, mark: 'left-search-music-folder' }],
+    ['getLyricsBySongId', { id: ids['track.lrcSidecar'], mark: 'left-lyrics-file' }],
+    ['getCoverArt', { id: `dc-${ids['album.twoDiscs']}:1`, mark: 'left-disc-cover' }],
+    ['getScanStatus', { mark: 'left-scan-status' }],
   ];
   for (const [method] of taken) assert.ok(ANSWERED_BY_RUST.includes(method), method);
   const answers = {};
@@ -230,7 +236,8 @@ test('the library’s reads are answered by the Rust server: Navidrome sees a pl
     assert.equal(fromRust.by, mine ? 'rust' : null, `${fromRust.mark}: ${mine ? 'answered by the Rust server' : 'left to Navidrome'}`);
     assert.equal(fromGo.by, null);
     assert.equal(fromRust.cookie, fromGo.cookie, `${fromRust.mark}: the player cookie's name`);
-    assert.match(fromGo.cookie, /^nd-player-[0-9a-f]+$/);
+    // (Navidrome registers no player for a cover, so there is no cookie on either)
+    if (!fromRust.mark.includes('getCoverArt') && !fromRust.mark.includes('cover')) assert.match(fromGo.cookie, /^nd-player-[0-9a-f]+$/);
     if (fromRust.mark.includes('random')) continue; // another order every time, on both
     if (fromGo.text.includes('"roles":[')) continue; // an artist's roles: Go lists them in another order every time (the diff corpus compares them sorted)
     const strip = text => text.replace(/"serverVersion":"[^"]*"/, '');

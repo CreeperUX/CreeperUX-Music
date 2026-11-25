@@ -12,7 +12,7 @@ use crate::subsonic::respond::{GENERIC, MISSING_PARAMETER};
 
 use super::json::Json;
 use super::query::{self, Cond, ListOptions, QueryError, Table, not_missing};
-use super::{NOT_FOUND, Reply, Scope, entities, lists, seeded_order};
+use super::{NOT_FOUND, Reply, Scope, entities, lists, media, seeded_order};
 
 /// The answer of one of `super::METHODS`.
 pub fn answer(method: &str, scope: &Scope) -> Result<Reply, QueryError> {
@@ -26,6 +26,8 @@ pub fn answer(method: &str, scope: &Scope) -> Result<Reply, QueryError> {
         "getPlaylists" => lists::get_playlists(scope),
         "getPlaylist" => lists::get_playlist(scope),
         "getPlayQueue" => lists::get_play_queue(scope),
+        "getLyricsBySongId" => media::get_lyrics_by_song_id(scope),
+        "getCoverArt" => media::get_cover_art(scope),
         _ => Ok(Reply::Navidrome("not a method answered here")),
     }
 }

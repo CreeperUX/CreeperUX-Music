@@ -122,6 +122,8 @@ pub struct LibraryOptions {
     /// its cache of resized covers.
     pub data_folder: String,
     pub cache_folder: String,
+    /// `DefaultDownsamplingFormat` (default `opus`): what a stream asked for at a lower bit rate is transcoded to.
+    pub default_downsampling_format: String,
 }
 
 impl Default for LibraryOptions {
@@ -149,6 +151,7 @@ impl Default for LibraryOptions {
             image_cache_size: "100MB".into(),
             data_folder: ".".into(),
             cache_folder: String::new(),
+            default_downsampling_format: "opus".into(),
         }
     }
 }
@@ -370,6 +373,7 @@ impl Config {
                     image_cache_size: nd.get("imagecachesize")?.unwrap_or(d.image_cache_size),
                     data_folder: nd.get("datafolder")?.unwrap_or(d.data_folder),
                     cache_folder: nd.get("cachefolder")?.unwrap_or_default(),
+                    default_downsampling_format: nd.get("defaultdownsamplingformat")?.unwrap_or(d.default_downsampling_format),
                 }
             },
         };

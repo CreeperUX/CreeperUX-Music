@@ -1,7 +1,7 @@
 // Builds a request corpus for diff.mjs from a Navidrome database: the library reads the Rust server answers (phase 3 of
 // docs/server-roadmap.md), made from the data itself, as every user of that database.
 //
-//   node tools/contract/corpus-from-db.mjs --db <navidrome.db> --out <corpus.json> [--seed <n>] [--covers]
+//   node tools/contract/corpus-from-db.mjs --db <navidrome.db> --out <corpus.json> [--seed <n>] [--covers] [--streams]
 //   node tools/contract/corpus-from-db.mjs --db <navidrome.db> --out <corpus.json> --writes   (the writes: buildWritesCorpus)
 //
 // The database is never opened where it is: it is copied (with its -wal file) to a folder of its own first and read
@@ -15,6 +15,7 @@
 //   getStarred2, getPlaylists, getPlayQueue; getPlaylist for every playlist
 //   getLyricsBySongId   every song with stored lyrics, a sample without
 //   getCoverArt     with --covers: a few of each kind (the pictures need not be there: both servers must then fail alike)
+//   stream          with --streams: a song of each format and a sample, as is, a range, a lower bit rate, another format
 // Every request is made as every user (auth: { user: 'u1' … }, users in the order they were created); the corpus's
 // `users` field maps those keys to user ids. Random lists are left out: two servers cannot agree on them.
 // Request names hold methods, ids and counts only, never titles or user names: the corpus itself holds words from the
@@ -73,7 +74,7 @@ const json = text => { try { return JSON.parse(text || 'null'); } catch { return
 const odd = s => typeof s === 'string' && /[�\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(s);
 
 /** The corpus for a database: { generated, users, counts, volatile, unordered, requests }. */
-export function buildCorpus(db, { seed = 1, covers = false } = {}) {
+export function buildCorpus(db, { seed = 1, covers = false, streams = false } = {}) {
   const rnd = random(seed);
   const all = sql => db.prepare(sql).all();
   const users = all('select id from user order by created_at, id').map(r => r.id);
@@ -198,6 +199,22 @@ export function buildCorpus(db, { seed = 1, covers = false } = {}) {
       requests.push({ name: `getCoverArt ${id}`, method: 'getCoverArt', params: { id }, auth: { user: keys[0] } });
       requests.push({ name: `getCoverArt ${id} size=300`, method: 'getCoverArt', params: { id, size: '300' }, auth: { user: keys[0] } });
     }
+  }
+
+  // streams: with --streams, one song of each format and a sample of the rest, as is, with a range, at a lower bit rate
+  // and in another format, and an unknown id (without the music files beside the copy, both servers fail alike past
+  // the lookup: what is compared is who may stream what, and the errors)
+  if (streams) {
+    // Navidrome's error for a file that is not there names it, in each copy's own folder
+    const missing = { volatile: ['subsonic-response.error.message'] };
+    const picked = [...Object.values(bySuffix).map(list => list[0]), ...sample(songs, 10, rnd)];
+    for (const s of new Set(picked)) {
+      add(`stream ${s.id}`, 'stream', { id: s.id }, missing);
+      add(`stream ${s.id} Range`, 'stream', { id: s.id }, { headers: { Range: 'bytes=0-99' }, ...missing });
+      add(`stream ${s.id} maxBitRate=96`, 'stream', { id: s.id, maxBitRate: '96' }, missing);
+      add(`stream ${s.id} format=mp3`, 'stream', { id: s.id, format: 'mp3', maxBitRate: '320' }, missing);
+    }
+    add('stream unknown', 'stream', { id: 'no-such-song' });
   }
 
   return {
@@ -345,12 +362,12 @@ export function buildWritesCorpus(db, { seed = 1 } = {}) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const { values } = parseArgs({ options: { db: { type: 'string' }, out: { type: 'string' }, seed: { type: 'string' }, covers: { type: 'boolean' }, writes: { type: 'boolean' } } });
+  const { values } = parseArgs({ options: { db: { type: 'string' }, out: { type: 'string' }, seed: { type: 'string' }, covers: { type: 'boolean' }, streams: { type: 'boolean' }, writes: { type: 'boolean' } } });
   if (!values.db || !values.out) throw new Error('--db and --out are needed');
   const copy = await openCopy(resolve(values.db));
   try {
     const seed = Number(values.seed ?? 1);
-    const corpus = values.writes ? buildWritesCorpus(copy.db, { seed }) : buildCorpus(copy.db, { seed, covers: !!values.covers });
+    const corpus = values.writes ? buildWritesCorpus(copy.db, { seed }) : buildCorpus(copy.db, { seed, covers: !!values.covers, streams: !!values.streams });
     await mkdir(dirname(resolve(values.out)), { recursive: true });
     await writeFile(resolve(values.out), JSON.stringify(corpus, null, 1));
     // counts only: the corpus holds words from the data

@@ -512,6 +512,32 @@ reads them back the same:
   sessions (no Sonus client asks for it).
 - **Still Navidrome's:** `savePlayQueueByIndex`, `getPlayQueueByIndex` and bookmarks (no Sonus client sends them).
 
+## Media
+
+The roadmap's phase 5: the songs' files, transcoding, covers, players, and the R2 mirror, in parts.
+
+**Part 1: songs' files as they are** (`src/library/stream.rs`). `stream` sends a song's file as Navidrome sends a
+"raw" stream (`server/subsonic/stream.go`, `core/stream`): Go's `http.ServeContent`, ported, with the song's
+`updated_at` as the file's time.
+
+| | As Navidrome |
+|---|---|
+| Which song | the id looked up as `getSong` does, as the signed-in user: unknown or in a library they are not granted, 70 `data not found`; no id, 10 |
+| Raw or not | `format=raw` is raw for any player; without a format, raw unless a bit rate below the song's (`maxBitRate`, or the player's) and `DefaultDownsamplingFormat` (default `opus`) make Navidrome transcode; a player with a transcoding set is Navidrome's |
+| Answer | 200 with `Content-Type` (by the suffix, Navidrome's table), `Content-Length`, `Accept-Ranges: bytes`, `Last-Modified` (the song's `updated_at`, none for Go's zero time or the epoch), `X-Content-Duration` (the duration as Go writes a `float32`), Navidrome's usual headers and the player's cookie; never compressed |
+| `Range` | one range: 206 with `Content-Range`; past the end: 416 `invalid range: failed to overlap` with `Content-Range: bytes */size`; malformed: 416 `invalid range`; ranges adding up to more than the file: the whole file |
+| Conditions | `If-Match`, `If-Unmodified-Since` (412), `If-None-Match`, `If-Modified-Since` (304), `If-Range` (a range only for the same time to the second; an entity tag never matches, as Navidrome sends none); the three date layouts of Go's `http.ParseTime` |
+| `HEAD` | the headers with the length, no body; other methods (a form post) the body, and 412 instead of 304 |
+| `timeOffset` | ignored for a raw stream, as by Navidrome |
+| Formats | the same file whatever `f` names; an error asked for in another format than JSON is Navidrome's |
+
+**Navidrome's still:** anything it would transcode (part 2), several ranges in one request (its multipart answer has a
+random boundary), a song whose file cannot be opened or is not a regular file (Navidrome's error names the path), a
+stored path that would leave its library's folder (`SECURITY.md`), a suffix Go finds no content type for in Navidrome's
+table, a date in a condition with a zone Go would look up locally, and **`download`**: no Sonus client downloads (the
+roadmap's decision 1), and its file name (`Content-Disposition`) is Navidrome's own ASCII folding and escaping, to be
+ported only if a client needs it.
+
 ## Sonus Connect version 2
 
 One playback session per user, as Spotify Connect has it: the protocol is `docs/protocol/connect.md`, and this server
@@ -680,6 +706,34 @@ These start this server as its image runs it: `cargo run`, which starts Navidrom
 database.
 
 ## Checked against the real Navidrome
+
+### Media (phase 5, part 1: songs' files), 2026-11-25
+
+Windows on ARM, Navidrome 0.64.2-sonus.10, `cargo run` (a debug build) in front of it:
+
+- `node tools/contract/diff.mjs --go-vs-gateway --corpus tools/contract/corpus/read-only.json`: 499 of 499 the same,
+  396 answered here. The runner now compares, for every answer that is not JSON, the status, the bytes (length and
+  SHA-256) and the headers `Content-Type`, `Content-Length`, `Content-Range`, `Accept-Ranges`, `Last-Modified`,
+  `X-Content-Duration`, `X-Content-Type-Options`, `Vary`, `Content-Encoding`, `Transfer-Encoding`, `ETag`,
+  `Cache-Control`, `Content-Disposition`; and can send `HEAD`. 56 stream requests were added: every format of the
+  generated library, titles in other scripts, songs without tags, artist or album, a form post, `.view`, `HEAD` with
+  and without a range, ranges `0-0`, `0-`, `-0`, `-1`, `5-4`, past the end, ` 10 - 20`, `+3-9`, `abc`, `10`,
+  `items=`, an empty part, two parts (Navidrome's), two adding up to more than the file, one past the end beside one
+  that fits; `If-Modified-Since` ahead, long ago, in the ANSI C and RFC 850 layouts, nonsense; `If-Unmodified-Since`
+  both ways; `If-Match` `*`, a tag, a list with `*`, a list broken before it; `If-None-Match` `*`, a tag, a weak tag,
+  as a form post (412); `If-Range` with a tag and with an old date; `maxBitRate` 0, at or above the song's, not a
+  number; below the song's and `format=mp3` (Navidrome's, transcoded; the same bytes from both); `timeOffset`; no
+  id; another user; `f=xml` (the file) and an XML error (Navidrome's); a request from a page (CORS).
+- A reads corpus made from the golden database with `--streams` (`corpus-from-db.mjs`): 789 of 789. **On two copies
+  of the production database** (no music files on this computer: what is compared is the lookup, the access rules
+  and the errors): 195 stream requests, 195 the same; the error text of a file that is not there names each copy's
+  own folder and is left out of the comparison (its code is compared). The original's hash unchanged; the corpus
+  made from it deleted.
+- `cargo test`: 285 (2 new integration tests over a real file: every header, a part, `HEAD`, 416, 304, 412,
+  `If-Range`, `raw` with a transcoding player, XML, the errors; and what stays Navidrome's: a format, a lower bit
+  rate from the request or the player, a transcoding player, several ranges, a song without its file, an unknown
+  suffix, a stored path with `..`, an XML error). `run.mjs --through-gateway`: 132 of 132. `writes.test.mjs`,
+  `gateway.test.mjs`, `auth-routes.test.mjs`, `diff.test.mjs` and the `security/` tests: 38 of 38.
 
 ### The library's writes (phase 4, part 3: plays and now playing), 2026-11-25
 

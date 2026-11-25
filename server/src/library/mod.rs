@@ -12,7 +12,7 @@
 //! - rows this server does not read as Go's decoders do, or any error reading the database.
 //!
 //! `browse.rs` has the methods; `query.rs` the queries; `entities.rs` the albums and songs as JSON; `json.rs` Go's
-//! JSON; `player.rs` the player a request comes from.
+//! JSON; `player.rs` the player a request comes from; `stream.rs` a song's file (phase 5).
 
 pub mod browse;
 pub mod catalog;
@@ -25,6 +25,7 @@ pub mod player;
 pub mod playing;
 pub mod query;
 pub mod search;
+pub mod stream;
 pub mod writes;
 
 use std::collections::HashMap;
@@ -74,7 +75,13 @@ pub const METHODS: &[&str] = &[
     "scrobble",
     "getNowPlaying",
     "reportPlayback",
+    // phase 5: media (stream.rs)
+    "stream",
 ];
+
+/// The methods whose answer is the media itself, whatever format the request names: an error is rendered in that
+/// format, so one asked for in another than JSON is Navidrome's.
+const MEDIA: &[&str] = &["getCoverArt", "stream"];
 
 /// Whether a method is one of the library's.
 pub fn answers(method: &str) -> bool {
@@ -118,6 +125,8 @@ pub struct Library {
 /// A signed-in request to one of the library's methods.
 pub struct Request<'a> {
     pub method: &'static str,
+    /// The HTTP method (`GET`, `HEAD`, `POST`…).
+    pub http_method: &'a str,
     /// The query's parameters, and the form's.
     pub params: &'a Params,
     pub user: &'a SignedIn,
@@ -155,6 +164,8 @@ pub enum Reply {
     NotModified {
         headers: Vec<(HeaderName, HeaderValue)>,
     },
+    /// A song's file, or part of it, with the status and headers Go's `ServeContent` gives it (stream.rs).
+    Media(stream::Media),
     Navidrome(&'static str),
 }
 
@@ -186,6 +197,10 @@ pub struct Scope<'a> {
     pub client_id: &'a str,
     /// The player Navidrome registered for the request (empty: none).
     pub player_id: &'a str,
+    pub player: Option<&'a Player>,
+    /// The HTTP method, and the request's headers as they would go on to Navidrome (a stream's `Range`, `If-…`).
+    pub http_method: &'a str,
+    pub headers: &'a HeaderMap,
 }
 
 impl Scope<'_> {
@@ -250,14 +265,15 @@ impl Library {
     }
 
     async fn answer(&self, request: &Request<'_>) -> Result<Response<Body>, &'static str> {
-        let Request { method, params, user, user_header, headers } = *request;
+        let Request { method, http_method, params, user, user_header, headers } = *request;
         if !answers(method) {
             return Err("not a method answered here");
         }
         // a cover is a picture whatever format the request names, and Navidrome registers no player for it
         let cover = method == "getCoverArt";
         let writing = writes::METHODS.contains(&method);
-        if !cover && Format::of(params.get("f"), params.get("callback")) != Format::Json {
+        let json = Format::of(params.get("f"), params.get("callback")) == Format::Json;
+        if !MEDIA.contains(&method) && !json {
             return Err("not JSON");
         }
         let Ok(client) = std::str::from_utf8(params.get("c")) else { return Err("a client name that is not text") };
@@ -267,11 +283,13 @@ impl Library {
             // Navidrome registers the player before the method runs (getPlayer), and answers with its cookie
             let registration = Registration { user_id: &user.user_id, user: user_header, client: params.get("c"), version: params.get("v"), headers };
             let Some(player) = self.players.register(registration).await else { return Err("Navidrome registered no player") };
-            // (a write's answer holds no song: the player's transcoding and real paths do not matter to it)
-            if player.transcodes && !writing {
+            // (a write's answer holds no song: the player's transcoding and real paths do not matter to it; a stream
+            // looks at the player's settings itself)
+            let media = MEDIA.contains(&method);
+            if player.transcodes && !writing && !media {
                 return Err("the player has a transcoding set");
             }
-            if player.report_real_path && !entities::REAL_PATHS && !writing {
+            if player.report_real_path && !entities::REAL_PATHS && !writing && !media {
                 return Err("the player reports real paths, which Go builds by this system's rules");
             }
             Some(player)
@@ -291,6 +309,7 @@ impl Library {
         let player_id = player.as_ref().map(|player| player.id.clone()).unwrap_or_default();
         let (db, options, seeds, now_playing) = (self.db.clone(), self.options.clone(), self.seeds.clone(), self.now_playing.clone());
         let (user_id, client, params) = (user.user_id.clone(), client.to_string(), params.clone());
+        let (http_method_owned, request_headers, player_owned) = (http_method.to_string(), headers.clone(), player.clone());
         let reply = tokio::task::spawn_blocking(move || {
             let run = |conn: &rusqlite::Connection| {
                 let Some(viewer) = Viewer::load(conn, &user_id)? else { return Ok(Ok(Reply::Navidrome("the user is gone"))) };
@@ -305,6 +324,9 @@ impl Library {
                     now_playing: &now_playing,
                     client_id: &client_id,
                     player_id: &player_id,
+                    player: player_owned.as_ref(),
+                    http_method: &http_method_owned,
+                    headers: &request_headers,
                 };
                 Ok(browse::answer(method, &scope))
             };
@@ -337,6 +359,8 @@ impl Library {
         };
         match reply {
             Reply::Navidrome(why) => Err(why),
+            Reply::Error { .. } if !json => Err("an error answer in a format other than JSON"),
+            Reply::Media(media) => Ok(self.media(media, headers, player.as_ref())),
             Reply::Error { code, message } => {
                 let (content_type, body) = respond::render(&self.envelope, &Format::Json, &Payload::Error { code, message: &message });
                 Ok(self.response(content_type, body, headers, player.as_ref(), Vec::new()))
@@ -401,7 +425,56 @@ impl Library {
     }
 }
 
+/// How much of a song's file is read at a time.
+const CHUNK: u64 = 64 << 10;
+
+/// The bytes of an open file, `length` of them from where it stands, read as they are sent.
+fn file_body(file: std::fs::File, length: u64) -> Body {
+    use tokio::io::AsyncReadExt;
+    let file = tokio::fs::File::from_std(file);
+    let chunks = futures_util::stream::unfold((file, length), |(mut file, left)| async move {
+        if left == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; left.min(CHUNK) as usize];
+        match file.read(&mut buf).await {
+            Ok(0) => Some((Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into()), (file, 0))),
+            Ok(read) => {
+                buf.truncate(read);
+                Some((Ok(hyper::body::Frame::data(Bytes::from(buf))), (file, left - read as u64)))
+            }
+            // the answer has begun: ending it short is the only way left to say so, as Go does
+            Err(e) => Some((Err(crate::gateway::BoxError::from(e)), (file, 0))),
+        }
+    });
+    http_body_util::StreamBody::new(chunks).boxed()
+}
+
 impl Library {
+    /// A song's file as Navidrome sends it (stream.rs): its status and headers, Navidrome's usual ones, the player's
+    /// cookie; never compressed.
+    fn media(&self, media: stream::Media, request: &HeaderMap, player: Option<&Player>) -> Response<Body> {
+        let body = match media.body {
+            stream::MediaBody::Empty => Full::new(Bytes::new()).map_err(|never| match never {}).boxed(),
+            stream::MediaBody::Text(text) => Full::new(Bytes::from(text)).map_err(|never| match never {}).boxed(),
+            stream::MediaBody::File { file, length, .. } => file_body(file, length),
+        };
+        let mut response = Response::new(body);
+        *response.status_mut() = media.status;
+        let h = response.headers_mut();
+        respond::navidrome_headers(h, request, &self.frame_options);
+        if let Some(player) = player {
+            h.insert(header::SET_COOKIE, player.cookie.clone());
+        }
+        for (name, value) in media.headers {
+            h.insert(name, value);
+        }
+        if cfg!(debug_assertions) {
+            h.insert(ANSWERED_HEADER, HeaderValue::from_static("rust"));
+        }
+        response
+    }
+
     /// A picture as Navidrome sends it: never compressed, and without a length (Navidrome streams it: the body
     /// is chunked), with Navidrome's usual headers and the picture's own.
     fn picture(
@@ -490,7 +563,8 @@ mod tests {
         assert!(answers("ping"));
         assert!(answers("getAlbumList2"));
         assert!(!answers("getAlbumList"));
-        assert!(!answers("stream"));
+        assert!(answers("stream"));
+        assert!(!answers("download"));
         for method in METHODS {
             assert!(crate::subsonic::protected_method(method).is_some(), "{method} is one of Navidrome's protected methods");
         }

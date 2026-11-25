@@ -41,6 +41,8 @@ pub struct Player {
     pub report_real_path: bool,
     /// The player has a transcoding set (`transcoding_id`): songs then carry `transcodedSuffix`.
     pub transcodes: bool,
+    /// `MaxBitRate` (0: none): a stream above it is transcoded.
+    pub max_bit_rate: i64,
     /// The `Set-Cookie` Navidrome answers this player's requests with.
     pub cookie: HeaderValue,
 }
@@ -131,18 +133,20 @@ impl Players {
         let row = self
             .db
             .read(move |conn| {
-                conn.query_row("SELECT client, user_id, report_real_path, coalesce(transcoding_id, '') FROM player WHERE id = ?1", [&id], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?, r.get::<_, String>(3)?))
-                })
+                conn.query_row(
+                    "SELECT client, user_id, report_real_path, coalesce(transcoding_id, ''), coalesce(max_bit_rate, 0) FROM player WHERE id = ?1",
+                    [&id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?, r.get::<_, String>(3)?, r.get::<_, i64>(4)?)),
+                )
                 .optional()
             })
             .await
             .ok()??;
-        let (row_client, row_user, report_real_path, transcoding) = row;
+        let (row_client, row_user, report_real_path, transcoding, max_bit_rate) = row;
         if row_client.as_bytes() != client || row_user != user_id {
             return None;
         }
-        Some(Player { id: player_id.to_string(), report_real_path, transcodes: !transcoding.is_empty(), cookie })
+        Some(Player { id: player_id.to_string(), report_real_path, transcodes: !transcoding.is_empty(), max_bit_rate, cookie })
     }
 
     /// One `ping` to Navidrome as this request's user and client: the `Set-Cookie` of the player it registered.

@@ -1393,3 +1393,122 @@ async fn playback_reports_follow_navidromes_rules() {
     }
     assert_eq!(w.get(&format!("/rest/reportPlayback?{ALICE}&mediaId=s-1&positionMs=0&state=playing")).await.1, failed(10, "missing parameter: 'mediaType'"));
 }
+
+// ---------------------------------------------------------------- streams (phase 5)
+
+/// A world whose library is a folder of this test's: `a/One.flac` (s-1) holds 1000 known bytes; the other songs have
+/// no file.
+async fn world_with_files() -> (World, Vec<u8>) {
+    let w = world().await;
+    let music = w.dir.join("music");
+    std::fs::create_dir_all(music.join("a")).unwrap();
+    let bytes: Vec<u8> = (0..1000u32).map(|i| (i * 7 % 251) as u8).collect();
+    std::fs::write(music.join("a").join("One.flac"), &bytes).unwrap();
+    w.db().execute("UPDATE library SET path = ?1", [music.to_string_lossy()]).unwrap();
+    (w, bytes)
+}
+
+impl World {
+    async fn stream(&self, method: &str, query: &str, headers: &[(&str, &str)]) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let mut request = Request::builder().method(method).uri(format!("/rest/stream?{ALICE}&{query}"));
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let before = self.seen.lock().unwrap().len();
+        let answer = self.request(request.body(empty()).unwrap()).await;
+        if answer.1.contains_key(library::ANSWERED_HEADER) {
+            for seen in &self.seen.lock().unwrap()[before..] {
+                assert!(seen.target.starts_with("/rest/ping?"), "only a registration reaches Navidrome, not {}", seen.target);
+            }
+        }
+        answer
+    }
+}
+
+#[tokio::test]
+async fn a_songs_file_is_streamed_here_as_go_serves_it() {
+    let (w, bytes) = world_with_files().await;
+    let (status, headers, body) = w.stream("GET", "id=s-1", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[library::ANSWERED_HEADER], "rust");
+    assert_eq!(body, bytes);
+    assert_eq!(headers[header::CONTENT_TYPE], "audio/flac");
+    assert_eq!(headers[header::CONTENT_LENGTH], "1000");
+    assert_eq!(headers[header::ACCEPT_RANGES], "bytes");
+    assert_eq!(headers[header::LAST_MODIFIED], "Thu, 01 Jan 2026 12:00:00 GMT", "the song's updated_at, in GMT");
+    assert_eq!(headers["x-content-duration"], "61.9");
+    assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+    assert!(headers[header::SET_COOKIE].to_str().unwrap().starts_with("nd-player-"), "the player's cookie, as for every request Navidrome registers");
+    assert!(headers.get(header::CONTENT_ENCODING).is_none(), "never compressed");
+
+    // a part of it
+    let (status, headers, body) = w.stream("GET", "id=s-1", &[("Range", "bytes=10-19")]).await;
+    assert_eq!((status, &body[..]), (StatusCode::PARTIAL_CONTENT, &bytes[10..20]));
+    assert_eq!(headers[header::CONTENT_RANGE], "bytes 10-19/1000");
+    assert_eq!(headers[header::CONTENT_LENGTH], "10");
+    let (status, _, body) = w.stream("GET", "id=s-1", &[("Range", "bytes=-5")]).await;
+    assert_eq!((status, &body[..]), (StatusCode::PARTIAL_CONTENT, &bytes[995..]));
+    // the headers only
+    let (status, headers, body) = w.stream("HEAD", "id=s-1", &[]).await;
+    assert_eq!((status, body.len()), (StatusCode::OK, 0));
+    assert_eq!(headers[header::CONTENT_LENGTH], "1000");
+    // past the end: Go's error text
+    let (status, headers, body) = w.stream("GET", "id=s-1", &[("Range", "bytes=5000-")]).await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(String::from_utf8(body).unwrap(), "invalid range: failed to overlap\n");
+    assert_eq!(headers[header::CONTENT_RANGE], "bytes */1000");
+    assert_eq!(headers[header::CONTENT_TYPE], "text/plain; charset=utf-8");
+    assert!(headers.get(header::LAST_MODIFIED).is_none());
+    // unchanged since
+    let (status, headers, body) = w.stream("GET", "id=s-1", &[("If-Modified-Since", "Thu, 01 Jan 2026 12:00:00 GMT")]).await;
+    assert_eq!((status, body.len()), (StatusCode::NOT_MODIFIED, 0));
+    assert!(headers.get(header::CONTENT_TYPE).is_none());
+    let (status, _, _) = w.stream("GET", "id=s-1", &[("If-Unmodified-Since", "Thu, 01 Jan 2026 11:59:59 GMT")]).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    // a range for another version of the file: the whole file
+    let (status, _, body) = w.stream("GET", "id=s-1", &[("Range", "bytes=0-1"), ("If-Range", "\"abc\"")]).await;
+    assert_eq!((status, body.len()), (StatusCode::OK, 1000));
+    // asked for as it is, whatever the player's settings; a bit rate the song is not above
+    w.stream("GET", "id=s-1&format=raw", &[]).await;
+    let (_, headers, _) = w.stream("GET", "id=s-1&maxBitRate=320", &[]).await;
+    assert_eq!(headers[library::ANSWERED_HEADER], "rust");
+    // in another format than JSON: the file is the same
+    let (status, headers, _) = w.request(Request::get("/rest/stream.view?u=alice&p=sesame&v=1.16.1&c=test&id=s-1").body(empty()).unwrap()).await;
+    assert_eq!((status, &headers[library::ANSWERED_HEADER]), (StatusCode::OK, &hyper::header::HeaderValue::from_static("rust")));
+
+    // Navidrome's errors, in its words
+    assert_eq!(String::from_utf8(w.stream("GET", "id=nope", &[]).await.2).unwrap(), failed(70, "data not found"));
+    assert_eq!(String::from_utf8(w.stream("GET", "", &[]).await.2).unwrap(), failed(10, "missing parameter: 'id'"));
+    let bob = w.request(Request::get(format!("/rest/stream?{BOB}&id=s-1")).body(empty()).unwrap()).await;
+    assert_eq!(String::from_utf8(bob.2).unwrap(), failed(70, "data not found"), "a song in a library bob may not read");
+}
+
+#[tokio::test]
+async fn streams_that_stay_navidromes() {
+    let (w, _) = world_with_files().await;
+    let navidromes = |answer: (StatusCode, HeaderMap, Vec<u8>)| {
+        assert_eq!(answer.2, b"from navidrome", "{:?}", answer.1);
+        assert!(answer.1.get(library::ANSWERED_HEADER).is_none());
+    };
+    // transcoding: a format, a bit rate below the song's (320)
+    navidromes(w.stream("GET", "id=s-1&format=mp3", &[]).await);
+    navidromes(w.stream("GET", "id=s-1&maxBitRate=128", &[]).await);
+    // several ranges: Navidrome's multipart answer
+    navidromes(w.stream("GET", "id=s-1", &[("Range", "bytes=0-1,5-6")]).await);
+    // a song without its file, a suffix Go finds no type for
+    navidromes(w.stream("GET", "id=s-2", &[]).await);
+    navidromes(w.stream("GET", "id=s-x", &[]).await);
+    // a stored path that leaves the library's folder is not opened here
+    w.db().execute("UPDATE media_file SET path = '../navidrome.db' WHERE id = 's-1'", []).unwrap();
+    navidromes(w.stream("GET", "id=s-1", &[]).await);
+    w.db().execute("UPDATE media_file SET path = 'a/One.flac' WHERE id = 's-1'", []).unwrap();
+    // an error in XML
+    navidromes(w.request(Request::get("/rest/stream?u=alice&p=sesame&v=1.16.1&c=test&id=nope").body(empty()).unwrap()).await);
+    // the player's settings: a lower bit rate, a transcoding
+    w.db().execute("UPDATE player SET max_bit_rate = 128", []).unwrap();
+    navidromes(w.stream("GET", "id=s-1", &[]).await);
+    w.db().execute("UPDATE player SET max_bit_rate = 0, transcoding_id = 'mp3'", []).unwrap();
+    navidromes(w.stream("GET", "id=s-1", &[]).await);
+    let (status, headers, _) = w.stream("GET", "id=s-1&format=raw", &[]).await;
+    assert_eq!((status, &headers[library::ANSWERED_HEADER]), (StatusCode::OK, &hyper::header::HeaderValue::from_static("rust")), "raw is raw for any player");
+}

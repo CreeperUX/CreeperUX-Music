@@ -33,7 +33,7 @@ sha1 = "0.11.0"
 sha2 = "0.11.0"
 subtle = "2.6.1"
 tokio-tungstenite = { version = "0.30", default-features = false }
-tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

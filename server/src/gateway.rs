@@ -246,7 +246,14 @@ impl Gateway {
                     subsonic::Outcome::SignedIn { path_and_query: stripped, body, content_length, user: signed_in, who, params } => {
                         // the library's reads are answered here (library/mod.rs), unless it leaves one to Navidrome
                         if let Some(library) = self.inner.library.get().filter(|_| library::answers(subsonic_method)) {
-                            let request = library::Request { method: subsonic_method, params: &params, user: &who, user_header: &signed_in, headers: &headers };
+                            let request = library::Request {
+                                method: subsonic_method,
+                                http_method: parts.method.as_str(),
+                                params: &params,
+                                user: &who,
+                                user_header: &signed_in,
+                                headers: &headers,
+                            };
                             if let library::Answer::Here(response) = library.handle(request).await {
                                 // Navidrome's UpdateLastAccessMiddleware, for the requests it no longer sees
                                 subsonic.touch_last_access(&who.user_id).await;

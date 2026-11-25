@@ -28,6 +28,7 @@ pub fn answer(method: &str, scope: &Scope) -> Result<Reply, QueryError> {
         "getPlayQueue" => lists::get_play_queue(scope),
         "getLyricsBySongId" => media::get_lyrics_by_song_id(scope),
         "getCoverArt" => media::get_cover_art(scope),
+        "stream" => super::stream::stream(scope),
         "star" => writes::star(scope, true),
         "unstar" => writes::star(scope, false),
         "setRating" => writes::set_rating(scope),

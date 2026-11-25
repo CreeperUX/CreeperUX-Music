@@ -440,6 +440,40 @@ libraries they see (every one to an admin), with the name of the user who plays,
 **Not sent:** the `refreshResource` events Navidrome's web UI gets on a star, a rating or a play, the now-playing
 count (decision 2), and anything to Last.fm, ListenBrainz or plugins (decision 3).
 
+## Media: songs' files
+
+`src/library/stream.rs` (phase 5); what is answered is in `README.md`, "Media". This is the first code here that reads
+files by what a client asks for, so the whole path is written down.
+
+**No path comes from the client.** The client sends a song's id (`id`), nothing else that names a file. The id is one
+bound parameter of the same query `getSong` runs, as the signed-in user: a song in a library the user is not granted
+is "not found" (70), exactly as in Navidrome, before anything is opened. The file is the song row's `path` joined to
+its library's `path`, both written by Navidrome's scanner. Before opening it, the stored path must be relative and
+made of plain names only (no `..`, no root, no drive or UNC prefix: `inside_library`); any other row is left to
+Navidrome, which serves it as before (so this adds a check and removes none). Symbolic links inside the library are
+followed, as Navidrome follows them: a library is the owner's folder, and a link in it is the owner's choice.
+
+**What is opened.** One read-only file per request, through the operating system's normal permissions of the server
+process; a path that is not a regular file is left to Navidrome. Nothing is written. The file is read as it is sent,
+64 KiB at a time, so a request costs one open file and one buffer, whatever the file's size; a slow client holds them
+until it reads or the connection ends (as Navidrome).
+
+**The request's headers.** `Range` and the `If-…` conditions are parsed by code ported from Go's `net/http`, checked
+against Navidrome on every edge in the corpus (empty, reversed and overflowing ranges, suffixes longer than the file,
+spaces, signs, past the end, several parts; the three date layouts, bad dates, entity tags). The numbers are 64-bit
+and checked, so a range can never point outside the file: a start past the end is "416", an end past it is cut to the
+last byte. Several ranges in one request (a multipart answer) are left to Navidrome. A date in a zone that Go would
+look up in the server's own time zone is left to Navidrome rather than guessed.
+
+**What is answered.** The file's bytes, the headers `http.ServeContent` sets, and Navidrome's usual headers
+(`X-Content-Type-Options: nosniff` among them, so a browser never sniffs a file into something else); the content type
+comes from Navidrome's own table by the song's suffix, never from the file's contents. Nothing from the request is
+reflected except the numbers of a range.
+
+**Left to Navidrome, as before:** anything Navidrome would transcode (a format asked for, a bit rate below the song's,
+a player with a transcoding or a lower bit rate), downloads (`download`, not used by Sonus clients), and every error
+Navidrome words with a path in it (a file that cannot be opened).
+
 ## Secrets
 
 - **Passwords are stored reversibly**, by Navidrome's design: Subsonic's token sign-in (`t` = md5(password ‖ salt))
@@ -474,8 +508,9 @@ count (decision 2), and anything to Last.fm, ListenBrainz or plugins (decision 3
   own row), `playlist` and `playlist_tracks` (the user's own playlists, an admin's: any), `artwork_queue` (a changed
   playlist's cover) and `scrobbles` (the user's own plays), and read `radio` to find an id as Navidrome does and
   `player.scrobble_enabled` for a stopped playback. Covers read `item_artwork` and `artwork`, and files:
-  the pictures Navidrome's state names, its image store and its cache of resized pictures. Nothing is written there
-  either.
+  the pictures Navidrome's state names, its image store and its cache of resized pictures. Streams read `media_file`
+  and `library` as `getSong` does, `player.max_bit_rate` and `transcoding_id`, and a song's file (above). Nothing is
+  written there either.
 - No change to Navidrome's schema, ever, and no VACUUM; the schema is checked at start and the server refuses any
   other. The server's own tables are additive (`CREATE TABLE IF NOT EXISTS`); a `sonus_connect_session` row refers to
   its user (`ON DELETE CASCADE`), which adds one indexed lookup to Navidrome's deleting of a user and nothing else.

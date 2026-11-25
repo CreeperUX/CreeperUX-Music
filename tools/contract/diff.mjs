@@ -22,11 +22,12 @@
 //   { …, post: true }                                                             the same as a form post
 //   { …, auth: 'listener' | 'none' | { user, as: 'token'|'password'|'enc'|'appPassword'|'apiKey' } }   default: the
 //       manifest's primary user, by token (with a fixed salt, so both servers get the very same request)
-//   { …, headers: { Range: 'bytes=0-99' } }
+//   { …, headers: { Range: 'bytes=0-99' } }, { …, httpMethod: 'HEAD' }
 //   { name, path: '/auth/device/poll', httpMethod: 'POST', json: { … } }           any other route
 //   { name, path: '/rest/ping', httpMethod: 'PUT', form: 'u=x&p=y' }               the same, with a form as its body
 //   { …, for: ['track.flac', 'track.mp3'] }                                        one request per key: {{$}} is the key
 //   { …, volatile: [paths], unordered: [paths] }                                   the same, for this request only
+//       ('@…': a path of the whole answer rather than its JSON: '@sha256', '@headers.content-type')
 //   { …, navidrome: 'why' }                                                       a request to a method the Rust server
 //       answers itself (ANSWERED_BY_RUST) that it must leave to Navidrome all the same, and why
 //   { …, save: 'mine' }                                                          keep the playlist id each side's
@@ -56,7 +57,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
 const SALT = 'd1ff5a17';
 const CLIENT = 'sonus-diff';
-const COMPARED_HEADERS = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified', 'cache-control'];
+const COMPARED_HEADERS = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified', 'cache-control',
+  'content-encoding', 'transfer-encoding', 'vary', 'x-content-type-options', 'x-content-duration', 'content-disposition'];
 // compared for JSON answers too, when either side sends them
 const COMPARED_JSON_HEADERS = ['x-total-count'];
 /** The header a debug build of the Rust server marks its own answers with (server/src/library/mod.rs). */
@@ -67,7 +69,11 @@ export const ANSWERED_BY_RUST = [
   // phase 4: writes
   'star', 'unstar', 'setRating', 'savePlayQueue', 'createPlaylist', 'updatePlaylist', 'deletePlaylist',
   'scrobble', 'getNowPlaying', 'reportPlayback',
+  // phase 5: media
+  'stream',
 ];
+/** The methods whose answer is the media itself, whatever format the request names. */
+const MEDIA = ['getCoverArt', 'stream'];
 
 // ---------------------------------------------------------------- the corpus
 
@@ -120,7 +126,7 @@ function toFetch(base, r, manifest, saved) {
   if (req.post) {
     return [`${base}/rest/${req.method}`, { method: 'POST', body: q.toString(), headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...(req.headers ?? {}) } }];
   }
-  return [`${base}/rest/${req.method}?${q}`, { headers: { ...(req.headers ?? {}) } }];
+  return [`${base}/rest/${req.method}?${q}`, { method: req.httpMethod ?? 'GET', headers: { ...(req.headers ?? {}) } }];
 }
 
 // ---------------------------------------------------------------- answers, normalized
@@ -210,8 +216,9 @@ export const EXPECTED = {
 export function mustBeAnsweredByRust(r, answerOfNavidrome) {
   const method = (r.method ?? '').replace(/\.view$/, '');
   if (!ANSWERED_BY_RUST.includes(method) || r.navidrome) return false;
-  // (a cover is a picture whatever format the request names)
-  if (method !== 'getCoverArt' && (r.params && 'f' in r.params && r.params.f !== 'json')) return false;
+  // (a cover or a song's file is the same whatever format the request names; their errors in another format than
+  // JSON are Navidrome's, which the request then says)
+  if (!MEDIA.includes(method) && (r.params && 'f' in r.params && r.params.f !== 'json')) return false;
   const error = answerOfNavidrome.json?.['subsonic-response']?.error;
   // refused at the sign-in: the method was never reached
   if (error && ([40, 43, 44].includes(error.code) || /^missing parameter: '[uvc]'$/.test(error.message ?? ''))) return false;
@@ -240,7 +247,8 @@ export async function runDiff({ a, b, manifest, corpus, only, expected = [], who
       if (answerOf.json && Object.keys(saved).length) answerOf.json = placeholders(answerOf.json, saved);
     }
     for (const e of expected) e.apply(ra);
-    const inJson = v => (v.startsWith('json.') ? v : `json.${v}`);
+    // '@…' is a path of the whole answer (@sha256, @headers.content-type), anything else one in its JSON
+    const inJson = v => (v.startsWith('@') ? v.slice(1) : v.startsWith('json.') ? v : `json.${v}`);
     const volatile = [...(corpus.volatile ?? []), ...(r.volatile ?? [])].map(inJson);
     const unordered = [...(corpus.unordered ?? []), ...(r.unordered ?? [])].map(inJson);
     const diffs = compare(ra, rb, volatile, [], [], unordered);

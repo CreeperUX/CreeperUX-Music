@@ -4,6 +4,7 @@
 import { h, ic } from '../dom.js';
 import { scope, tint } from './common.js';
 import { orderToBar, barToOrder } from '../api/contract.js';
+import { mountDevicePicker, whereLine } from '../shell/devices.js';
 
 export function nowView(holder, route, ctx) {
   const { t, UI, M, P, S, adapter } = ctx, bag = scope();
@@ -42,10 +43,17 @@ export function nowView(holder, route, ctx) {
   links.append(h('a', { class: 'cm-now-link', href: '#/lyrics' }, ic('lyrics'), h('span', {}, t.lyrics)));
   const albumLink = h('a', { class: 'cm-now-link' }, ic('album'), h('span', {}, t.goAlbum));
   links.append(albumLink);
+  // where it plays, and the device picker (on a phone this page is the only place for it)
+  const pickSlot = h('span', { class: 'cm-output cm-now-devices' });
+  links.append(pickSlot);
+  const devicePicker = mountDevicePicker(pickSlot, ctx, { placement: 'top' });
+  bag.add(() => devicePicker.destroy());
+  const where = whereLine(ctx, 'cm-now-where');
+  bag.add(where.off);
 
   const lyricsBox = h('div', { class: 'cm-now-lyrics' });
   const lyrics = bag.add(M.createLyricsView(lyricsBox, { label: t.lyrics, height: '100%', resumeAfter: 5000, state: 'empty', onSeek: e => ctx.run(adapter.seek(e.time)) }, S));
-  const main = h('div', { class: 'cm-now-main' }, context, artBox, meta, seekBox, transport, links);
+  const main = h('div', { class: 'cm-now-main' }, context, artBox, meta, seekBox, transport, where.el, links);
   stage.append(main, lyricsBox);
 
   let shown = null, ctl = null;

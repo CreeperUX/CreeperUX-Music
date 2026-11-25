@@ -2,6 +2,7 @@
 // next, as cards) or the Queue (songs queued by hand, then the rest of what is playing).
 import { h, ic } from '../dom.js';
 import { badges, factsList } from '../views/common.js';
+import { whereLine } from './devices.js';
 
 export function mountPanel(slot, ctx) {
   const { UI, M, t } = ctx;
@@ -50,7 +51,7 @@ export function mountPanel(slot, ctx) {
   const nextBody = h('div', { class: 'cm-card-next' });
   const openQueue = h('button', { type: 'button', class: 'cm-card-link', onClick: () => show('queue') }, t.openQueue);
   const nextCard = card('', [t.nextUp, openQueue], nextBody);
-  np.body.append(lyricsCard, audioCard, artistCard, nextCard);
+  np.body.append(whereLine(ctx, 'cm-panel-where').el, lyricsCard, audioCard, artistCard, nextCard);
   let nextCardHandle = null;
 
   let shownTrack = null, lyricsCtl = null;

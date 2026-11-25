@@ -2,6 +2,7 @@
 // repeat controls, the output device picker, and the Now playing / Lyrics / Queue actions.
 import { h } from '../dom.js';
 import { orderToBar, barToOrder } from '../api/contract.js';
+import { mountDevicePicker, whereLine } from './devices.js';
 
 export function mountBar(slot, ctx) {
   const { M, t, adapter } = ctx;
@@ -45,21 +46,20 @@ export function mountBar(slot, ctx) {
   } }, ctx.S);
   bar.root.classList.add('cm-bar');
 
-  // the output device picker sits with the actions, before the volume (Spotify's "Connect to a device")
+  // the device picker sits with the actions, before the volume (Spotify's "Connect to a device"): the user's devices
+  // with Sonus Connect, this browser's audio outputs without it (shell/devices.js)
   const extras = bar.root.querySelector('.ui-pb-extras'), volume = bar.root.querySelector('.ui-pb-volume');
   const pickSlot = h('span', { class: 'cm-output' });
-  if (extras && volume && ctx.adapter.capabilities?.outputs !== false) extras.insertBefore(pickSlot, volume); 
-  const devices = () => ctx.outputs.map(o => ({ ...o }));
-  const picker = M.createDevicePicker(pickSlot, { devices: devices(), current: ctx.player.output, label: t.output, placement: 'top-end',
-    onSelect: e => ctx.run(adapter.setOutput(e.id)) }, ctx.S);
+  if (extras && volume && ctx.adapter.capabilities?.outputs !== false) extras.insertBefore(pickSlot, volume);
+  mountDevicePicker(pickSlot, ctx);
+  // "正在「手机」上播放": a strip under the bar while another device plays (or played last)
+  bar.root.after(whereLine(ctx, 'cm-bar-where').el);
+  // the volume is the playing device's while another one plays (rule 8)
+  const volumeLabel = () => { const r = ctx.player.remote; if (volume) { volume.title = r ? t.dev.volumeOf(r.name) : ''; volume.toggleAttribute('data-remote', !!r); } };
 
-  ctx.on('player', ({ player, prev }) => {
-    bar.update(state());
-    if (player.output !== prev?.output) picker.update({ current: player.output });
-  });
+  ctx.on('player', () => { bar.update(state()); volumeLabel(); });
   ctx.on('position', pos => bar.update({ position: pos }));
   ctx.on('track', tr => { if (tr.id === ctx.player.trackId) bar.update({ liked: !!tr.liked }); });
-  ctx.on('outputs', () => picker.update({ devices: devices() }));
   const syncActions = () => bar.update({ actions: actions() });
   ctx.on('route', syncActions); ctx.on('layout', syncActions); ctx.on('panel', syncActions);
 }

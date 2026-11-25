@@ -383,8 +383,13 @@ fn best_picture(types: &[&str]) -> usize {
 /// ffmpeg, which is its to do.
 const EMBEDDED_FORMATS: [&str; 6] = ["mp3", "flac", "m4a", "ogg", "opus", "oga"];
 
-/// `fromTag`: the picture embedded in a song. Ok(None): the file has none.
-pub fn embedded_picture(path: &Path) -> Result<Option<Vec<u8>>, &'static str> {
+/// `fromTag`: the picture embedded in a song, at most `limit` bytes. Ok(None): the file has none.
+///
+/// Navidrome bounds nothing here (TagLib reads the picture whole): a full-size answer serves it as it is, and a resize
+/// over `MaxImageSize` fails, so the disc shows its album's cover. Here a picture over the limit is not taken (that
+/// answer is Navidrome's), and lofty itself refuses any single allocation over 16 MiB while it reads a tag (its
+/// `allocation_limit`), so a picture frame cannot make it allocate more.
+pub fn embedded_picture(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, &'static str> {
     use lofty::file::TaggedFileExt;
     let suffix = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     if !EMBEDDED_FORMATS.contains(&suffix.as_str()) {
@@ -398,6 +403,9 @@ pub fn embedded_picture(path: &Path) -> Result<Option<Vec<u8>>, &'static str> {
     }
     let types: Vec<&str> = pictures.iter().map(|p| taglib_type(p, mp4)).collect();
     let picture = pictures[best_picture(&types)];
+    if picture.data().len() as u64 > limit {
+        return Err("an embedded picture over the size this server reads: Navidrome's");
+    }
     Ok((!picture.data().is_empty()).then(|| picture.data().to_vec()))
 }
 
@@ -431,7 +439,7 @@ impl DiscReader {
                     if !inside_library(&self.first_track) {
                         return Selected::Navidromes("a song path that leaves the library's folder");
                     }
-                    match embedded_picture(&self.root.join(&self.first_track)) {
+                    match embedded_picture(&self.root.join(&self.first_track), MAX_PICTURE_BYTES) {
                         Ok(Some(bytes)) => Some(Ok(bytes)),
                         Ok(None) => None,
                         Err(why) => return Selected::Navidromes(why),
@@ -529,6 +537,50 @@ mod tests {
         assert_eq!(join_rel("Artist", "Album"), "Artist/Album");
         assert_eq!(join_rel("", "Album"), "Album");
         assert_eq!(join_rel("/a/", "b/"), "a/b");
+    }
+
+    /// A FLAC file with no audio: STREAMINFO, then one PICTURE block (a front cover of picture bytes).
+    fn flac_with_picture(picture: &[u8]) -> Vec<u8> {
+        let mut out = b"fLaC".to_vec();
+        // STREAMINFO (not last), 34 bytes: block sizes 4096, no frame sizes, 44100 Hz, 2 channels, 16 bits, no samples
+        out.extend_from_slice(&[0x00, 0, 0, 34, 0x10, 0x00, 0x10, 0x00, 0, 0, 0, 0, 0, 0]);
+        out.extend_from_slice(&[0x0A, 0xC4, 0x42, 0xF0, 0, 0, 0, 0]);
+        out.extend_from_slice(&[0; 16]);
+        // PICTURE (last): type 3 (front cover), "image/jpeg", no description, 1 × 1, 24 bits, no palette
+        let mut block = Vec::new();
+        block.extend_from_slice(&3u32.to_be_bytes());
+        block.extend_from_slice(&10u32.to_be_bytes());
+        block.extend_from_slice(b"image/jpeg");
+        block.extend_from_slice(&0u32.to_be_bytes());
+        for value in [1u32, 1, 24, 0] {
+            block.extend_from_slice(&value.to_be_bytes());
+        }
+        block.extend_from_slice(&(picture.len() as u32).to_be_bytes());
+        block.extend_from_slice(picture);
+        let length = block.len() as u32;
+        out.push(0x80 | 6);
+        out.extend_from_slice(&length.to_be_bytes()[1..]);
+        out.extend_from_slice(&block);
+        out
+    }
+
+    #[test]
+    fn an_embedded_picture_is_bounded() {
+        let dir = std::env::temp_dir().join(format!("sonus-embedded-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let picture: Vec<u8> = [&[0xFF, 0xD8, 0xFF, 0xE0][..], &[7u8; 996][..]].concat();
+        let song = dir.join("one.flac");
+        std::fs::write(&song, flac_with_picture(&picture)).unwrap();
+        assert_eq!(embedded_picture(&song, 2000), Ok(Some(picture.clone())), "within the limit: the picture's bytes");
+        assert!(embedded_picture(&song, 999).is_err(), "over it: Navidrome's");
+        let bare = dir.join("bare.flac");
+        let mut no_picture = flac_with_picture(&[]);
+        no_picture.truncate(42);
+        no_picture[4] |= 0x80; // STREAMINFO is the last block
+        std::fs::write(&bare, no_picture).unwrap();
+        assert_eq!(embedded_picture(&bare, 2000), Ok(None), "no picture");
+        assert!(embedded_picture(&dir.join("a.wav"), 2000).is_err(), "a format lofty is not trusted with here");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -41,6 +41,8 @@ pub struct Claims {
     pub is_admin: bool,
     /// The user's token epoch when the token was made.
     pub epoch: i64,
+    /// What a public link names (`id`: an artwork id), in the tokens signed with the public secret.
+    pub id: String,
 }
 
 impl Claims {
@@ -70,6 +72,9 @@ impl Claims {
         if self.epoch != 0 {
             m.insert("ep".into(), json!(self.epoch));
         }
+        if !self.id.is_empty() {
+            m.insert("id".into(), json!(self.id));
+        }
         Value::Object(m)
     }
 
@@ -92,6 +97,7 @@ impl Claims {
             user_id: text("uid"),
             is_admin: m.get("adm").and_then(Value::as_bool).unwrap_or(false),
             epoch: number("ep"),
+            id: text("id"),
         })
     }
 }
@@ -222,6 +228,7 @@ mod tests {
                 user_id: "1h0kQuAetIeA34EYHnVwu1".into(),
                 is_admin: true,
                 epoch: 3,
+                id: String::new(),
             }
         );
         assert_eq!(check(&claims, "1h0kQuAetIeA34EYHnVwu1", 3, AUDIENCE_NATIVE), Ok(()));
@@ -320,6 +327,7 @@ mod tests {
             user_id: "id".into(),
             is_admin: true,
             epoch: 4,
+            id: String::new(),
         };
         let json = full.to_json();
         assert_eq!(json, json!({"iss": "ND", "sub": "u", "aud": ["a"], "iat": 1, "exp": 2, "uid": "id", "adm": true, "ep": 4}));

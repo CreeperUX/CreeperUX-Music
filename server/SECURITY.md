@@ -506,7 +506,11 @@ scanner listed in the album's folders (rows of `folder`: path, name, `image_file
 names the album and the disc number only; every path read is the library's folder joined with the scanner's relative
 path, checked to stay inside it (`inside_library`), opened only when it is a regular file of at most 64 MiB. A song's
 embedded picture is read with lofty (pure Rust) for mp3, flac, m4a, ogg and opus only; anything else, or a file lofty
-cannot read, is Navidrome's (which then asks TagLib and ffmpeg). A file that is listed but cannot be opened is
+cannot read, is Navidrome's (which then asks TagLib and ffmpeg). lofty refuses any single allocation over 16 MiB while
+it reads a tag (its default `allocation_limit`), so an oversized picture frame fails the read (Navidrome's) rather
+than being taken into memory; a picture is also taken only up to 64 MiB, as a file is. Navidrome bounds neither:
+TagLib reads the picture whole, a full-size answer serves it, and a resize over `MaxImageSize` fails so the disc shows
+its album's cover (which this server does too: the resize path applies `MaxImageSize` to any picture). A file that is listed but cannot be opened is
 Navidrome's (it goes on with the next candidate), so an I/O fault never changes which picture is chosen. The patterns
 are the owner's setting, matched as Go's `filepath.Match` (a malformed one matches nothing).
 
@@ -514,6 +518,23 @@ are the owner's setting, matched as Go's `filepath.Match` (a malformed one match
 `Cache-Control: no-store` and no validators, exactly where Navidrome serves them: no id, an item settled without a
 picture, an item the user does not see or that is gone. They say nothing about the item beyond "no picture for you",
 as Navidrome's do.
+
+## Media: artist image links
+
+`src/library/links.rs`. `search3` and `getStarred2` give an artist with a picture an `artistImageUrl`: a link to
+Navidrome's public image route (`/share/img/<token>?size=600`), whose token is a JWT (HS256) naming the artwork id,
+signed with **Navidrome's public secret** (`JWTPublicSecret` in `property`, sealed with `PasswordEncryptionKey` as the
+session secret is). This server now reads that secret at start, as it reads the session secret; it is held in memory
+only, never logged, and used only to sign `{"id": "ar-<artist>_<hash>", "iss": "ND"}`, the very tokens Navidrome
+makes (no expiry, as Navidrome's). What such a token grants is Navidrome's own: anyone holding the link sees that one
+artist's picture, served by Navidrome. Without the secret (not made yet, or not to be opened), those answers stay
+Navidrome's.
+
+The link's address is Navidrome's: `ShareURL`, else `BaseURL`'s host, else the request's own address
+(`X-Forwarded-Host` / `Host`, `X-Forwarded-Proto` / `X-Forwarded-Scheme`), headers the gateway passes on to Navidrome
+as they came. So, as with Navidrome, a client can choose the host written into its own answer (only its own: nothing
+is stored or shown to anyone else); setting `BaseURL` or `ShareURL` fixes it. A scheme other than `http`/`https`, or a
+host or path with characters Go's `url.URL` would escape, leaves the answer to Navidrome.
 
 ## Media: transcoding
 

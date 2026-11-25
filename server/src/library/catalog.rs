@@ -461,7 +461,7 @@ fn playlist_from(row: &Row) -> Playlist {
 }
 
 /// `playlistRepository.userFilter`: an admin sees every playlist, anyone else the public ones and their own.
-fn playlist_filter(viewer: &Viewer) -> Cond {
+pub(super) fn playlist_filter(viewer: &Viewer) -> Cond {
     if viewer.is_admin {
         return Cond::new("(1=1)", Vec::new()); // squirrel's empty And
     }

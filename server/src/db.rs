@@ -114,6 +114,24 @@ impl Db {
         result.map_err(DbError::Sqlite)
     }
 
+    /// `write_blocking`, committed only when `commit` says so of what `f` returned (else rolled back): for a write
+    /// whose outcome is an answer that may say nothing is to be kept.
+    pub fn write_blocking_if<T>(&self, f: impl FnOnce(&Transaction) -> rusqlite::Result<T>, commit: impl FnOnce(&T) -> bool) -> Result<T, DbError> {
+        let mut conn = self.take()?;
+        let result = (|| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let value = f(&tx)?;
+            if commit(&value) {
+                tx.commit()?;
+            } else {
+                tx.rollback()?;
+            }
+            Ok(value)
+        })();
+        self.put_back(conn);
+        result.map_err(DbError::Sqlite)
+    }
+
     pub async fn read<T: Send + 'static>(self: &Arc<Self>, f: impl FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static) -> Result<T, DbError> {
         let db = self.clone();
         tokio::task::spawn_blocking(move || db.read_blocking(f)).await.map_err(|_| DbError::Task)?

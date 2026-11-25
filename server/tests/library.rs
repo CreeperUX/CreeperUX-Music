@@ -1078,3 +1078,111 @@ async fn lyrics_from_the_songs_row() {
     // the scan's status is Navidrome's: its state is in Navidrome's memory
     w.navidromes(&format!("/rest/getScanStatus?{ALICE}")).await;
 }
+
+// ---------------------------------------------------------------- phase 4: writes (src/library/writes.rs)
+
+/// Whether a stored time has the shape go-sqlite3 gives a Go `time.Time`.
+fn go_time(text: &str) -> bool {
+    let re = regex::Regex::new(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(\.\d{1,9})?[+-]\d\d:\d\d$").unwrap();
+    re.is_match(text)
+}
+
+/// A user's annotation of an item: (starred, starred_at, rating, rated_at), None without a row.
+fn annotation(conn: &Connection, user: &str, item: &str, kind: &str) -> Option<(i64, Option<String>, i64, Option<String>)> {
+    conn.query_row(
+        "SELECT starred, starred_at, rating, rated_at FROM annotation a JOIN user u ON u.id = a.user_id WHERE u.user_name = ?1 AND item_id = ?2 AND item_type = ?3",
+        (user, item, kind),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )
+    .ok()
+}
+
+#[tokio::test]
+async fn a_star_is_written_as_navidrome_writes_it() {
+    let w = world().await;
+    // a new row for a song never annotated; the row there is for one that was
+    let (_, ok) = w.here(&format!("/rest/star?{ALICE}&id=s-2&id=not-an-id&albumId=al-c")).await;
+    assert_eq!(ok["status"], "ok");
+    let (starred, at, rating, rated) = annotation(&w.db(), "alice", "s-2", "media_file").expect("a row for s-2");
+    assert_eq!((starred, rating, rated), (1, 0, None));
+    assert!(go_time(at.as_deref().unwrap()), "{at:?}");
+    assert_eq!(annotation(&w.db(), "alice", "al-c", "album").map(|a| a.0), Some(1));
+    assert_eq!(
+        w.db().query_row("SELECT count(*) FROM annotation WHERE item_id = 'not-an-id'", [], |r| r.get::<_, i64>(0)).unwrap(),
+        0,
+        "an unknown id is skipped"
+    );
+    // unstar keeps the row, and sets starred_at again
+    let (_, _) = w.here(&format!("/rest/unstar.view?{ALICE}&id=s-1")).await;
+    let (starred, at, rating, _) = annotation(&w.db(), "alice", "s-1", "media_file").unwrap();
+    assert_eq!((starred, rating), (0, 4), "the rating stays");
+    assert!(at.as_deref().is_some_and(|t| go_time(t) && t != "2026-11-24 23:42:33.88+01:00"), "starred_at set again: {at:?}");
+    // a form post, every kind of id
+    let form = Request::post("/rest/star")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(full(format!("{ALICE}&id=s-3&albumId=al-b&artistId=ar-Abe")))
+        .unwrap();
+    let (_, headers, _) = w.request(form).await;
+    assert_eq!(headers[library::ANSWERED_HEADER], "rust");
+    assert_eq!(annotation(&w.db(), "alice", "s-3", "media_file").map(|a| a.0), Some(1));
+    // bob is granted no library: he sees no song, so his star is skipped (and answered ok, as Navidrome answers)
+    let (_, ok) = w.here(&format!("/rest/star?{BOB}&id=s-2")).await;
+    assert_eq!(ok["status"], "ok");
+    assert_eq!(annotation(&w.db(), "bob", "s-2", "media_file"), None);
+    // without any id: error 10 in Navidrome's words
+    assert_eq!(w.get(&format!("/rest/star?{ALICE}")).await.1, failed(10, "Required id parameter is missing"));
+    assert_eq!(w.get(&format!("/rest/unstar?{ALICE}&albumId=")).await.1, format!("{OK}}}}}"), "an empty id is an id, unknown: skipped");
+}
+
+#[tokio::test]
+async fn a_rating_and_its_average_are_written_as_navidrome_writes_them() {
+    let w = world().await;
+    w.here(&format!("/rest/setRating?{ALICE}&id=s-2&rating=3")).await;
+    w.here(&format!("/rest/setRating?{ADMIN}&id=s-2&rating=4")).await;
+    let (_, _, rating, rated) = annotation(&w.db(), "alice", "s-2", "media_file").unwrap();
+    assert_eq!(rating, 3);
+    assert!(go_time(rated.as_deref().unwrap()));
+    let average = |id: &str| w.db().query_row("SELECT average_rating FROM media_file WHERE id = ?1", [id], |r| r.get::<_, f64>(0)).unwrap();
+    assert_eq!(average("s-2"), 3.5);
+    // a rating of 0 is no rating in the average
+    w.here(&format!("/rest/setRating?{ADMIN}&id=s-2&rating=0")).await;
+    assert_eq!(average("s-2"), 3.0);
+    // an album's average is the album's
+    w.here(&format!("/rest/setRating?{ALICE}&id=al-c&rating=1")).await;
+    assert_eq!(w.db().query_row("SELECT average_rating FROM album WHERE id = 'al-c'", [], |r| r.get::<_, f64>(0)).unwrap(), 1.0);
+    // Navidrome's errors, in its words
+    assert_eq!(w.get(&format!("/rest/setRating?{ALICE}&rating=3")).await.1, failed(10, "missing parameter: 'id'"));
+    assert_eq!(w.get(&format!("/rest/setRating?{ALICE}&id=s-2")).await.1, failed(10, "missing parameter: 'rating'"));
+    assert_eq!(w.get(&format!("/rest/setRating?{ALICE}&id=s-2&rating=x")).await.1, failed(0, "invalid parameter 'rating': expected integer, got 'x'"));
+    assert_eq!(w.get(&format!("/rest/setRating?{BOB}&id=s-2&rating=3")).await.1, failed(70, "data not found"), "a song bob does not see");
+}
+
+#[tokio::test]
+async fn the_play_queue_is_stored_as_navidrome_stores_it() {
+    let w = world().await;
+    let queue = |w: &World| {
+        w.db()
+            .query_row(
+                "SELECT q.id, q.current, q.position, q.changed_by, q.items, q.created_at, q.updated_at FROM playqueue q JOIN user u ON u.id = q.user_id WHERE u.user_name = 'alice'",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?)),
+            )
+            .ok()
+    };
+    w.here(&format!("/rest/savePlayQueue?{ALICE}&id=s-1&id=s-2&id=s-3&current=s-2&position=2500")).await;
+    let (id, current, position, by, items, created, updated) = queue(&w).expect("a queue");
+    assert_eq!((current, position, by.as_str(), items.as_str()), (1, 2500, "test", "s-1,s-2,s-3"));
+    assert!(go_time(&created) && created == updated, "{created} {updated}");
+    // saved again: the same id; Navidrome's model then has no creation time, and writes Go's zero time
+    w.here(&format!("/rest/savePlayQueue?{ALICE}&id=s-3&id=nope&current=s-9&position=soon")).await;
+    let (again, current, position, _, items, created, updated) = queue(&w).unwrap();
+    assert_eq!((again.as_str(), current, position, items.as_str()), (id.as_str(), 0, 0, "s-3,nope"));
+    assert_eq!(created, "0001-01-01 00:00:00+00:00");
+    assert!(go_time(&updated));
+    // nothing: no queue
+    w.here(&format!("/rest/savePlayQueue?{ALICE}")).await;
+    assert_eq!(queue(&w), None);
+    // and the next one is new
+    w.here(&format!("/rest/savePlayQueue?{ALICE}&id=s-1")).await;
+    assert_ne!(queue(&w).unwrap().0, id);
+}

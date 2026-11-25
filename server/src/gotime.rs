@@ -23,6 +23,10 @@ pub fn format<Tz: TimeZone>(time: &DateTime<Tz>) -> String {
 
 use chrono::Offset;
 
+/// Go's zero `time.Time` (January 1, year 1, UTC) as go-sqlite3 writes it: what Navidrome stores for a time its model
+/// left unset (a play queue's `created_at` once the queue is saved again).
+pub const ZERO: &str = "0001-01-01 00:00:00+00:00";
+
 /// Now, in UTC: what Navidrome's two-step verification store writes (`s.now().UTC()`).
 pub fn now_utc() -> String {
     format(&Utc::now())

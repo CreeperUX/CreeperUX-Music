@@ -404,3 +404,30 @@ CREATE TRIGGER media_file_fts_au AFTER UPDATE ON media_file
 				COALESCE(NEW.disc_subtitle, ''), COALESCE(NEW.search_participants, ''),
 				COALESCE(NEW.search_normalized, ''));
 		END;
+
+
+-- phase 4: what a write may touch (a radio station's id is found by the star lookup; plays go to scrobbles)
+CREATE TABLE "radio"
+(
+    id            varchar(255)           not null
+        primary key,
+    name          varchar collate NOCASE not null
+        unique,
+    stream_url    varchar                not null,
+    home_page_url varchar default ''     not null,
+    created_at    datetime,
+    updated_at    datetime
+, uploaded_image VARCHAR(255) NOT NULL DEFAULT '');
+
+CREATE TABLE "scrobbles"(
+    id INTEGER PRIMARY KEY,
+    media_file_id VARCHAR(255) NOT NULL
+        REFERENCES media_file(id)
+            ON DELETE CASCADE
+            ON UPDATE CASCADE,
+    user_id VARCHAR(255) NOT NULL 
+        REFERENCES user(id)
+            ON DELETE CASCADE
+            ON UPDATE CASCADE,
+    submission_time INTEGER NOT NULL
+);

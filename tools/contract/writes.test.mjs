@@ -1,0 +1,163 @@
+// The writes the Rust server answers (phase 4), beyond what the writes corpus compares: that Navidrome sees them at
+// once (its own web UI's /api and its Subsonic API) and the Rust server sees Navidrome's at once, that two users
+// writing at the same time lose nothing, and that a write waits out a long write lock (a scan, a backup) instead of
+// failing.
+//
+// Each test starts the Rust server on a fresh copy of the golden database (tools/fixtures/build.mjs first):
+//   node --test tools/contract/writes.test.mjs
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+import { join } from 'node:path';
+import { Subsonic } from './lib/subsonic.mjs';
+import { ANSWERED_HEADER, startGatewayOnGolden } from './diff.mjs';
+
+const CLIENT = 'sonus-writes-test';
+const sleep = ms => new Promise(done => setTimeout(done, ms));
+
+/** The Rust server on a fresh golden copy, two-step verification off (so Navidrome's own sign-in takes passwords). */
+async function server(t, env = {}) {
+  const rust = await startGatewayOnGolden({ env: { ND_SONUS_TWOFACTOR: 'off', ...env } });
+  t.after(() => rust.stop());
+  const { users, ids } = rust.manifest;
+  // (with two-step verification off, the account password signs in to the Subsonic API)
+  const as = name => new Subsonic(rust.url, { u: users[name].username, password: users[name].password, as: 'token' }, { client: CLIENT });
+  return { rust, users, ids, as, db: join(rust.data, 'navidrome.db') };
+}
+
+/** A call through the Rust server that it must have answered itself, and successfully. */
+async function rustOk(client, method, params, opts) {
+  const { body, headers } = await client.call(method, params, opts);
+  assert.equal(body.status, 'ok', `${method}: ${JSON.stringify(body.error)}`);
+  assert.equal(headers.get(ANSWERED_HEADER), 'rust', `${method} was answered by the Rust server`);
+  return body;
+}
+
+/** Signs in to the Navidrome behind the Rust server as its web UI does: { api(path), subsonic }. */
+async function navidromeUi(base, user) {
+  const res = await fetch(`${base}/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: user.username, password: user.password }) });
+  assert.equal(res.status, 200, `Navidrome's sign-in: HTTP ${res.status} ${await res.clone().text()}`);
+  const login = await res.json();
+  const api = async path => {
+    const r = await fetch(`${base}/api${path}`, { headers: { 'x-nd-authorization': `Bearer ${login.token}` } });
+    assert.equal(r.status, 200, `GET /api${path}: HTTP ${r.status}`);
+    return r.json();
+  };
+  // the web UI's own Subsonic calls: the salt and token its sign-in answered
+  const raw = new Subsonic(base, {}, { client: 'NavidromeUI' });
+  const subsonic = { ok: (method, params = {}) => raw.ok(method, { u: user.username, t: login.subsonicToken, s: login.subsonicSalt, ...params }) };
+  return { api, subsonic };
+}
+
+test('a write made by the Rust server is seen at once by Navidrome, and one made by Navidrome by the Rust server', { timeout: 600_000 }, async t => {
+  const { rust, users, ids, as } = await server(t);
+  const me = as('listener');
+  const go = await navidromeUi(rust.navidrome, users.listener);
+
+  // Rust writes, Navidrome's web UI reads (/api) at once
+  await rustOk(me, 'star', { id: ids['track.korean'] });
+  await rustOk(me, 'setRating', { id: ids['track.korean'], rating: 4 });
+  let song = await go.api(`/song/${ids['track.korean']}`);
+  assert.equal(song.starred, true, 'the star, in /api');
+  assert.equal(song.rating, 4, 'the rating, in /api');
+  await rustOk(me, 'unstar', { id: ids['track.korean'] });
+  song = await go.api(`/song/${ids['track.korean']}`);
+  assert.ok(!song.starred, 'the unstar, in /api (Navidrome leaves out a false starred)');
+  await rustOk(me, 'savePlayQueue', { id: [ids['track.mp3'], ids['track.ogg']], current: ids['track.ogg'], position: 4321 }, { post: true });
+  const queue = await go.api('/queue');
+  assert.deepEqual([queue.items.map(i => i.id), queue.current, queue.position], [[ids['track.mp3'], ids['track.ogg']], 1, 4321], 'the queue, in /api');
+
+  // ... and Navidrome's Subsonic API reads the same at once
+  const starredByGo = await go.subsonic.ok('getStarred2');
+  assert.ok(!(starredByGo.starred2.song ?? []).some(s => s.id === ids['track.korean']), 'Navidrome sees the unstar');
+  assert.equal((await go.subsonic.ok('getSong', { id: ids['track.korean'] })).song.userRating, 4, 'Navidrome sees the rating');
+
+  // Navidrome writes (as its web UI does), the Rust server reads at once
+  await go.subsonic.ok('star', { id: ids['track.wav'] });
+  await go.subsonic.ok('setRating', { id: ids['album.cjk'], rating: 5 });
+  await go.subsonic.ok('savePlayQueue', { id: [ids['track.flac']], current: ids['track.flac'], position: 10 });
+  const starred = await rustOk(me, 'getStarred2', {});
+  assert.ok(starred.starred2.song.some(s => s.id === ids['track.wav']), 'the Rust server sees Navidrome\'s star');
+  assert.equal((await rustOk(me, 'getAlbum', { id: ids['album.cjk'] })).album.userRating, 5, 'the Rust server sees Navidrome\'s rating');
+  const q = await rustOk(me, 'getPlayQueue', {});
+  assert.deepEqual([q.playQueue.entry.map(e => e.id), q.playQueue.position, q.playQueue.changedBy], [[ids['track.flac']], 10, 'NavidromeUI']);
+});
+
+test('two users writing at the same time lose nothing', { timeout: 600_000 }, async t => {
+  const { rust, users, as, db } = await server(t);
+  const songs = (() => { const d = new DatabaseSync(db, { readOnly: true }); try { return d.prepare('SELECT id FROM media_file ORDER BY id').all().map(r => r.id); } finally { d.close(); } })();
+  const people = [['listener', as('listener')], ['secure', as('secure')]];
+  const rating = (who, i) => (who === 'listener' ? 1 + (i % 5) : 5 - (i % 5));
+  const calls = [];
+  for (const [who, client] of people) {
+    songs.forEach((id, i) => {
+      calls.push(() => rustOk(client, 'star', { id }, { post: i % 2 === 0 }));
+      calls.push(() => rustOk(client, 'setRating', { id, rating: rating(who, i) }));
+    });
+    for (let n = 0; n < 10; n++) calls.push(() => rustOk(client, 'savePlayQueue', { id: songs.slice(n, n + 5), current: songs[n + 1], position: n }, { post: true }));
+  }
+  // every call at once, the two users' mixed (a fixed shuffle)
+  const order = calls.map((call, i) => [(i * 7919) % calls.length, call]).sort((x, y) => x[0] - y[0]).map(([, call]) => call);
+  await Promise.all(order.map(call => call()));
+  // then each unstars every other song, again both at once
+  await Promise.all(people.flatMap(([, client]) => songs.filter((_, i) => i % 2).map(id => rustOk(client, 'unstar', { id }))));
+
+  const d = new DatabaseSync(db, { readOnly: true });
+  try {
+    for (const [who] of people) {
+      const id = users[who].id;
+      const rows = d.prepare("SELECT item_id, starred, rating FROM annotation WHERE user_id = ? AND item_type = 'media_file' ORDER BY item_id").all(id);
+      const expected = songs.map((song, i) => ({ item_id: song, starred: i % 2 ? 0 : 1, rating: rating(who, i) }));
+      assert.deepEqual(rows.map(r => ({ ...r })), expected, `${who}: every star, unstar and rating is there`);
+      const queue = d.prepare('SELECT count(*) AS n FROM playqueue WHERE user_id = ?').get(id).n;
+      assert.equal(queue, 1, `${who}: one queue`);
+    }
+    // each song's average is that of the two ratings
+    for (const [i, song] of songs.entries()) {
+      const avg = d.prepare('SELECT average_rating FROM media_file WHERE id = ?').get(song).average_rating;
+      assert.equal(avg, Math.round(((rating('listener', i) + rating('secure', i)) / 2) * 100) / 100, `the average of song ${i}`);
+    }
+  } finally { d.close(); }
+});
+
+test('a write waits out a long write lock and a scan, and fails nothing', { timeout: 600_000 }, async t => {
+  const { ids, as, db } = await server(t);
+  const me = as('listener');
+
+  // another writer holds the lock for 4 s (a backup, a long scan transaction)
+  const holder = new DatabaseSync(db);
+  holder.exec('PRAGMA busy_timeout = 5000');
+  holder.exec('BEGIN IMMEDIATE');
+  const started = Date.now();
+  const released = sleep(4000).then(() => { holder.exec('COMMIT'); holder.close(); return Date.now(); });
+  const answer = rustOk(me, 'star', { id: ids['track.turkish'] }).then(() => Date.now());
+  const [releasedAt, answeredAt] = await Promise.all([released, answer]);
+  assert.ok(answeredAt >= releasedAt, `the star was answered after the lock was let go (${answeredAt - started} ms, released at ${releasedAt - started} ms)`);
+
+  // a full scan by Navidrome, with writes all through it
+  // (a scan is an admin's to start)
+  const scan = await as('admin').ok('startScan', { fullScan: true });
+  assert.equal(scan.scanStatus.scanning, true);
+  // (one round at a time, so that the last of each is known)
+  for (let i = 0; i < 40; i++) {
+    await Promise.all([
+      rustOk(me, i % 2 ? 'star' : 'unstar', { id: ids['track.umlaut'] }),
+      rustOk(me, 'setRating', { id: ids['track.tilde'], rating: 1 + (i % 5) }),
+      rustOk(me, 'savePlayQueue', { id: [ids['track.cjk'], ids['track.wav']], current: ids['track.wav'], position: i }, { post: true }),
+    ]);
+  }
+  for (let i = 0; i < 120; i++) {
+    const { scanStatus } = await me.ok('getScanStatus');
+    if (!scanStatus.scanning) break;
+    await sleep(500);
+  }
+  const d = new DatabaseSync(db, { readOnly: true });
+  try {
+    const user = d.prepare('SELECT id FROM user WHERE user_name = ?').get(me.auth.u).id;
+    const get = item => d.prepare("SELECT starred, rating FROM annotation WHERE user_id = ? AND item_id = ? AND item_type = 'media_file'").get(user, item);
+    assert.equal(get(ids['track.turkish']).starred, 1, 'the star made under the lock');
+    assert.equal(get(ids['track.umlaut']).starred, 1, 'the last of the stars made during the scan');
+    assert.equal(get(ids['track.tilde']).rating, 5, 'the last rating made during the scan');
+    assert.equal(d.prepare('SELECT position FROM playqueue WHERE user_id = ?').get(user).position, 39, 'the last queue saved during the scan');
+  } finally { d.close(); }
+});

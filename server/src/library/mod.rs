@@ -66,6 +66,9 @@ pub const METHODS: &[&str] = &[
     "unstar",
     "setRating",
     "savePlayQueue",
+    "createPlaylist",
+    "updatePlaylist",
+    "deletePlaylist",
 ];
 
 /// Whether a method is one of the library's.

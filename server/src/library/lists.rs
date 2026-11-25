@@ -129,6 +129,11 @@ pub fn get_playlist(scope: &Scope) -> Result<Reply, QueryError> {
         Ok(None) => return Ok(Reply::error(MISSING_PARAMETER, "missing parameter: 'id'")),
         Err(reply) => return Ok(reply),
     };
+    playlist_answer(scope, id)
+}
+
+/// `getPlaylist`'s answer for a playlist id (also `createPlaylist`'s, which answers with the playlist it made).
+pub fn playlist_answer(scope: &Scope, id: &str) -> Result<Reply, QueryError> {
     let found = catalog::playlists(scope.conn, scope.viewer, scope.options, Some(id), None)?;
     let Some(playlist) = found.first() else { return Ok(Reply::error(NOT_FOUND, "playlist not found")) };
     if playlist.rules() != Rules::Plain {

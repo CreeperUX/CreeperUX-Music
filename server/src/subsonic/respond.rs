@@ -63,6 +63,7 @@ pub const MISSING_PARAMETER: i32 = 10;
 pub const WRONG_CREDENTIALS: i32 = 40;
 pub const CONFLICTING_AUTH: i32 = 43;
 pub const INVALID_API_KEY: i32 = 44;
+pub const AUTHORIZATION_FAIL: i32 = 50;
 
 /// Navidrome's text for error 40.
 pub const WRONG_CREDENTIALS_MESSAGE: &str = "Wrong username or password";

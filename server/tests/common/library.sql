@@ -431,3 +431,18 @@ CREATE TABLE "scrobbles"(
             ON UPDATE CASCADE,
     submission_time INTEGER NOT NULL
 );
+
+-- a playlist whose songs change has its cover queued for Navidrome's artwork worker
+CREATE UNIQUE INDEX playlist_tracks_pos
+	on playlist_tracks (playlist_id, id);
+CREATE TABLE artwork_queue (
+  item_kind TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  image_type TEXT NOT NULL DEFAULT 'primary',
+  priority INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  retry_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  enqueued_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, trace jsonb NOT NULL DEFAULT '[]',
+  PRIMARY KEY (item_kind, item_id, image_type)
+) WITHOUT ROWID;
+CREATE INDEX ix_artwork_queue_drain ON artwork_queue(item_kind, priority DESC, enqueued_at, retry_at);

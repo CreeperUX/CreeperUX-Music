@@ -29,6 +29,8 @@
 //   { …, volatile: [paths], unordered: [paths] }                                   the same, for this request only
 //   { …, navidrome: 'why' }                                                       a request to a method the Rust server
 //       answers itself (ANSWERED_BY_RUST) that it must leave to Navidrome all the same, and why
+//   { …, save: 'mine' }                                                          keep the playlist id each side's
+//       answer made (createPlaylist) for later requests as {{saved.mine}}; answers show it as that placeholder
 //   { …, waitMs: 500 }                                                            wait before sending it (for what a
 //       server finishes in the background after its answer: a resized cover written to its cache)
 // The corpus's volatile paths are left out of every comparison (serverVersion, times of the request); its unordered
@@ -63,7 +65,7 @@ export const ANSWERED_HEADER = 'x-sonus-answered';
 export const ANSWERED_BY_RUST = [
   'ping', 'getSong', 'getAlbum', 'getAlbumList2', 'search3', 'getStarred2', 'getPlaylists', 'getPlaylist', 'getPlayQueue', 'getLyricsBySongId', 'getCoverArt',
   // phase 4: writes
-  'star', 'unstar', 'setRating', 'savePlayQueue',
+  'star', 'unstar', 'setRating', 'savePlayQueue', 'createPlaylist', 'updatePlaylist', 'deletePlaylist',
 ];
 
 // ---------------------------------------------------------------- the corpus
@@ -81,9 +83,11 @@ export function expand(corpus) {
   return out;
 }
 
-function fill(value, manifest) {
+function fill(value, manifest, saved = {}) {
   return JSON.parse(JSON.stringify(value).replace(/\{\{([^}]+)\}\}/g, (_, k) => {
     if (k.startsWith('user.')) return manifest.users[k.slice(5)]?.username ?? `(no user ${k.slice(5)})`;
+    // an id this side's server made earlier in the corpus (a request's `save`)
+    if (k.startsWith('saved.')) return saved[k.slice(6)] ?? `(nothing saved as ${k.slice(6)})`;
     const v = manifest.ids?.[k];
     if (v === undefined) throw new Error(`the manifest has no id for ${k}`);
     return v;
@@ -103,8 +107,8 @@ function signIn(auth, manifest) {
 }
 
 /** The fetch() arguments for a request against a base URL. */
-function toFetch(base, r, manifest) {
-  const req = fill(r, manifest);
+function toFetch(base, r, manifest, saved) {
+  const req = fill(r, manifest, saved);
   if (req.path) {
     const init = { method: req.httpMethod ?? 'GET', headers: { ...(req.headers ?? {}) } };
     if (req.json !== undefined) { init.body = JSON.stringify(req.json); init.headers['Content-Type'] = 'application/json'; }
@@ -120,8 +124,8 @@ function toFetch(base, r, manifest) {
 
 // ---------------------------------------------------------------- answers, normalized
 
-async function answer(base, r, manifest) {
-  const [url, init] = toFetch(base, r, manifest);
+async function answer(base, r, manifest, saved) {
+  const [url, init] = toFetch(base, r, manifest, saved);
   let res;
   const started = performance.now();
   try { res = await fetch(url, init); } catch (e) { return { error: `no answer: ${e.cause?.code ?? e.message}` }; }
@@ -216,14 +220,24 @@ export function mustBeAnsweredByRust(r, answerOfNavidrome) {
 export async function runDiff({ a, b, manifest, corpus, only, expected = [], whoAnswered = false, quiet = false, sequential = false, log = console.log }) {
   const requests = expand(corpus).filter(r => !only || r.name.includes(only));
   const results = [];
+  const savedA = {}, savedB = {};
   let byRust = 0;
   for (const e of expected) log(`  expected to differ, and compared with that applied to A: ${e.what}`);
   for (const r of requests) {
     if (r.waitMs) await new Promise(done => setTimeout(done, r.waitMs));
     // sequential: one server at a time, so that neither one's time includes the other's work
     const [ra, rb] = sequential
-      ? [await answer(a, r, manifest), await answer(b, r, manifest)]
-      : await Promise.all([answer(a, r, manifest), answer(b, r, manifest)]);
+      ? [await answer(a, r, manifest, savedA), await answer(b, r, manifest, savedB)]
+      : await Promise.all([answer(a, r, manifest, savedA), answer(b, r, manifest, savedB)]);
+    // save: the id each side's server made (`subsonic-response.playlist.id`), for later requests as {{saved.NAME}};
+    // each side's ids are then written as that placeholder in its answers, so the two compare
+    if (r.save) {
+      savedA[r.save] = ra.json?.['subsonic-response']?.playlist?.id;
+      savedB[r.save] = rb.json?.['subsonic-response']?.playlist?.id;
+    }
+    for (const [answerOf, saved] of [[ra, savedA], [rb, savedB]]) {
+      if (answerOf.json && Object.keys(saved).length) answerOf.json = placeholders(answerOf.json, saved);
+    }
     for (const e of expected) e.apply(ra);
     const inJson = v => (v.startsWith('json.') ? v : `json.${v}`);
     const volatile = [...(corpus.volatile ?? []), ...(r.volatile ?? [])].map(inJson);
@@ -253,6 +267,13 @@ export async function runDiff({ a, b, manifest, corpus, only, expected = [], who
   log(`\n${results.length} requests: ${results.length - different} the same, ${different} different`);
   if (whoAnswered) log(`${byRust} answered by the Rust server itself (${ANSWERED_BY_RUST.join(', ')}), ${results.length - byRust} by Navidrome behind it or by the sign-in check`);
   return { requests: results.length, different, byRust, results, timings: timings(results) };
+}
+
+/** A JSON value with every string equal to a saved id written as its placeholder ({{saved.NAME}}). */
+function placeholders(value, saved) {
+  const names = new Map(Object.entries(saved).filter(([, id]) => id).map(([name, id]) => [id, `{{saved.${name}}}`]));
+  const walk = v => (typeof v === 'string' ? (names.get(v) ?? v) : Array.isArray(v) ? v.map(walk) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)])) : v);
+  return walk(value);
 }
 
 /** Median and worst time per method, A and B: { method: { n, a: { median, worst }, b: { … } } } (ms, rounded). */
@@ -317,7 +338,9 @@ export async function startPairOnDatabase(file, { env = {}, navidrome, release =
  * and the other has not (quiet: the tables and how many rows, not the rows), and returns those rows.
  */
 export async function stateReport(files, { since, before, quiet = false, log = console.log }) {
-  const { dumpState, compareState, counts } = await import('./db-state.mjs');
+  const { dumpState, compareState, counts, settle } = await import('./db-state.mjs');
+  const left = await settle(files);
+  if (left.some(n => n)) log(`  (playlists still in Navidrome's artwork queues after 30 s: ${left.join(' / ')})`);
   const [sa, sb] = files.map(f => dumpState(f, { since, before }));
   const diffs = compareState(sa, sb);
   log(`

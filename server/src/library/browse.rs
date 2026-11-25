@@ -32,6 +32,9 @@ pub fn answer(method: &str, scope: &Scope) -> Result<Reply, QueryError> {
         "unstar" => writes::star(scope, false),
         "setRating" => writes::set_rating(scope),
         "savePlayQueue" => writes::save_play_queue(scope),
+        "createPlaylist" => writes::create_playlist(scope),
+        "updatePlaylist" => writes::update_playlist(scope),
+        "deletePlaylist" => writes::delete_playlist(scope),
         _ => Ok(Reply::Navidrome("not a method answered here")),
     }
 }
@@ -52,7 +55,7 @@ pub(super) fn required<'a>(params: &'a Params, name: &str) -> Result<&'a str, Re
 }
 
 /// Go's `strconv.ParseInt(text, 10, 64)`: an optional sign, then digits.
-fn parse_int(text: &str) -> Option<i64> {
+pub(super) fn parse_int(text: &str) -> Option<i64> {
     let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;

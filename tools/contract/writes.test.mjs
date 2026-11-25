@@ -161,3 +161,42 @@ test('a write waits out a long write lock and a scan, and fails nothing', { time
     assert.equal(d.prepare('SELECT position FROM playqueue WHERE user_id = ?').get(user).position, 39, 'the last queue saved during the scan');
   } finally { d.close(); }
 });
+
+test('playlists: made by either server and seen by the other at once; appends at the same time all kept, in order', { timeout: 600_000 }, async t => {
+  const { rust, users, ids, as, db } = await server(t);
+  const me = as('listener');
+  const go = await navidromeUi(rust.navidrome, users.listener);
+
+  // the Rust server makes and changes a playlist: Navidrome's web UI API and Subsonic API see it at once
+  const made = await rustOk(me, 'createPlaylist', { name: 'Made by Rust', songId: [ids['track.flac'], ids['track.mp3']] }, { post: true });
+  const id = made.playlist.id;
+  await rustOk(me, 'updatePlaylist', { playlistId: id, songIdToAdd: ids['track.ogg'], songIndexToRemove: '0', comment: 'changed' }, { post: true });
+  const viaApi = await go.api(`/playlist/${id}/tracks`);
+  assert.deepEqual(viaApi.map(t => t.mediaFileId), [ids['track.mp3'], ids['track.ogg']], 'the tracks, in /api');
+  const viaGo = await go.subsonic.ok('getPlaylist', { id });
+  assert.deepEqual([viaGo.playlist.comment, viaGo.playlist.songCount, viaGo.playlist.entry.map(e => e.id)], ['changed', 2, [ids['track.mp3'], ids['track.ogg']]]);
+
+  // Navidrome makes and changes one: the Rust server sees it at once
+  const byGo = await go.subsonic.ok('createPlaylist', { name: 'Made by Go', songId: [ids['track.wav']] });
+  await go.subsonic.ok('updatePlaylist', { playlistId: byGo.playlist.id, songIdToAdd: ids['track.cjk'], name: 'Made by Go (2)' });
+  const seen = await rustOk(me, 'getPlaylist', { id: byGo.playlist.id });
+  assert.deepEqual([seen.playlist.name, seen.playlist.entry.map(e => e.id)], ['Made by Go (2)', [ids['track.wav'], ids['track.cjk']]]);
+  await go.subsonic.ok('deletePlaylist', { id: byGo.playlist.id });
+  const { body } = await me.call('getPlaylist', { id: byGo.playlist.id });
+  assert.equal(body.error?.code, 70, 'the Rust server sees the delete');
+
+  // 60 appends to one playlist at once, and the two users each filling their own at the same time
+  const songs = (() => { const d = new DatabaseSync(db, { readOnly: true }); try { return d.prepare('SELECT id FROM media_file ORDER BY id').all().map(r => r.id); } finally { d.close(); } })();
+  const other = await rustOk(as('secure'), 'createPlaylist', { name: 'Secure fills this' });
+  await Promise.all([
+    ...Array.from({ length: 60 }, (_, i) => rustOk(me, 'updatePlaylist', { playlistId: id, songIdToAdd: songs[i % songs.length] }, { post: i % 2 === 0 })),
+    ...songs.map(song => rustOk(as('secure'), 'updatePlaylist', { playlistId: other.playlist.id, songIdToAdd: song })),
+  ]);
+  const d = new DatabaseSync(db, { readOnly: true });
+  try {
+    const positions = list => d.prepare('SELECT id FROM playlist_tracks WHERE playlist_id = ? ORDER BY id').all(list).map(r => r.id);
+    assert.deepEqual(positions(id), Array.from({ length: 62 }, (_, i) => i + 1), 'every append kept, numbered 1 to 62 without a gap or a repeat');
+    assert.deepEqual(positions(other.playlist.id), songs.map((_, i) => i + 1), 'the other user\'s, all of them');
+    assert.equal(d.prepare('SELECT song_count FROM playlist WHERE id = ?').get(id).song_count, 62, 'the count');
+  } finally { d.close(); }
+});

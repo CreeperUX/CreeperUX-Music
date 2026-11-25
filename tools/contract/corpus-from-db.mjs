@@ -221,7 +221,8 @@ export function buildCorpus(db, { seed = 1, covers = false } = {}) {
  * each followed by the reads that show it; in order (each side runs it on its own copy, and their databases are then
  * compared: diff.mjs --db … --state). Stars and unstars (songs, albums, artists, every playlist: someone else's
  * private one is skipped), the same items rated by several users (averages), ratings cleared, the user's own stars
- * and ratings from before undone, unknown ids, the play queue saved, saved again, and emptied.
+ * and ratings from before undone, unknown ids, the play queue saved, saved again, and emptied; playlists made,
+ * changed, replaced and deleted, the user's own from before changed and replaced, someone else's refused.
  */
 export function buildWritesCorpus(db, { seed = 1 } = {}) {
   const rnd = random(seed);
@@ -275,6 +276,28 @@ export function buildWritesCorpus(db, { seed = 1 } = {}) {
       req(user, 'savePlayQueue empty', 'savePlayQueue', {}, { post: true });
       req(user, 'getPlayQueue after the empty save', 'getPlayQueue', {});
     }
+    // playlists: made, changed, replaced, deleted; the user's own from before changed; someone else's refused
+    const a = `${user}a`, b = `${user}b`;
+    const fill = mine(songs, 30);
+    req(user, 'createPlaylist with 30 songs', 'createPlaylist', { name: `Diff ${user} A`, songId: fill }, { post: true, save: a });
+    req(user, 'createPlaylist empty', 'createPlaylist', { name: `Diff ${user} B` }, { save: b });
+    req(user, 'updatePlaylist remove (one out of range), add, comment', 'updatePlaylist', { playlistId: `{{saved.${a}}}`, songIndexToRemove: ['0', '5', '29', '100'], songIdToAdd: mine(songs, 5), comment: 'by the diff' }, { post: true });
+    req(user, 'updatePlaylist add to the empty one, rename, public', 'updatePlaylist', { playlistId: `{{saved.${b}}}`, songIdToAdd: mine(songs, 10), name: `Diff ${user} B2`, public: 'true' }, { post: true });
+    req(user, 'createPlaylist replace the songs', 'createPlaylist', { playlistId: `{{saved.${b}}}`, songId: mine(songs, 3) }, { post: true });
+    req(user, 'getPlaylist after the changes', 'getPlaylist', { id: `{{saved.${a}}}` });
+    req(user, 'getPlaylist of the replaced one', 'getPlaylist', { id: `{{saved.${b}}}` });
+    const own = all(`select id from playlist where owner_id = '${users[u].replaceAll("'", "''")}' and coalesce(rules, '') = '' order by id`).map(r => r.id);
+    if (own.length) {
+      const first = own[0];
+      const theirs = all(`select media_file_id from playlist_tracks where playlist_id = '${first.replaceAll("'", "''")}' order by id`).map(r => r.media_file_id);
+      req(user, 'updatePlaylist an own playlist from before: remove the first, add two', 'updatePlaylist', { playlistId: first, songIndexToRemove: '0', songIdToAdd: mine(songs, 2) }, { post: true });
+      req(user, 'createPlaylist replace an own playlist from before with its songs reversed', 'createPlaylist', { playlistId: own.at(-1), songId: [...theirs].reverse().slice(0, 200) }, { post: true });
+      req(user, 'getPlaylist of the own playlists from before', 'getPlaylist', { id: first });
+    }
+    const notMine = all(`select id from playlist where owner_id <> '${users[u].replaceAll("'", "''")}' order by id`).map(r => r.id);
+    if (notMine.length) req(user, "updatePlaylist someone else's (50, or 70 when private)", 'updatePlaylist', { playlistId: notMine[0], name: 'not yours' });
+    req(user, 'deletePlaylist the first one', 'deletePlaylist', { id: `{{saved.${a}}}` }, { post: true });
+    req(user, 'getPlaylists after the playlist changes', 'getPlaylists', {});
   });
   // every user's view of the shared items once all have rated them
   keys.forEach(user => shared.songs.slice(0, 4).forEach((id, i) => req(user, `getSong shared ${i} at the end`, 'getSong', { id })));
@@ -283,7 +306,12 @@ export function buildWritesCorpus(db, { seed = 1 } = {}) {
     users: Object.fromEntries(keys.map((k, i) => [k, users[i]])),
     counts: { users: users.length, requests: requests.length, byMethod: Object.fromEntries(Object.entries(Object.groupBy(requests, r => r.method.replace(/\.view$/, ''))).map(([m, l]) => [m, l.length])) },
     // when a star or a queue was written differs between the servers; the database comparison checks those times
-    volatile: ['subsonic-response.serverVersion', 'subsonic-response.**.starred', 'subsonic-response.playQueue.changed'],
+    // (and a playlist's times; its cover is made anew by Navidrome's artwork worker from albums picked at random)
+    volatile: [
+      'subsonic-response.serverVersion', 'subsonic-response.**.starred', 'subsonic-response.playQueue.changed',
+      'subsonic-response.playlist.changed', 'subsonic-response.playlist.created', 'subsonic-response.playlist.coverArt',
+      'subsonic-response.playlists.playlist.*.changed', 'subsonic-response.playlists.playlist.*.created', 'subsonic-response.playlists.playlist.*.coverArt',
+    ],
     // getStarred2 lists by starred_at, newest first. Go on Windows reads a coarse wall clock: items starred in one
     // call often get the very same time there, and their order is then SQLite's; the Rust server's times differ, so
     // its order is the call's. (On Linux Go's clock has nanoseconds, as here.) The lists are compared as sets.

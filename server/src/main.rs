@@ -93,10 +93,9 @@ async fn main() -> ExitCode {
     let (failed_tx, mut failed_rx) = tokio::sync::mpsc::channel::<String>(1);
     if navidrome.is_some() {
         let (gateway, upstream, base_path, shared) = (gateway.clone(), config.upstream.clone(), config.base_path.clone(), config.shared.clone());
-        let user_header = config.upstream_user_header.clone();
         tokio::spawn(async move {
             watch_until_ready(upstream.clone(), ready).await;
-            match startup::local(&shared, &upstream, &base_path, &user_header).await {
+            match startup::local(&shared, &upstream, &base_path).await {
                 Ok(local) => {
                     gateway.set_connect(local.connect);
                     gateway.set_library(local.library);

@@ -107,6 +107,14 @@ async fn world(options: Options) -> World {
     World { gateway, reached, database: file, dir, base: options.base_path, store: db }
 }
 
+/// Waits while the current 30-second step has less than 3 s left: a code for the step before then stays within the
+/// server's one-step allowance however long the request takes to reach it.
+async fn away_from_a_step_boundary() {
+    while now().rem_euclid(30) >= 27 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
@@ -176,6 +184,9 @@ impl World {
         assert_eq!(body["issuer"], "Sonus");
         assert_eq!(body["account"], user);
         assert!(body["uri"].as_str().unwrap().starts_with("otpauth://totp/Sonus:") && body["uri"].as_str().unwrap().contains(&secret));
+        // the step before the server's (so the current one stays unused for a sign-in): computed away from a step's end,
+        // or the server's clock may be two steps on when it checks it
+        away_from_a_step_boundary().await;
         let code = totp::code(&secret, now() - 30).unwrap();
         let (status, _, body) = self.post("/2fa/confirm", json!({ "token": token, "code": code, "enrolmentCode": enrolment }), "").await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -822,6 +833,7 @@ async fn the_password_alone_does_not_set_two_step_verification_up() {
     // a new one replaces it, and works once
     let fresh = w.enrolment_code("alice");
     refused(confirm(&code, now()).await, "Invalid enrolment code");
+    away_from_a_step_boundary().await;
     let (status, _, body) = confirm(&fresh, now() - 30).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let left: i64 = w.db().query_row("SELECT count(*) FROM sonus_enrolment_code WHERE user_id = 'id-alice'", [], |r| r.get(0)).unwrap();

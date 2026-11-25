@@ -34,6 +34,8 @@ const TABLES = {
   artwork_queue: { sql: "SELECT * FROM artwork_queue WHERE item_kind = 'pl'", times: ['retry_at', 'enqueued_at'] },
   // ... which makes it anew (a grid of the playlist's album covers, picked at random: see below)
   playlist_artwork: { sql: "SELECT * FROM item_artwork WHERE item_kind = 'pl'", times: ['ref_mtime', 'attempted_at', 'updated_at'] },
+  // the players requests register (phase 5: registered by the Rust server for the requests it answers)
+  player: { sql: 'SELECT * FROM player', times: ['last_seen'] },
 };
 
 /** Go's time text as a time (ms since 1970), or NaN. */
@@ -67,14 +69,16 @@ function readTables(file) {
 /** The ids a database had before the run: { playqueue: Set, playlist: Set }. */
 export function knownIds(file) {
   const t = readTables(file);
-  return { playqueue: new Set(t.playqueue.map(r => r.id)), playlist: new Set(t.playlist.map(r => r.id)) };
+  return { playqueue: new Set(t.playqueue.map(r => r.id)), playlist: new Set(t.playlist.map(r => r.id)), player: new Set(t.player.map(r => r.id)) };
 }
 
-export function dumpState(file, { since = 0, before = { playqueue: new Set(), playlist: new Set() } } = {}) {
+export function dumpState(file, { since = 0, before = { playqueue: new Set(), playlist: new Set(), player: new Set() } } = {}) {
   const t = readTables(file);
   const names = new Map();
   for (const q of t.playqueue) if (!before.playqueue.has(q.id)) names.set(q.id, `<new playqueue of ${q.user_id}>`);
   for (const p of t.playlist) if (!before.playlist.has(p.id)) names.set(p.id, `<new playlist ${p.owner_id} ${JSON.stringify(p.name)}>`);
+  // a new player's id is random: named by whose, which client and which browser it is
+  for (const p of t.player) if (!(before.player ?? new Set()).has(p.id)) names.set(p.id, `<new player of ${p.user_id} ${JSON.stringify(p.client)} ${JSON.stringify(p.user_agent)}>`);
   const rename = v => (typeof v === 'string' && names.has(v) ? names.get(v) : v);
   // a playlist deleted during the run (made during it or not) leaves its id in the artwork tables only
   const current = new Set(t.playlist.map(p => p.id));

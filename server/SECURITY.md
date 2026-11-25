@@ -377,14 +377,15 @@ fixed fragments, and no part of a request is ever pasted into SQL. Everything a 
 argument: ids, years, the genre. The genre is matched with LIKE, as Navidrome matches it, so `%` and `_` in it are
 wildcards: over genre names only, of albums the user may see anyway.
 
-**The registration at Navidrome.** For a request answered here the server sends Navidrome a `ping` under the
-gateway's own user header (`player.rs`): only after the sign-in check, with the name that check produced, to
-`127.0.0.1` only. It forwards the client's `Cookie` and `User-Agent` (what Navidrome finds the player by) and the
-client address the gateway decided; never the credentials, which are not part of it. The cookie Navidrome answers
-with is handed to the client and remembered for a minute under the user's name, the client name, the `User-Agent` and
-the cookies sent: a request by another user never matches that entry, and the remembered player is used only while
-its row is still that user's and that client's. The cookie itself is Navidrome's (`HttpOnly`, `SameSite=Strict`): it
-names a player, and signs nobody in.
+**The player's registration** (`player.rs`, phase 5, part 4) is made here for the requests answered here, after the
+sign-in check, as the user it produced: the player named by the `nd-player-…` cookie is taken only when its row is
+that user's and that client's (another user's cookie names no player of theirs), else the user's own player for this
+client and browser, else a new one with a random id. What is written is that user's player row only: its name
+(client and browser), `user_agent` (the useragent library's name and OS of the `User-Agent`, never the raw header),
+the client address the gateway decided, and the time; at most once a minute per player (an in-memory note per player
+id, at most 4096 kept). Its settings (transcoding, bit rate, real paths, plays sent on) are never written here but
+kept as they are. The cookie is Navidrome's (`HttpOnly`, `SameSite=Strict`, a year): it names a player, and signs
+nobody in. No `ping` goes to Navidrome any more.
 
 **What the answers reflect.** Text from the database (tags, names) and, in errors, a parameter's value (`type 'x'
 not implemented`, `expected integer, got 'x'`), always inside JSON strings written with Go's escaping (`<`, `>`, `&`
@@ -597,7 +598,8 @@ conditions). One writer per entry; a second request while it is written runs a t
   data: parsed as JSON, checked for shape and size, and a row that does not pass starts an empty session.
 - The library's reads (above) read `album`, `media_file`, `artist`, `library_artist`, `annotation`, `bookmark`,
   `item_artwork`, `album_tags`, `tag`, `playlist`, `playlist_tracks`, `playqueue`, the three FTS5 tables, `library`,
-  `user`, `user_library` and `player`, and write none of them. The library's writes (above) write `annotation` (the
+  `user`, `user_library` and `player`, and write none of them but `player` (a request's player, as Navidrome registers it: above). The library's
+  writes (above) write `annotation` (the
   user's own rows), the `average_rating` of `media_file`, `album`, `artist` and `playlist`, `playqueue` (the user's
   own row), `playlist` and `playlist_tracks` (the user's own playlists, an admin's: any), `artwork_queue` (a changed
   playlist's cover) and `scrobbles` (the user's own plays), and read `radio` to find an id as Navidrome does and

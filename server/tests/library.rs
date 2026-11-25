@@ -180,16 +180,7 @@ async fn world_with(options: LibraryOptions, registers: bool) -> World {
         envelope: envelope.clone(),
         frame_options: "DENY".into(),
     });
-    let library = Library::new(library::Setup {
-        db,
-        options,
-        envelope,
-        frame_options: "DENY".into(),
-        upstream: format!("http://{navidrome}").parse().unwrap(),
-        base_path: String::new(),
-        user_header: SECRET_HEADER.parse().unwrap(),
-        public_signer: None,
-    });
+    let library = Library::new(library::Setup { db, options, envelope, frame_options: "DENY".into(), base_path: String::new(), public_signer: None });
     let setup = GatewaySetup {
         upstream_user_header: SECRET_HEADER,
         checks_sign_ins: true,
@@ -272,60 +263,93 @@ async fn a_song_is_answered_here_as_navidrome_answers_it() {
     );
     assert_eq!(body, format!("{OK},{song}}}}}"));
     assert_eq!(headers["content-type"], "application/json");
-    assert_eq!(
-        headers["set-cookie"], "nd-player-616c696365=player-id-alice-test; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict",
-        "the player's cookie, Navidrome's own"
-    );
+    // the player's cookie, as Navidrome sets it: a new player's id (22 characters of base 62)
+    let cookie = headers["set-cookie"].to_str().unwrap();
+    let id = cookie.strip_prefix("nd-player-616c696365=").unwrap().strip_suffix("; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict").unwrap();
+    assert!(id.len() == 22 && id.bytes().all(|b| b.is_ascii_alphanumeric()), "{cookie}");
     assert_eq!((headers["x-content-type-options"].as_bytes(), headers["x-frame-options"].as_bytes()), (&b"nosniff"[..], &b"DENY"[..]));
     assert_eq!(headers[library::ANSWERED_HEADER], "rust");
     assert!(headers.get("content-encoding").is_none(), "not asked for");
-    // Navidrome saw the registration only: a ping as this user and client
-    assert_eq!(w.reached(), ["/rest/ping?v=1.16.1&c=test&f=json"]);
-    let registration = w.seen.lock().unwrap()[0].clone();
-    assert_eq!(registration.headers[SECRET_HEADER], "alice");
-    assert_eq!(registration.headers["x-real-ip"], "127.0.0.1");
+    // registered here, as Navidrome registers it; Navidrome saw nothing
+    assert!(w.reached().is_empty());
+    let row: (String, String, String, String, bool, bool) = w
+        .db()
+        .query_row("SELECT name, coalesce(user_agent, ''), client, ip, report_real_path, scrobble_enabled FROM player WHERE id = ?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+        })
+        .unwrap();
+    assert_eq!(row, ("test []".into(), String::new(), "test".into(), "127.0.0.1".into(), false, true));
     // what Navidrome wrote for every request it answered: the user's last access
     let last_access: Option<String> = w.db().query_row("SELECT last_access_at FROM user WHERE user_name = 'alice'", [], |r| r.get(0)).unwrap();
     assert!(last_access.is_some());
 }
 
 #[tokio::test]
-async fn the_player_is_registered_by_navidrome_once_a_minute_per_client() {
+async fn the_player_is_registered_here_as_navidrome_registers_it() {
     let w = world().await;
-    let with = |cookie: &'static str, agent: &'static str, target: String| {
+    let alice: String = w.db().query_row("SELECT id FROM user WHERE user_name = 'alice'", [], |r| r.get(0)).unwrap();
+    w.db()
+        .execute(
+            "INSERT INTO player (id, name, user_agent, user_id, client, ip, max_bit_rate, report_real_path, scrobble_enabled) \
+             VALUES ('p1', 'test [old]', 'old', ?1, 'test', '10.0.0.1', 192, 0, 0)",
+            [&alice],
+        )
+        .unwrap();
+    let request = |cookie: &str, agent: &str, target: &str| {
         let mut request = Request::get(target).header(header::USER_AGENT, agent);
         if !cookie.is_empty() {
             request = request.header(header::COOKIE, cookie);
         }
         request.body(empty()).unwrap()
     };
+    let player_of = |headers: &HeaderMap| headers["set-cookie"].to_str().unwrap().split(';').next().unwrap().split_once('=').unwrap().1.to_string();
+    let row = |id: &str| -> (String, String, String, Option<String>, i64, bool, bool) {
+        w.db()
+            .query_row("SELECT name, user_agent, ip, last_seen, max_bit_rate, report_real_path, scrobble_enabled FROM player WHERE id = ?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+            })
+            .unwrap()
+    };
     let song = format!("/rest/getSong?{ALICE}&id=s-1");
-    for _ in 0..3 {
-        let (_, headers, _) = w.request(with("nd-player-616c696365=player-id-alice-test; other=1", "Sonus/1.0", song.clone())).await;
-        assert!(headers["set-cookie"].to_str().unwrap().starts_with("nd-player-616c696365=player-id-alice-test;"));
-    }
-    assert_eq!(w.reached().len(), 1, "remembered: one registration for three requests");
-    let seen = w.seen.lock().unwrap()[0].clone();
-    assert_eq!(seen.headers["cookie"], "nd-player-616c696365=player-id-alice-test; other=1", "the cookie Navidrome finds the player by");
-    assert_eq!(seen.headers["user-agent"], "Sonus/1.0");
-    // another client name, another User-Agent, another cookie, another user: each is registered
-    w.here("/rest/ping?u=alice&p=sesame&v=1.16.1&c=other+app&f=json").await;
-    assert_eq!(w.reached().last().unwrap(), "/rest/ping?v=1.16.1&c=other+app&f=json");
-    w.request(with("", "Sonus/2.0", song.clone())).await;
-    w.request(with("x=y", "Sonus/2.0", song.clone())).await;
-    w.here(&format!("/rest/ping?{ADMIN}")).await;
-    assert_eq!(w.reached().len(), 5);
-    // the name as the client typed it is the name Navidrome's cookie is made from
-    let (headers, _) = w.here("/rest/ping?u=ALICE&p=sesame&v=1.16.1&c=test&f=json").await;
-    assert!(headers["set-cookie"].to_str().unwrap().starts_with("nd-player-414c494345=player-id-alice-test;"));
-    // a player that is gone (an admin removed it) is registered again
-    w.here(&song).await;
-    let before = w.reached().len();
-    w.here(&song).await;
-    assert_eq!(w.reached().len(), before, "remembered");
-    w.db().execute("DELETE FROM player WHERE id = 'player-id-alice-test'", []).unwrap();
-    w.here(&song).await;
-    assert_eq!(w.reached().len(), before + 1);
+    let firefox = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0";
+    // the cookie's player, the user's and this client's: written with the browser as Navidrome names it, its
+    // settings kept
+    let (_, headers, _) = w.request(request("nd-player-616c696365=p1; other=1", firefox, &song)).await;
+    assert_eq!(player_of(&headers), "p1");
+    let (name, agent, ip, seen, max_bit_rate, real_path, scrobbles) = row("p1");
+    assert_eq!(
+        (name.as_str(), agent.as_str(), ip.as_str(), max_bit_rate, real_path, scrobbles),
+        ("test [Firefox/Windows]", "Firefox/Windows", "127.0.0.1", 192, false, false)
+    );
+    assert!(seen.is_some());
+    // written at most once a minute
+    w.db().execute("UPDATE player SET last_seen = 'marker' WHERE id = 'p1'", []).unwrap();
+    w.request(request("nd-player-616c696365=p1", firefox, &song)).await;
+    assert_eq!(row("p1").3.as_deref(), Some("marker"));
+    // no cookie: the user's player for this client and browser
+    let (_, headers, _) = w.request(request("", firefox, &song)).await;
+    assert_eq!(player_of(&headers), "p1");
+    // another browser, another client: new players; a cookie for another client's player is not that player
+    let (_, headers, _) = w.request(request("", "okhttp/4.12.0", &song)).await;
+    let okhttp = player_of(&headers);
+    assert_ne!(okhttp, "p1");
+    assert_eq!(row(&okhttp).0, "test [okhttp]");
+    let other = "/rest/ping?u=alice&p=sesame&v=1.16.1&c=other+app&f=json";
+    let (_, headers, _) = w.request(request("nd-player-616c696365=p1", firefox, other)).await;
+    let other_app = player_of(&headers);
+    assert!(other_app != "p1" && other_app != okhttp);
+    assert_eq!(row(&other_app).0, "other app [Firefox/Windows]");
+    // another user's player named in the cookie is not theirs
+    let (_, headers, _) = w.request(request("nd-player-726f6f74=p1", firefox, &format!("/rest/ping?{ADMIN}"))).await;
+    assert_ne!(player_of(&headers), "p1");
+    // the cookie is named after the user name as the request carries it
+    let (_, headers, _) = w.request(request("", firefox, "/rest/ping?u=ALICE&p=sesame&v=1.16.1&c=test&f=json")).await;
+    assert!(headers["set-cookie"].to_str().unwrap().starts_with("nd-player-414c494345=p1;"));
+    // a player that is gone (an admin removed it) is made anew
+    w.db().execute("DELETE FROM player WHERE id = 'p1'", []).unwrap();
+    let (_, headers, _) = w.request(request("nd-player-616c696365=p1", firefox, &song)).await;
+    assert_ne!(player_of(&headers), "p1");
+    assert!(w.reached().is_empty(), "Navidrome registered nothing");
 }
 
 #[tokio::test]
@@ -361,11 +385,12 @@ async fn what_is_navidromes_goes_to_navidrome_signed_in() {
 }
 
 #[tokio::test]
-async fn without_a_player_from_navidrome_the_request_is_navidromes() {
-    // Navidrome answers the registration without a cookie (it could not register a player)
-    let w = world_with(LibraryOptions::default(), false).await;
+async fn a_player_whose_transcoding_is_gone_is_navidromes() {
+    // Navidrome registers no player then (its Register fails), so it answers the request itself
+    let w = world().await;
+    w.here(&format!("/rest/getSong?{ALICE}&id=s-1")).await;
+    w.db().execute("UPDATE player SET transcoding_id = 'gone'", []).unwrap();
     w.navidromes(&format!("/rest/getSong?{ALICE}&id=s-1")).await;
-    assert_eq!(w.reached(), ["/rest/ping?v=1.16.1&c=test&f=json", "/rest/getSong?u=alice&v=1.16.1&c=test&f=json&id=s-1"]);
 }
 
 #[tokio::test]

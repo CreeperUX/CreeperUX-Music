@@ -59,7 +59,7 @@ fn public_secret(db: &Db, keys: &Keys) -> Option<Signer> {
 
 /// Opens Navidrome's database and checks it; call when Navidrome answers (it migrates before it listens). The error
 /// says why the server cannot run.
-pub async fn local(shared: &Shared, upstream: &Uri, base_path: &str, user_header: &hyper::header::HeaderName) -> Result<Local, String> {
+pub async fn local(shared: &Shared, upstream: &Uri, base_path: &str) -> Result<Local, String> {
     let path = db::locate(&shared.data_folder, &shared.db_path)?;
     let keys = Keys::new(&shared.password_encryption_key);
     let opened = {
@@ -101,9 +101,7 @@ pub async fn local(shared: &Shared, upstream: &Uri, base_path: &str, user_header
         options: shared.library.clone(),
         envelope,
         frame_options: shared.frame_options.clone(),
-        upstream: upstream.clone(),
         base_path: base_path.to_string(),
-        user_header: user_header.clone(),
         public_signer,
     });
     let auth = Auth::new(auth::Setup {

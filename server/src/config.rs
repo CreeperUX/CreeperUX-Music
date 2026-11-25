@@ -139,6 +139,8 @@ pub struct LibraryOptions {
     /// `ShareURL` and `BaseURL`: the address of the public links Navidrome writes (`artistImageUrl`).
     pub share_url: String,
     pub base_url: String,
+    /// `Subsonic.DefaultReportRealPath` (default off): a new player's `ReportRealPath`.
+    pub default_report_real_path: bool,
 }
 
 impl Default for LibraryOptions {
@@ -176,6 +178,7 @@ impl Default for LibraryOptions {
             disc_art_priority: "disc*.*, cd*.*, cover.*, folder.*, front.*, discsubtitle, embedded".into(),
             share_url: String::new(),
             base_url: String::new(),
+            default_report_real_path: false,
         }
     }
 }
@@ -416,6 +419,7 @@ impl Config {
                     disc_art_priority: nd.get("discartpriority")?.unwrap_or(d.disc_art_priority),
                     share_url: nd.get("shareurl")?.unwrap_or_default(),
                     base_url: nd.get("baseurl")?.unwrap_or_default(),
+                    default_report_real_path: nd.get_bool("subsonic.defaultreportrealpath")?.unwrap_or(false),
                 }
             },
         };

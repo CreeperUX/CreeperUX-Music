@@ -597,6 +597,16 @@ table, a date in a condition with a zone Go would look up locally, and **`downlo
 roadmap's decision 1), and its file name (`Content-Disposition`) is Navidrome's own ASCII folding and escaping, to be
 ported only if a client needs it.
 
+**Part 5: the R2 mirror** (designed in `docs/r2-mirror.md`, decided 2026-11-26; code in steps, off until the owner
+configures it). Every music file and the cover originals are mirrored to a private Cloudflare R2 bucket; clients
+outside the home network that opt in are redirected to short-lived signed links for files played as they are; a
+daily manifest maps the opaque object names to library paths, and a restore command fetches the music back.
+
+> **The mirror is no full backup.** R2 keeps no history of an object: a file deleted at home is deleted on R2 after
+> 7 days, and a file damaged at home (by a failing disk or ransomware) changes, is uploaded as a new version, and
+> replaces the good copy. Navidrome's database (users, stars, playlists, plays) is not mirrored. Keep a real backup
+> as well; the mirror is one more way back after a disk fails.
+
 ## Sonus Connect version 2
 
 One playback session per user, as Spotify Connect has it: the protocol is `docs/protocol/connect.md`, and this server

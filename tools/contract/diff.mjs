@@ -8,7 +8,14 @@
 //          sign-ins are checked by the Rust server.
 //   node tools/contract/diff.mjs --go-vs-go [--corpus <file>]
 //       two Navidromes on two copies: shows what differs between two runs of the same server (should be nothing).
-//   Options: --json <file> writes the full report; --only <text> runs the requests whose name contains it.
+//   node tools/contract/diff.mjs --db <navidrome.db> --corpus <file> [--env ND_X=y …] [--json <file>]
+//       the same as --go-vs-gateway on two copies of any Navidrome database (startPairOnDatabase): every user gets a
+//       throwaway password on the copies; the corpus comes from corpus-from-db.mjs. Prints request names and the paths
+//       that differ, never values; then who answered (counted, with the Rust server's reasons for leaving requests to
+//       Navidrome) and the times per method, the servers asked one at a time. The original is never opened.
+//       --release: the Rust server's release build (for the times; a release build does not mark its answers).
+//   Options: --json <file> writes the full report (with the answers that differ: keep it where nothing is committed);
+//   --only <text> runs the requests whose name contains it.
 //
 // The corpus (corpus/*.json): { volatile: [paths], requests: [request] }. A request:
 //   { name, method: 'getAlbum', params: { id: '{{album.compilation}}' } }          a Subsonic call (GET)
@@ -112,10 +119,13 @@ function toFetch(base, r, manifest) {
 async function answer(base, r, manifest) {
   const [url, init] = toFetch(base, r, manifest);
   let res;
+  const started = performance.now();
   try { res = await fetch(url, init); } catch (e) { return { error: `no answer: ${e.cause?.code ?? e.message}` }; }
   const buf = Buffer.from(await res.arrayBuffer());
+  const ms = performance.now() - started;
   const type = res.headers.get('content-type') ?? '';
   const out = { status: res.status };
+  Object.defineProperty(out, 'ms', { value: ms, enumerable: false });
   // who answered is not part of the comparison (Navidrome never says): kept beside the answer
   Object.defineProperty(out, 'answeredBy', { value: res.headers.get(ANSWERED_HEADER) ?? null, enumerable: false });
   if (/json/.test(type)) {
@@ -199,45 +209,124 @@ export function mustBeAnsweredByRust(r, answerOfNavidrome) {
   return true;
 }
 
-export async function runDiff({ a, b, manifest, corpus, only, expected = [], whoAnswered = false, log = console.log }) {
+export async function runDiff({ a, b, manifest, corpus, only, expected = [], whoAnswered = false, quiet = false, sequential = false, log = console.log }) {
   const requests = expand(corpus).filter(r => !only || r.name.includes(only));
   const results = [];
   let byRust = 0;
   for (const e of expected) log(`  expected to differ, and compared with that applied to A: ${e.what}`);
   for (const r of requests) {
     if (r.waitMs) await new Promise(done => setTimeout(done, r.waitMs));
-    const [ra, rb] = await Promise.all([answer(a, r, manifest), answer(b, r, manifest)]);
+    // sequential: one server at a time, so that neither one's time includes the other's work
+    const [ra, rb] = sequential
+      ? [await answer(a, r, manifest), await answer(b, r, manifest)]
+      : await Promise.all([answer(a, r, manifest), answer(b, r, manifest)]);
     for (const e of expected) e.apply(ra);
     const inJson = v => (v.startsWith('json.') ? v : `json.${v}`);
     const volatile = [...(corpus.volatile ?? []), ...(r.volatile ?? [])].map(inJson);
     const unordered = [...(corpus.unordered ?? []), ...(r.unordered ?? [])].map(inJson);
     const diffs = compare(ra, rb, volatile, [], [], unordered);
-    if (whoAnswered) {
+    if (whoAnswered === 'count') {
+      // only counted: on a database of unknown content, which requests the Rust server leaves to Navidrome is a finding
+      if (rb.answeredBy === 'rust') byRust++;
+    } else if (whoAnswered) {
       const must = mustBeAnsweredByRust(r, ra), did = rb.answeredBy === 'rust';
       if (must && !did) diffs.push({ path: '(who answered)', a: 'the Rust server is to answer this itself', b: 'left to Navidrome' });
       if (!must && did) diffs.push({ path: '(who answered)', a: r.navidrome ? `Navidrome is to answer this: ${r.navidrome}` : 'not a request the Rust server answers itself', b: 'answered by the Rust server' });
       if (did) byRust++;
     }
-    results.push({ name: r.name, same: diffs.length === 0, diffs, a: diffs.length ? ra : undefined, b: diffs.length ? rb : undefined });
-    if (!diffs.length) { log(`  ✓ ${r.name}`); continue; }
+    results.push({
+      name: r.name, method: r.method, same: diffs.length === 0, diffs, a: diffs.length ? ra : undefined, b: diffs.length ? rb : undefined,
+      ms: { a: ra.ms, b: rb.ms }, answeredBy: rb.answeredBy,
+    });
+    if (!diffs.length) { if (!quiet) log(`  ✓ ${r.name}`); continue; }
     log(`  ✗ ${r.name}`);
+    // quiet: where they differ, not what they say (the data may be private)
+    if (quiet) { log(`      ${[...new Set(diffs.map(d => d.path || '(the answer)'))].slice(0, 12).join(', ')}`); continue; }
     for (const d of diffs.slice(0, 12)) log(`      ${d.path || '(the answer)'}:\n        A ${show(d.a)}\n        B ${show(d.b)}`);
     if (diffs.length > 12) log(`      … and ${diffs.length - 12} more`);
   }
   const different = results.filter(x => !x.same).length;
   log(`\n${results.length} requests: ${results.length - different} the same, ${different} different`);
   if (whoAnswered) log(`${byRust} answered by the Rust server itself (${ANSWERED_BY_RUST.join(', ')}), ${results.length - byRust} by Navidrome behind it or by the sign-in check`);
-  return { requests: results.length, different, byRust, results };
+  return { requests: results.length, different, byRust, results, timings: timings(results) };
+}
+
+/** Median and worst time per method, A and B: { method: { n, a: { median, worst }, b: { … } } } (ms, rounded). */
+export function timings(results) {
+  const out = {};
+  const stat = list => {
+    const s = list.filter(x => typeof x === 'number').sort((x, y) => x - y);
+    return s.length ? { median: Math.round(s[Math.floor((s.length - 1) / 2)] * 10) / 10, worst: Math.round(s[s.length - 1] * 10) / 10 } : null;
+  };
+  for (const [method, list] of Object.entries(Object.groupBy(results, r => r.method ?? '(route)'))) {
+    out[method] = { n: list.length, a: stat(list.map(r => r.ms?.a)), b: stat(list.map(r => r.ms?.b)) };
+  }
+  return out;
+}
+
+/**
+ * Two copies of any Navidrome database, served as --go-vs-gateway serves the golden one: A, the frozen Navidrome alone;
+ * B, the Rust server running its own Navidrome. Every user gets the same throwaway password on both copies, set with
+ * Navidrome's own command line; the copies are removed by stop(). `env`: settings for both sides (over safe defaults:
+ * no scans, no external services, no sign-in limits). Returns { a, b, manifest, stop, gatewayLog }: the manifest is
+ * made here and held in memory only (users u1…un in the order they were created, as corpus-from-db.mjs names them).
+ */
+export async function startPairOnDatabase(file, { env = {}, navidrome, release = false } = {}) {
+  const { databaseCopy } = await import('../fixtures/serve.mjs');
+  const { freePort, navidromeExe, setPasswordWithCli, startNavidrome } = await import('../fixtures/lib/navidrome.mjs');
+  const { DatabaseSync } = await import('node:sqlite');
+  const { randomBytes } = await import('node:crypto');
+  // the Navidrome the golden database was made with, when there is one (as --go-vs-gateway runs)
+  const { readManifest } = await import('../fixtures/serve.mjs');
+  const golden = await readManifest().catch(() => null);
+  const exe = navidromeExe({ exe: navidrome ?? golden?.server?.navidrome });
+  const settings = {
+    ND_ADDRESS: '127.0.0.1', ND_LOGLEVEL: 'warn', ND_SONUS_TWOFACTOR: 'off', ND_ENABLEEXTERNALSERVICES: 'false',
+    ND_ENABLEINSIGHTSCOLLECTOR: 'false', ND_AUTHREQUESTLIMIT: '0', ND_SCANNER_SCHEDULE: '0', ND_SCANNER_WATCHERWAIT: '0',
+    ND_ENABLEARTWORKPRECACHE: 'false', ...env,
+  };
+  const copies = [await databaseCopy(file, { env: settings }), await databaseCopy(file, { env: settings })];
+  const stops = [];
+  const stop = async () => { for (const s of stops.reverse()) await s(); for (const c of copies) await c.remove(); };
+  try {
+    const db = new DatabaseSync(copies[0].db);
+    const users = db.prepare('select id, user_name from user order by created_at, id').all();
+    db.close();
+    const manifest = { primaryUser: 'u1', users: {}, ids: {}, server: { navidrome: exe } };
+    users.forEach((u, i) => { manifest.users[`u${i + 1}`] = { id: u.id, username: u.user_name, password: randomBytes(12).toString('hex') }; });
+    for (const c of copies) for (const u of Object.values(manifest.users)) setPasswordWithCli(exe, c.env, u.id, u.password);
+    const go = await startNavidrome(exe, { ...copies[0].env, ND_PORT: String(await freePort()) });
+    stops.push(go.stop);
+    const gw = await startGatewayOnGolden({ copy: { ...copies[1], manifest }, navidrome: exe, env: { SONUS_LOG: 'debug' }, release });
+    stops.push(() => gw.stop({ keep: true }));
+    // what each copy holds: the music is not there, so a scan would mark every song missing; this shows none ran
+    const holds = () => copies.map(c => {
+      const d = new DatabaseSync(c.db, { readOnly: true });
+      try { return d.prepare('select count(*) as songs, coalesce(sum(missing), 0) as missing from media_file').get(); } finally { d.close(); }
+    });
+    return { a: go.url, b: gw.url, manifest, stop, holds, gatewayLog: gw.log, navidromeLog: go.log };
+  } catch (e) { await stop(); throw e; }
+}
+
+/** The requests the Rust server left to Navidrome, counted by method and reason, from its debug log. */
+export function passThroughReasons(log) {
+  const out = {};
+  // tracing writes the message, then the fields (a text field in quotes): … Navidrome method="getAlbum" why="…"
+  for (const m of log.matchAll(/leaves a request to Navidrome method="?([^"\s]+)"? why="((?:[^"\\]|\\.)*)"/g)) {
+    const key = `${m[1]}: ${m[2]}`;
+    out[key] = (out[key] ?? 0) + 1;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- servers for the comparisons
 
 // `cargo run` in server/ with these settings, from `cwd`, until `ready(url)` holds: { url, stop, log }.
-async function runGateway({ env, cwd, port, ready }) {
+async function runGateway({ env, cwd, port, ready, release = false }) {
   // the caller's own ND_ and SONUS_ variables stay out, as for the Navidrome the tests run
   const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(ND_|SONUS_)/i.test(k)));
   const all = { ...clean, SONUS_LOG: process.env.SONUS_LOG ?? 'warn', ...env, ND_ADDRESS: '127.0.0.1', ND_PORT: String(port) };
-  const proc = spawn('cargo', ['run', '--quiet', '--manifest-path', join(root, 'server', 'Cargo.toml')], { cwd, env: all, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  const proc = spawn('cargo', ['run', '--quiet', ...(release ? ['--release'] : []), '--manifest-path', join(root, 'server', 'Cargo.toml')], { cwd, env: all, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   let log = '';
   proc.stdout.on('data', d => { log += d; }); proc.stderr.on('data', d => { log += d; });
   const exited = new Promise(done => proc.once('exit', done));
@@ -275,7 +364,7 @@ export async function startGateway(upstream) {
  * server without users instead of the golden database; `navidrome`: another build of the fork than the fixtures'. The
  * log is the gateway's and Navidrome's together.
  */
-export async function startGatewayOnGolden({ env = {}, empty = false, copy: started = null, navidrome = null } = {}) {
+export async function startGatewayOnGolden({ env = {}, empty = false, copy: started = null, navidrome = null, release = false } = {}) {
   const { freePort } = await import('../fixtures/lib/navidrome.mjs');
   const { goldenCopy } = await import('../fixtures/serve.mjs');
   // `copy`: the `copy` of a server stopped with stop({ keep: true }): the same data folder again (a restart)
@@ -284,7 +373,7 @@ export async function startGatewayOnGolden({ env = {}, empty = false, copy: star
   // up when Navidrome answers behind it and the gateway has checked the database (503 until then)
   const ready = async url => (await fetch(`${url}/rest/ping?f=json`)).status === 200;
   let gw;
-  try { gw = await runGateway({ env: settings, cwd: copy.folder, port: await freePort(), ready }); } catch (e) { await copy.remove(); throw e; }
+  try { gw = await runGateway({ env: settings, cwd: copy.folder, port: await freePort(), ready, release }); } catch (e) { await copy.remove(); throw e; }
   return { ...gw, data: copy.folder, manifest: copy.manifest, copy, stop: async ({ keep = false } = {}) => { await gw.stop(); if (!keep) await copy.remove(); } };
 }
 
@@ -292,7 +381,41 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const { values } = parseArgs({ options: {
     a: { type: 'string' }, b: { type: 'string' }, manifest: { type: 'string' }, corpus: { type: 'string' },
     'go-vs-gateway': { type: 'boolean' }, 'go-vs-go': { type: 'boolean' }, json: { type: 'string' }, only: { type: 'string' },
+    db: { type: 'string' }, env: { type: 'string', multiple: true }, release: { type: 'boolean' },
   } });
+  if (values.db) {
+    if (!values.corpus) throw new Error('--db needs --corpus (node tools/contract/corpus-from-db.mjs makes one)');
+    const corpus = JSON.parse(await readFile(resolve(values.corpus), 'utf8'));
+    const env = Object.fromEntries((values.env ?? []).map(kv => [kv.slice(0, kv.indexOf('=')), kv.slice(kv.indexOf('=') + 1)]));
+    console.log('Copying the database twice and setting throwaway passwords; starting Navidrome (A) and the Rust server (B)…');
+    const pair = await startPairOnDatabase(resolve(values.db), { env, release: !!values.release });
+    // a release build does not mark its own answers: who answered is then known from its log only
+    if (values.release) console.log('A release build of the Rust server: for the times; it does not mark the answers it made itself');
+    try {
+      const show = h => h.map((x, i) => `${'AB'[i]}: ${x.songs} songs, ${x.missing} missing`).join('; ');
+      console.log(`Before: ${show(pair.holds())}`);
+      // quiet: request names and paths only (the database may be private); one server at a time, for the timings
+      const report = await runDiff({ a: pair.a, b: pair.b, manifest: pair.manifest, corpus, only: values.only, whoAnswered: values.release ? false : 'count', quiet: true, sequential: true });
+      report.passedToNavidrome = passThroughReasons(pair.gatewayLog());
+      if (values.release) {
+        const left = Object.values(report.passedToNavidrome).reduce((x, y) => x + y, 0);
+        console.log(`${left} left to Navidrome by the Rust server's log; the rest answered by the Rust server or refused at the sign-in`);
+      }
+      console.log('\nLeft to Navidrome, by method and reason:');
+      for (const [why, n] of Object.entries(report.passedToNavidrome).sort((x, y) => y[1] - x[1])) console.log(`  ${String(n).padStart(6)}  ${why}`);
+      console.log('\nTimes (ms), median / worst, A: Navidrome alone, B: the Rust server:');
+      for (const [method, t] of Object.entries(report.timings)) console.log(`  ${method.padEnd(18)} ${String(t.n).padStart(5)}   A ${t.a?.median} / ${t.a?.worst}   B ${t.b?.median} / ${t.b?.worst}`);
+      // the gateway's own warnings (Navidrome's log lines, mixed in, say level=…)
+      const warnings = pair.gatewayLog().split(/\r?\n/).filter(l => /\b(WARN|ERROR)\b/.test(l)).length;
+      console.log(`\nThe Rust server's log: ${warnings} warning or error lines`);
+      console.log(`After: ${show(pair.holds())}`);
+      if (values.json) await writeFile(resolve(values.json), JSON.stringify(report, null, 2));
+      process.exitCode = report.different ? 1 : 0;
+    } finally {
+      await pair.stop();
+    }
+    process.exit();
+  }
   const corpus = JSON.parse(await readFile(values.corpus ? resolve(values.corpus) : join(here, 'corpus', 'read-only.json'), 'utf8'));
   const stops = [];
   let a = values.a, b = values.b, manifest, expected = [], whoAnswered = false;

@@ -212,6 +212,44 @@ server that runs on its own: then it only passes requests through.
 | `corpus/read-only.json` | every sign-in and every way it fails: in JSON, XML and JSONP (compared byte for byte, with `Accept-Encoding: identity`), in the query and as a form, by every HTTP method, mixed credentials, missing `v`/`c`, `tokenInfo`, a CORS preflight, queries Go refuses; extensions, scan status; album lists (every type but random: whole and paged, as three users, the paging boundaries, `byYear` both ways round, `byGenre` in another case and with wildcards, every error), `search3` (the empty query whole and paged to its boundaries, for songs, albums and artists; words in every script, in any case, as prefixes and phrases, with accents, the Turkish I, sort names, punctuated names, FTS5's own syntax typed as words, LIKE's wildcards; Chinese, Japanese and Korean; MusicBrainz ids); `getAlbum`, `getSong` for every fixture case (and without an id, with the wrong kind of id, as the admin, as a user with no state, for the legacy and minimal client names, as `.view` and as form posts); playlists, the play queue and stars as three users (nothing starred, no queue saved, someone else's private playlist); what stays Navidrome's (XML, JSONP, `musicFolderId`, a smart playlist); playlists, the play queue, stars; lyrics (from the tags, from a file beside the song, none; `enhanced`), similar songs, artist info; cover art (as is from a folder and from Navidrome's image store, by hash, with `If-None-Match`, resized the first time and again from the cache, square, a playlist's, a disc's, without a picture, unknown), `stream` (every format, ranges, errors); two device sign-in calls |
 | `corpus/writes.json` | stars, ratings, plays, the play queue, changing and deleting a playlist; each followed by the reads that show it |
 
+### Any Navidrome database: `corpus-from-db.mjs` and `--db`
+
+For a database that is not the golden one (a copy of a real server's, say), the corpus is made from the data itself
+and both servers run on copies of it:
+
+```sh
+node tools/contract/corpus-from-db.mjs --db <navidrome.db> --out tools/fixtures/.work/<name>/corpus.json [--covers]
+node tools/contract/diff.mjs --db <navidrome.db> --corpus tools/fixtures/.work/<name>/corpus.json \
+  [--env ND_BASEURL=https://music.example.com …] [--json tools/fixtures/.work/<name>/report.json] [--release]
+```
+
+- **The corpus** covers what the Rust server answers from the database, as every user: `getAlbumList2` of every type
+  but random, pages of 500 to past the end (`byYear` both ways, `byGenre` for a sample of genres); `getAlbum` of every
+  album; `getSong` of a spread over the formats and of every song with odd data (missing tags, several values for a tag
+  or several artists in a role, other roles, text that is not valid UTF-8, the five longest values of each field);
+  `search3`'s empty query paged through songs, albums and artists (pages of 500) and words from the data (a sample of
+  titles, artists and albums, and every script found: Han, kana, Hangul, Cyrillic, Greek, accents, punctuation, also
+  as prefixes, in upper case and without accents) as the Windows client searches; `getStarred2`, `getPlaylists`,
+  `getPlayQueue`, `getPlaylist` of every playlist; `getLyricsBySongId` of every song with stored lyrics and a sample
+  without; with `--covers`, a few covers of each kind (the pictures need not be on the computer: both servers must then
+  fail alike). Streams are left out. It prints counts only; the corpus holds words from the data, so it belongs in
+  `tools/fixtures/.work/`, which is never committed. The same database and `--seed` give the same corpus.
+- **The run** (`startPairOnDatabase`) copies the database (with its `-wal` file) twice under `tools/fixtures/.work/runs`
+  and never opens the original. Every user gets one throwaway password, the same on both copies, through Navidrome's
+  own `navidrome user edit --set-password`; that command reads a console only, so it runs in a pseudo console
+  (`lib/console-input.ps1`, ConPTY, on Windows; `script` elsewhere), the password in the environment. Both sides get
+  the same settings: two-step verification off, no scans (the music is not there: the counts of songs and missing songs
+  are printed before and after), no external services, no insights, no sign-in limit, and whatever `--env` adds. A:
+  Navidrome alone; B: the Rust server (debug build) running its own Navidrome. The servers are asked one at a time.
+- **What it prints**: request names (methods, ids and counts, never titles or user names) and, for each difference,
+  the paths that differ, not the values; then how many requests the Rust server answered itself and its reasons for
+  each one it left to Navidrome (from its debug log), the median and worst time per method on each side, and its
+  warnings. Who answers is counted, not checked: on a database of unknown content that is the finding. `--json` writes
+  everything, with the answers that differ. `--release` runs the Rust server's release build, for the times (it does
+  not mark its own answers).
+- **On the golden database** (`--env ND_PASSWORDENCRYPTIONKEY=<the manifest's>`): 650 requests, all the same.
+
+
 ### Normalizing
 
 - **Key order** never matters: JSON is compared field by field. Other answers are compared by status, `Content-Type`,
@@ -219,7 +257,8 @@ server that runs on its own: then it only passes requests through.
 - **Volatile** fields are listed in the corpus (`volatile`) and left out: `serverVersion`; in the writes corpus, the
   times the server takes from its clock (`starred`, a queue's or playlist's `changed`). Plays carry their own `time`.
 - **Unordered** arrays (`unordered`) are compared sorted: an artist's `roles`, which Go lists from a map in random
-  order, and `getSimilarSongs2`'s songs, which Navidrome shuffles (without Last.fm it picks from the artist's own).
+  order; a song's `contributors`, which Go lists role by role in the order it walks the song's participants map (two
+  Navidromes differ as soon as a song has two roles besides its artists); and `getSimilarSongs2`'s songs, which Navidrome shuffles (without Last.fm it picks from the artist's own).
 - Requests are the same bytes on both sides: tokens use a fixed salt.
 
 ### Adding a case

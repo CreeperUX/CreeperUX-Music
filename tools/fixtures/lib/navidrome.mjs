@@ -134,6 +134,29 @@ export async function startNavidrome(exe, ndEnv, { timeoutMs = 60_000 } = {}) {
 }
 
 /**
+ * Gives a user a new password with Navidrome's own command line (`navidrome user edit -u <user> --set-password`), on
+ * the database `ndEnv` names, as Navidrome stores it. That command reads the password from a console only (it fails on
+ * a pipe), so it runs in a pseudo console: lib/console-input.ps1 (ConPTY) on Windows, `script` elsewhere. The password
+ * is handed over in the environment, never on a command line, and never printed.
+ */
+export function setPasswordWithCli(exe, ndEnv, user, password) {
+  // (`user`: a user's id or name; ids need no quoting)
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.toUpperCase().startsWith('ND_'))), ...ndEnv };
+  let out;
+  if (process.platform === 'win32') {
+    const script = resolve(here, '..', '..', 'contract', 'lib', 'console-input.ps1');
+    out = execFileSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Exe', exe, '-ArgsLine', `user edit -u ${user} --set-password`, '-Cwd', ndEnv.ND_DATAFOLDER],
+      { env: { ...env, CONSOLE_INPUT: [password, password].join('\n') }, cwd: ndEnv.ND_DATAFOLDER, windowsHide: true }).toString();
+  } else {
+    // util-linux script: the command runs on a new terminal, its input is this process's
+    out = execFileSync('script', ['-qec', `"${exe}" user edit -u "${user}" --set-password`, '/dev/null'],
+      { env, cwd: ndEnv.ND_DATAFOLDER, input: [password, password, ''].join('\n') }).toString();
+  }
+  const failed = out.split(/\r?\n/).filter(l => /level=(fatal|error)/.test(l));
+  if (failed.length) throw new Error(`navidrome user edit failed: ${failed.join(' ')}`);
+}
+
+/**
  * Waits until Navidrome's background artwork work is done (artwork_queue empty). Until then the ids it gives cover art
  * change as the work goes on (al-<id> becomes al-<id>_<hash>), so a database copied earlier answers differently from
  * one copied later. Returns the rows left after the timeout.

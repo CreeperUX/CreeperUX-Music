@@ -256,7 +256,7 @@ test('Sonus Connect version 2: the session is kept across a restart, in tables o
   assert.ok(!/level=(error|fatal)/i.test(log), `Navidrome and the Rust server start without errors:\n${log.slice(-2000)}`);
   assert.equal((await signed(listener).ok('ping')).status, 'ok');
   assert.equal((await signed(listener).allSongs()).length, (await new Subsonic(go.url, { u: listener.username, password: listener.password }, { client: CLIENT }).allSongs()).length);
-  assert.deepEqual(tables().length, 5);
+  assert.deepEqual(tables().length, 6);
 
   const laptop = await device(rust.url, signed(listener).query().toString(), 'restart-laptop-1', '笔记本');
   const back = laptop.welcome.session;

@@ -9,9 +9,9 @@ Status: phase 0's gateway, phase 2: **Subsonic sign-ins are checked here** ([bel
 routes are answered here** ([below](#the-auth-routes): the web sign-in with two-step verification, app passwords, the
 browser sign-in for apps), on Navidrome's own database, which the server opens beside Navidrome; and phase 1:
 **Sonus Connect version 2 is answered here** ([below](#sonus-connect-version-2): one playback session per user, kept
-in the database); and phase 3, so far: **the library's reads `ping`, `getSong`, `getAlbum`, `getAlbumList2`,
-`search3`, `getStarred2`, `getPlaylists`, `getPlaylist` and `getPlayQueue` are answered here** from Navidrome's
-database ([below](#the-librarys-reads)). Everything else is still Navidrome's. It reads
+in the database); and phase 3: **the library's reads `ping`, `getSong`, `getAlbum`, `getAlbumList2`, `search3`,
+`getStarred2`, `getPlaylists`, `getPlaylist`, `getPlayQueue`, `getLyricsBySongId` and `getCoverArt` are answered
+here** from Navidrome's database and what it has stored on disk ([below](#the-librarys-reads)). Everything else is still Navidrome's. It reads
 Navidrome's own settings (`navidrome.toml`, `ND_*`, the command line), has unit and integration tests, and passes the
 contract suite and the differential corpora of `tools/contract` in front of the real frozen Navidrome
 ([below](#checked-against-the-real-navidrome)). The image `ghcr.io/creeperux/sonus-server` is built by CI
@@ -50,7 +50,8 @@ The gateway reads Navidrome's settings as Navidrome reads them, so a container k
   `Subsonic.EnableAverageRating`, `Subsonic.ArtistParticipations`, `Subsonic.LegacyClients`,
   `Subsonic.MinimalClients`, `PreferSortTags`, `EnableNaturalSorting`, `RecentlyAddedByModTime`,
   `AlbumPlayCountMode`, `EnableMediaFileCoverArt`, `IgnoredArticles`, `Search.Backend`, `Search.FullString` (and its
-  old name `SearchFullString`).
+  old name `SearchFullString`), `SmartPlaylistRefreshDelay`, `LyricsPriority`, `CoverArtQuality` (and its old name
+  `CoverJpegQuality`), `EnableWebPEncoding`, `ImageCacheSize`, `CacheFolder`.
 
 | Setting | Default | |
 |---|---|---|
@@ -320,7 +321,7 @@ sealed, and Navidrome's code opened what this server sealed (`tests/golden/READM
 `src/library/` (roadmap, phase 3). The Subsonic methods Sonus clients read the library with are answered here, from
 Navidrome's database, as Navidrome answers them: the same JSON, byte for byte, for the same request. Navidrome still
 owns the database and writes it (its scanner too), so everything is read when the request comes and nothing is kept
-between requests. So far, parts 1 and 2 of 3:
+between requests:
 
 | Method | |
 |---|---|
@@ -333,6 +334,9 @@ between requests. So far, parts 1 and 2 of 3:
 | `getPlaylists` | the user's playlists and everyone's public ones (an admin: all), by name; smart playlists as they were last filled, with `validUntil` |
 | `getPlaylist` | a plain playlist with its songs in order (the ones that are still there, counted and timed anew); 10 without an id, 70 `playlist not found` (someone else's private one too) |
 | `getPlayQueue` | the saved queue with its songs, the current one and the position; the user's name and a zero time when none is saved |
+| `getLyricsBySongId` | the lyrics Navidrome read from the song's tags when it scanned (the song's row), with their line times, language and offset; an empty list for a song without any; 10 without an id, 70 `data not found` |
+| `getCoverArt` | a picture Navidrome has settled (below): as it is, or resized once Navidrome has resized it; `ETag`, `Last-Modified`, `Cache-Control` (kept for good when asked for by its hash), 304 for what the client has |
+| `getScanStatus` | **not answered here**: whether a scan runs, and how far it is, are in Navidrome's memory, not in the database. It goes to Navidrome until the scanner moves (phase 7) |
 
 Each also as `<method>.view`, by GET or as a form post, for any way of signing in the gateway checks.
 
@@ -353,13 +357,31 @@ stored with, floats as Go formats them, `<`, `>` and `&` escaped as `\u003c`…
 | `getAlbumList2` with an `offset` and a `size` of 0 or less | Navidrome's query fails there (an OFFSET without a LIMIT), and its answer says so |
 | `getPlaylist` of a smart playlist | Navidrome fills a smart playlist anew when it is read (after its refresh delay, for its owner): a write, with the rules' translation into SQL, which stays Navidrome's |
 | `getPlaylists` when a smart playlist has a refresh delay of its own, or rules Navidrome's decoder would refuse | its `validUntil`, or Navidrome's error, is Navidrome's to make |
-| `search3` or `getStarred2` that would show an artist with a picture, or one whose picture is not resolved yet | such an artist carries `artistImageUrl`, a public link signed with a secret this server does not read; a search that asks for no artists (`artistCount=0`, as the clients' library sync does) is not touched by this |
+| `search3` or `getStarred2` that would show an artist with a picture, or one whose picture is not resolved yet | such an artist carries `artistImageUrl`, a public link signed with a secret this server does not read. No Sonus client reads that field, so it is not made here (decided 2026-11-25): these searches stay Navidrome's, and the field goes when Navidrome is retired. A search that asks for no artists (`artistCount=0`, as the clients' library sync does) is not touched by this |
+| `getLyricsBySongId` of a song with a lyrics file beside it (`.lrc`, `.ttml`, … in `LyricsPriority`, before `embedded`), with a plugin as a source, or with `enhanced=true` | Navidrome reads and parses such a file at every request; enhanced lyrics (other kinds, word timings) are not something Sonus clients ask for |
+| `getCoverArt` of a disc (`dc-…`), of a song or album without artwork state yet, of an item known to have no picture, of an id without its kind | a disc's cover is found by a walk through the album's folders at every request; a picture without state is looked for (and noted: a write); no picture is Navidrome's placeholder |
+| `getCoverArt` resized, the first time for that picture and size | resizing and its cache are Navidrome's (phase 5); from the second time on the cached picture is served here |
+| `getCoverArt` when the picture's file changed since Navidrome hashed it, or is not where the state says | Navidrome looks again, and corrects its state |
 | `search3` with `Search.Backend = legacy` or `Search.FullString` on | Navidrome's older search over another column |
 | comes from a player with a transcoding set | songs then carry `transcodedSuffix` and a content type from Go's tables |
 | comes from a player with `ReportRealPath`, on Windows | Go builds the path by Windows' rules there; on Linux (the image) it is answered here |
 | would show a song whose suffix is not in Navidrome's own list of types (`resources/mime_types.yaml`) | Go asks the operating system for its content type |
 | names a parameter that is not UTF-8 text, or a row holds JSON this server does not read as Go's decoders do (a participant's role Navidrome does not know, …) | Navidrome's answer, error or not, is its own |
 | could not be read from the database, or Navidrome registered no player for it, or its user is gone | Navidrome answers, or fails, as it would |
+
+**Covers.** A cover is served here when Navidrome's artwork state names its picture (`item_artwork`, with the
+picture's row in `artwork`), the item is there for this user, and the bytes are where that state says
+(`media.rs`): the picture's own file (a cover in a folder, an uploaded one), read only while its change time is the
+one Navidrome noted when it hashed it; or Navidrome's image store (`<DataFolder>/artwork/hashed/`, for pictures taken
+out of audio files or made by Navidrome); or, for a resized cover, Navidrome's cache of resized pictures
+(`<CacheFolder>/images/`), under the key Navidrome caches it by (the hash, the size, square or not, and
+`CoverArtQuality` / `EnableWebPEncoding`), and only an entry Navidrome has marked complete. The answer is Navidrome's:
+the content type named from the bytes as Go names it, no length (Navidrome streams: the body is chunked), the
+picture's hash as `ETag` (a resized one has a validator of its own), the state's time as `Last-Modified`,
+`Cache-Control: public, max-age=31536000, immutable` when the id asked for carries the picture's current hash and
+`public, no-cache` otherwise, and 304 for a matching `If-None-Match`. No player is registered for a cover, as in
+Navidrome. A read from Navidrome's cache does not tell Navidrome the entry was used: when the cache is full, Navidrome
+may drop an entry sooner than it would have, and make it again when asked.
 
 **The player.** Navidrome registers a player for every Subsonic request: it finds it by the `nd-player-…` cookie, else
 by user, client name (`c`) and the browser family it reads from `User-Agent`, else makes one; it writes the player's
@@ -390,6 +412,8 @@ the gateway for the requests it answers here (the same code as for `tokenInfo`).
 | `EnableMediaFileCoverArt` | on | whether a song with a picture of its own has a `mf-` cover id |
 | `Subsonic.ArtistParticipations` | off | an artist's `albumCount`: the albums they are album artist of, or also those they only appear on |
 | `SmartPlaylistRefreshDelay` | `5s` | a smart playlist's `validUntil` |
+| `LyricsPriority` | `.ttml,.yaml,.yml,.elrc,.lrc,.srt,.txt,embedded` | which lyrics files beside a song come before the lyrics in its tags (a song with one is Navidrome's) |
+| `CoverArtQuality`, `EnableWebPEncoding`, `ImageCacheSize`, `CacheFolder` | `75`, off, `100MB`, `cache` in the data folder | where a resized cover is in Navidrome's cache, and whether there is one (`0`: none) |
 | `Search.Backend`, `Search.FullString` | `fts`, off | `legacy` or on: `search3` goes to Navidrome |
 | `Subsonic.DefaultReportRealPath` | off | nothing here: Navidrome gives it to a new player, and the player's own setting is what is read |
 
@@ -407,6 +431,8 @@ Where it knowingly differs from Navidrome:
   The order itself is another than Navidrome's would have been (both are random).
 - **`contributors`** (a song's composers, performers, …) and an artist's **`roles`** come sorted by role; Go lists the
   roles from a map, in another order every time.
+- **A cover is read into memory** before it is sent (at most 64 MiB; a larger one is Navidrome's to stream), and a
+  resized cover read from Navidrome's cache does not count as a use in Navidrome's own bookkeeping of that cache.
 - **A search whose query fails in SQLite** (none was found: Navidrome's query building is what guards FTS5's syntax,
   and it is ported with its tests) would go to Navidrome, which logs the error and answers with empty lists.
 - **Compression**: gzip at Navidrome's level, but another encoder's bytes (the same content); a client that takes
@@ -537,7 +563,12 @@ pushes linux/amd64 and linux/arm64, tagged `latest`, the Cargo version and `sha-
   starred); `getPlaylists` in Navidrome's bytes (who sees what, `readonly`, `validUntil` and
   `SmartPlaylistRefreshDelay`, the minimal and legacy clients); `getPlaylist` (the order, songs that are gone,
   someone else's private one, a synced one, smart ones going to Navidrome); `getPlayQueue` (the current song among
-  what is left, none saved, all gone);
+  what is left, none saved, all gone); `getLyricsBySongId` in Navidrome's bytes, with real lyrics files on disk going
+  to Navidrome, `LyricsPriority`, `enhanced`; `getCoverArt` with real files: a folder's cover and one from the image
+  store as they are, the headers, 304, the resize cache (an entry without its marker is not served, each size and
+  shape and encoding setting its own entry, `ImageCacheSize` 0), and everything that stays Navidrome's (discs, no
+  state, no picture, a changed file, a missing one, an item that is gone or not the user's, bytes that are no
+  picture); `getScanStatus` going to Navidrome;
 - unit tests of the library's pure parts: Go's JSON (floats, strings, omitted fields), songs and albums against
   answers of the real Navidrome, cover art ids, made-up and real paths, `appendSuffix`, content types, the sort orders
   with every setting (the ORDER BY clauses Navidrome logs), squirrel's conditions, Go's `toSnakeCase`, the list
@@ -545,7 +576,8 @@ pushes linux/amd64 and linux/arm64, tagged `latest`, the Cargo version and `sha-
   participants, the player cookie; the search syntax against every case of Navidrome's
   `persistence/sql_search_fts_test.go` (`buildFTS5Query`, the degraded flag, `containsCJK`) and the search
   statements against the ones Navidrome logs; Go's lowercasing (`İ`, `ı`) and its list of accents; smart playlist
-  rules and artist statistics as stored;
+  rules and artist statistics as stored; stored lyrics as Go's decoder reads them, the order of lyrics sources,
+  cover ids, the paths of Navidrome's image store and cache, content types from bytes, `If-None-Match`;
 - `tests/connect_vectors.rs`: the protocol's shared vectors (`docs/protocol/connect-vectors.json`) replayed on the
   session logic: 14 cases, 157 steps, each compared exactly;
 - `tests/connect.rs`: Sonus Connect version 2 over its real WebSocket through the gateway, with a fake Navidrome that
@@ -579,6 +611,43 @@ These start this server as its image runs it: `cargo run`, which starts Navidrom
 database.
 
 ## Checked against the real Navidrome
+
+### The library's reads (phase 3, part 3), 2026-11-25
+
+Same machine and Navidrome. The golden database now comes with Navidrome's image store (`tools/fixtures`), so a copy
+has the pictures its artwork state points at:
+
+- `node tools/contract/diff.mjs --go-vs-gateway`: 442 of 442 the same as Navidrome alone, 328 answered by this
+  server itself; three runs in a row. 41 requests were added: lyrics from the row (synced, unsynced, none, CJK),
+  without an id, with the wrong kind of id, a lyrics file beside the song and `enhanced` going to Navidrome; covers
+  as they are from a folder and from the image store, by their hash (kept for good), by another hash, by an old id's
+  time stamp, with `If-None-Match` (the picture's validator, a weak one, `*`, another), sizes below 0 and not a
+  number, in XML, as three users, a playlist's cover and another user's private one; resized covers the first time
+  (Navidrome's) and again 1.5 s later (served here from Navidrome's cache: the same bytes, `ETag`, `Last-Modified`
+  and `Cache-Control`), square, by hash, 304; and what stays Navidrome's (discs, a song's own cover without state,
+  no picture, unknown ids, no id). `ETag`, `Last-Modified` and `Cache-Control` are compared for every answer that is
+  not JSON. With `corpus/writes.json`: 34 of 34. Two Navidromes: 442 of 442.
+- `node tools/contract/run.mjs --through-gateway`: 131 of 131; Navidrome alone: 123 pass, 8 skipped (Connect v2).
+- `node --test tools/contract/gateway.test.mjs`: 7 of 7; the test of who answers sends nineteen requests to the
+  eleven methods and eight left to Navidrome (a lyrics file, a disc's cover, the scan's status among them).
+- `cargo test`: 259 tests (160 unit, 24 in `tests/library.rs`, 75 in the other integration tests).
+
+- **The Windows client against this server**: `node tools/e2e/acceptance.mjs --arch=ARM64`, all 14 rounds, with
+  `SONUS_TEST_SERVER` pointing at this server (a debug build) in front of the frozen Navidrome, on a library of 53
+  generated songs (five albums of the demo catalogue as tagged WAV with covers and synced `.lrc` files, and the
+  fork's own test files), throwaway users, through the tests' recording proxy: **92 of 92, four skipped** (no DSD
+  song in that library; every large cover already fetched in earlier rounds; two Connect checks that only apply to
+  version 1 or need the demo server's hook). During the run this server answered 317 Subsonic requests itself: 169
+  covers, 32 `search3`, 26 `getPlaylist`, 21 `getPlaylists`, 19 `getAlbumList2`, 15 `getLyricsBySongId`, 14 `ping`,
+  5 `getStarred2`, 4 `getSong`, 3 `getAlbum`, and the Connect WebSockets; and left 29 of the library's reads to
+  Navidrome: 23 covers not resized yet, 4 disc covers, 2 songs with a lyrics file. Nothing failed over to Navidrome
+  for a reason other than those, and the server logged no warning.
+
+Not checked: a library of production's size; covers and lyrics on Linux against the real Navidrome (the paths in
+Navidrome's state are the operating system's own: the same code, and `tests/library.rs` runs on CI's Linux with real
+files); a cover whose cache entry Navidrome evicts or rewrites while it is read here; a song's own cover with
+artwork state (the fixture library's songs have none: checked in `tests/library.rs`); `CoverArtQuality`,
+`EnableWebPEncoding`, `ImageCacheSize` and `LyricsPriority` other than the defaults against the real Navidrome.
 
 ### The library's reads (phase 3, part 2), 2026-11-25
 
@@ -797,7 +866,8 @@ binaries (no Linux here).
   user, and the upgrade; `socket.rs`: one connection; `store.rs`: the session in the database, and the library as a
   user sees it; `extensions.rs`: the merge into `getOpenSubsonicExtensions`.
 - `src/library/`: the library's reads. `mod.rs`: what is answered here and what goes on to Navidrome; `browse.rs`: the
-  methods of part 1, `lists.rs` those of part 2; `query.rs`, `catalog.rs`: Navidrome's queries; `search.rs`: its
+  methods of part 1, `lists.rs` those of part 2, `media.rs` lyrics and covers; `query.rs`, `catalog.rs`: Navidrome's
+  queries; `search.rs`: its
   search syntax; `entities.rs`: albums, songs, artists and playlists as its JSON; `json.rs`: Go's JSON;
   `player.rs`: the player, registered by Navidrome; `natural.rs`: the `NATSORT` collation.
 - `src/jwt.rs`: session tokens; `src/id.rs`: ids and the random strings people type.

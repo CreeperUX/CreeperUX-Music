@@ -112,7 +112,7 @@
 
 ### 阶段 3：曲库读取（L）
 
-第 1、2 部分已完成（2026-11-25）。第 1 部分：响应的基础（Go 的 JSON 写法、专辑和歌曲的字段、按用户的收藏和播放数据、每个用户能看到的范围、会改变输出的配置项），以及 `ping`、`getSong`、`getAlbum`、`getAlbumList2` 四个接口。第 2 部分：`search3`（空查询按表的顺序分页，客户端靠它同步整个曲库；文字查询走 FTS5，查询的构造和排序照 Navidrome 移植；中日韩文字走 LIKE；MusicBrainz ID 直接按 ID 查）、`getStarred2`、`getPlaylists`、`getPlaylist`、`getPlayQueue`。做了什么、哪些请求仍交给 Go 及原因、测了什么，见 `server/README.md` 的 “The library's reads”；安全上的说明见 `server/SECURITY.md`。
+三个部分都已完成（2026-11-25）。第 1 部分：响应的基础（Go 的 JSON 写法、专辑和歌曲的字段、按用户的收藏和播放数据、每个用户能看到的范围、会改变输出的配置项），以及 `ping`、`getSong`、`getAlbum`、`getAlbumList2` 四个接口。第 2 部分：`search3`（空查询按表的顺序分页，客户端靠它同步整个曲库；文字查询走 FTS5，查询的构造和排序照 Navidrome 移植；中日韩文字走 LIKE；MusicBrainz ID 直接按 ID 查）、`getStarred2`、`getPlaylists`、`getPlaylist`、`getPlayQueue`。第 3 部分：`getLyricsBySongId`（数据库里存的内嵌歌词）和 `getCoverArt` 的读取部分。做了什么、哪些请求仍交给 Go 及原因、测了什么，见 `server/README.md` 的 “The library's reads”；安全上的说明见 `server/SECURITY.md`。
 
 - **已定的做法**（第 1 部分）：
   - **只做 JSON**：要 XML 或 JSONP 的请求照旧交给 Go（已由网关核对过登录）。
@@ -125,8 +125,15 @@
   - **智能歌单先交给 Go**（上面两种做法里的第一种）：读取一个智能歌单时 Go 可能重新填充它，这是一次写入；`getPlaylist` 遇到智能歌单就原样转给 Go。歌单列表（`getPlaylists`）里的智能歌单由 Rust 按上次填充的结果列出，Go 在这里本来也不刷新。
   - **带图片的艺人交给 Go**：这样的艺人在回复里带一个由 Go 签名的公开图片链接（`artistImageUrl`），签名用的密钥 Rust 不读。所以 `search3` 或 `getStarred2` 的结果里只要有带图片（或图片还没处理完）的艺人，整条请求转给 Go。客户端同步曲库用的空查询不要艺人（`artistCount=0`），不受影响。
   - **旧式搜索交给 Go**：配置了 `Search.Backend=legacy` 或 `Search.FullString` 时，`search3` 转给 Go。
-- **实测**（冻结版 Navidrome 0.64.2-sonus.10）：差分 401 条请求全部一致，其中 293 条由 Rust 自己回答（搜索语法的移植通过了 Navidrome 自带测试的全部用例）；契约测试 131 项全过；把 Go 的日志开到 debug，被接管的请求在 Go 的日志里没有任何痕迹，只有一次登记用的 `ping`。
-- **还没做的**：第 3 部分（`getLyricsBySongId`、`getCoverArt` 的读取、`getScanStatus`）；正式数据库副本上的差分；Windows 客户端对着 Rust 服务器的验收（三部分都完成后跑）。
+  - **艺人图片链接不做**（2026-11-25 定）：三个 Sonus 客户端都不读 `artistImageUrl`，Rust 不去读签名用的密钥；Go 退役时这个字段一并取消。
+- **第 3 部分定下的做法**：
+  - **`getScanStatus` 仍归 Go**：扫描是否在进行、进度多少，都在 Go 的内存里，数据库里读不到同样的东西。等扫描器搬到 Rust（阶段 7）时再接管。
+  - **歌词**：只回答数据库里存的内嵌歌词。歌曲旁边有歌词文件（`.lrc` 等，按 `LyricsPriority` 排在“内嵌”之前）时，Go 每次请求都要读并解析这个文件，这类歌曲转给 Go。Rust 只看文件在不在，不读它。
+  - **封面**：只在 Go 已经确定了这张图（数据库里有它的状态和哈希）、而且图片就在状态所指的位置时由 Rust 提供：原图来自文件夹里的封面文件（修改时间必须和 Go 记下的一致）或 Go 的图片仓库；缩放后的图只从 Go 的缩放缓存里读，Go 没缩放过的尺寸第一次仍由 Go 生成，之后由 Rust 提供。碟片封面（`dc-…`，每次要在文件夹里找）、还没有状态的图、没有图片的条目（占位图）都转给 Go。缩放本身和缓存的管理留到阶段 5。
+  - **测试环境**：标准数据库现在连同 Go 的图片仓库一起保存和复制，副本里的封面不再依赖后台重新处理的时机。
+- **实测**（冻结版 Navidrome 0.64.2-sonus.10）：差分 442 条请求全部一致，其中 328 条由 Rust 自己回答（搜索语法的移植通过了 Navidrome 自带测试的全部用例；封面的字节和缓存相关的响应头逐项相同）；契约测试 131 项全过；把 Go 的日志开到 debug，被接管的请求在 Go 的日志里没有任何痕迹，只有一次登记用的 `ping`。
+- **Windows 客户端验收**（对着 Rust 服务器，53 首歌的生成曲库）：14 轮 92 项全部通过，4 项跳过（曲库里没有 DSD；大封面在前几轮已取过；两项 Connect 检查只适用于第 1 版或演示服务器）。期间 Rust 自己回答了 317 个曲库请求，另有 29 个按上面的规则转给 Go（23 个第一次缩放的封面、4 个碟片封面、2 首带歌词文件的歌）。
+- **还没做的**：正式数据库副本上的差分；Android 和网页客户端对着 Rust 服务器的实测。
 - **要接管的接口**：`ping`、`getScanStatus`、`getAlbumList2`、`getAlbum`、`getSong`、`search3`、`getPlaylists`/`getPlaylist`、`getPlayQueue`、`getStarred2`、`getLyricsBySongId`，以及 `getCoverArt` 的读取部分（Rust 没命中时交回 Go）。
 - **`search3`**：既要支持空查询分页（客户端靠它同步整个曲库），也要移植 FTS5 搜索。
 - **智能歌单**：两种做法。

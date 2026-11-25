@@ -16,7 +16,9 @@ From nothing, in about 15 seconds (plus a Navidrome build the first time):
 2. finds Navidrome, or builds it from the fork;
 3. runs it on a new data folder, lets it scan, makes the users and their state through its own routes, waits for its
    background artwork work to finish;
-4. writes `tools/fixtures/.work/golden/navidrome.db` and `manifest.json`.
+4. writes `tools/fixtures/.work/golden/navidrome.db` and `manifest.json`, and keeps Navidrome's image store beside
+   them (`golden/artwork/`: the pictures it took out of audio files and made for playlists, by their hash), which
+   the database's artwork state points at. Every copy of the database gets a copy of it.
 
 Everything goes into `tools/fixtures/.work/` (gitignored). Only the generator and this description are committed.
 

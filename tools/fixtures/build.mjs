@@ -13,7 +13,8 @@
 //   Navidrome: --navidrome, else NAVIDROME_EXE, else .work/bin, else built from the fork (NAVIDROME_SRC, default: a
 //   `navidrome` checkout beside this repository's).
 import { createHash, randomBytes } from 'node:crypto';
-import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -224,6 +225,9 @@ export async function buildAll({ navidrome, rebuildNavidrome = false, keepBuild 
   await rm(GOLDEN, { recursive: true, force: true });
   await mkdir(GOLDEN, { recursive: true });
   await copyFile(join(build, 'navidrome.db'), join(GOLDEN, 'navidrome.db'));
+  // Navidrome's image store: the pictures it took out of audio files, by their hash. The database's artwork state
+  // points at them, so a copy of the database without them has covers Navidrome must work out again.
+  if (existsSync(join(build, 'artwork'))) await cp(join(build, 'artwork'), join(GOLDEN, 'artwork'), { recursive: true });
   manifest.server.navidrome = exe;
   await writeFile(join(GOLDEN, 'manifest.json'), JSON.stringify(manifest, null, 2));
   if (!keepBuild) await rm(build, { recursive: true, force: true });

@@ -22,6 +22,8 @@
 //   { …, volatile: [paths], unordered: [paths] }                                   the same, for this request only
 //   { …, navidrome: 'why' }                                                       a request to a method the Rust server
 //       answers itself (ANSWERED_BY_RUST) that it must leave to Navidrome all the same, and why
+//   { …, waitMs: 500 }                                                            wait before sending it (for what a
+//       server finishes in the background after its answer: a resized cover written to its cache)
 // The corpus's volatile paths are left out of every comparison (serverVersion, times of the request); its unordered
 // paths are arrays whose order means nothing (Go builds them from maps, in random order): compared sorted.
 // Who answered: a debug build of the Rust server marks the answers it made itself (`x-sonus-answered: rust`).
@@ -45,13 +47,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
 const SALT = 'd1ff5a17';
 const CLIENT = 'sonus-diff';
-const COMPARED_HEADERS = ['content-type', 'content-length', 'content-range', 'accept-ranges'];
+const COMPARED_HEADERS = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified', 'cache-control'];
 // compared for JSON answers too, when either side sends them
 const COMPARED_JSON_HEADERS = ['x-total-count'];
 /** The header a debug build of the Rust server marks its own answers with (server/src/library/mod.rs). */
 export const ANSWERED_HEADER = 'x-sonus-answered';
 /** The Subsonic methods the Rust server answers itself from the database, in JSON, once the request is signed in. */
-export const ANSWERED_BY_RUST = ['ping', 'getSong', 'getAlbum', 'getAlbumList2', 'search3', 'getStarred2', 'getPlaylists', 'getPlaylist', 'getPlayQueue'];
+export const ANSWERED_BY_RUST = ['ping', 'getSong', 'getAlbum', 'getAlbumList2', 'search3', 'getStarred2', 'getPlaylists', 'getPlaylist', 'getPlayQueue', 'getLyricsBySongId', 'getCoverArt'];
 
 // ---------------------------------------------------------------- the corpus
 
@@ -189,7 +191,8 @@ export const EXPECTED = {
 export function mustBeAnsweredByRust(r, answerOfNavidrome) {
   const method = (r.method ?? '').replace(/\.view$/, '');
   if (!ANSWERED_BY_RUST.includes(method) || r.navidrome) return false;
-  if ((r.params && 'f' in r.params && r.params.f !== 'json')) return false;
+  // (a cover is a picture whatever format the request names)
+  if (method !== 'getCoverArt' && (r.params && 'f' in r.params && r.params.f !== 'json')) return false;
   const error = answerOfNavidrome.json?.['subsonic-response']?.error;
   // refused at the sign-in: the method was never reached
   if (error && ([40, 43, 44].includes(error.code) || /^missing parameter: '[uvc]'$/.test(error.message ?? ''))) return false;
@@ -202,6 +205,7 @@ export async function runDiff({ a, b, manifest, corpus, only, expected = [], who
   let byRust = 0;
   for (const e of expected) log(`  expected to differ, and compared with that applied to A: ${e.what}`);
   for (const r of requests) {
+    if (r.waitMs) await new Promise(done => setTimeout(done, r.waitMs));
     const [ra, rb] = await Promise.all([answer(a, r, manifest), answer(b, r, manifest)]);
     for (const e of expected) e.apply(ra);
     const inJson = v => (v.startsWith('json.') ? v : `json.${v}`);

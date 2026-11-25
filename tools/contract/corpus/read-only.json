@@ -266,6 +266,7 @@
     { "name": "getCoverArt album from Navidrome's image store, by its hash", "method": "getCoverArt", "params": { "id": "al-{{album.twoDiscs}}_33401af5b95c979a" } },
     { "name": "getCoverArt album without a picture: Navidrome's placeholder", "method": "getCoverArt", "params": { "id": "al-{{album.accented}}" }, "navidrome": "known to have no picture: Navidrome answers with its placeholder" },
     { "name": "getCoverArt playlist (made by Navidrome), as is", "method": "getCoverArt", "params": { "id": "pl-{{playlist.own}}" } },
+    { "name": "getCoverArt smart playlist", "method": "getCoverArt", "params": { "id": "pl-{{playlist.smart}}" } },
     { "name": "getCoverArt playlist of someone else, public", "method": "getCoverArt", "params": { "id": "pl-{{playlist.otherUser}}" } },
     { "name": "getCoverArt playlist that is someone else's and private: Navidrome's placeholder", "method": "getCoverArt", "params": { "id": "pl-{{playlist.own}}" }, "auth": { "user": "secure", "as": "apiKey" }, "navidrome": "not there for this user" },
     { "name": "getCoverArt artist without a picture: Navidrome's placeholder", "method": "getCoverArt", "params": { "id": "ar-{{artist.kenji}}" }, "navidrome": "known to have no picture" },

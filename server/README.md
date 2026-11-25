@@ -617,8 +617,8 @@ database.
 Same machine and Navidrome. The golden database now comes with Navidrome's image store (`tools/fixtures`), so a copy
 has the pictures its artwork state points at:
 
-- `node tools/contract/diff.mjs --go-vs-gateway`: 442 of 442 the same as Navidrome alone, 328 answered by this
-  server itself; three runs in a row. 41 requests were added: lyrics from the row (synced, unsynced, none, CJK),
+- `node tools/contract/diff.mjs --go-vs-gateway`: 443 of 443 the same as Navidrome alone, 329 answered by this
+  server itself; four runs in a row. 42 requests were added: lyrics from the row (synced, unsynced, none, CJK),
   without an id, with the wrong kind of id, a lyrics file beside the song and `enhanced` going to Navidrome; covers
   as they are from a folder and from the image store, by their hash (kept for good), by another hash, by an old id's
   time stamp, with `If-None-Match` (the picture's validator, a weak one, `*`, another), sizes below 0 and not a
@@ -626,11 +626,17 @@ has the pictures its artwork state points at:
   (Navidrome's) and again 1.5 s later (served here from Navidrome's cache: the same bytes, `ETag`, `Last-Modified`
   and `Cache-Control`), square, by hash, 304; and what stays Navidrome's (discs, a song's own cover without state,
   no picture, unknown ids, no id). `ETag`, `Last-Modified` and `Cache-Control` are compared for every answer that is
-  not JSON. With `corpus/writes.json`: 34 of 34. Two Navidromes: 442 of 442.
+  not JSON. With `corpus/writes.json`: 34 of 34. Two Navidromes: 443 of 443.
 - `node tools/contract/run.mjs --through-gateway`: 131 of 131; Navidrome alone: 123 pass, 8 skipped (Connect v2).
 - `node --test tools/contract/gateway.test.mjs`: 7 of 7; the test of who answers sends nineteen requests to the
   eleven methods and eight left to Navidrome (a lyrics file, a disc's cover, the scan's status among them).
-- `cargo test`: 259 tests (160 unit, 24 in `tests/library.rs`, 75 in the other integration tests).
+- `node --test tools/contract/auth-routes.test.mjs`: 6 of 6, as before.
+- `cargo test`: 267 tests (160 unit, 24 in `tests/library.rs`, 83 in the other integration tests).
+- **A difference that came and went is explained and gone.** Part 2 saw, once, a smart playlist's `coverArt` differ
+  between the two servers. The cause was in the golden database, not in either server: the smart playlist had no
+  artwork state (Navidrome makes a playlist's cover when the playlist is changed through the Subsonic API, and that
+  one was not), so each Navidrome made the cover a few seconds after it started, and the two servers of a comparison
+  do not start at the same moment. The build of the fixtures now has Navidrome settle every playlist's cover.
 
 - **The Windows client against this server**: `node tools/e2e/acceptance.mjs --arch=ARM64`, all 14 rounds, with
   `SONUS_TEST_SERVER` pointing at this server (a debug build) in front of the frozen Navidrome, on a library of 53

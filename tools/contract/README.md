@@ -164,8 +164,8 @@ Each side gets its own copy of the golden database. Options: `--only <text>` (re
 `--json <file>` (the whole report). It exits with 1 when anything differs. `node --test tools/contract/diff.test.mjs`
 tests the runner itself.
 
-Results so far (Navidrome 0.64.2-sonus.10): `corpus/read-only.json`, 442 requests, and `corpus/writes.json`, 34, come
-out identical between Navidrome and the Rust server in front of its own Navidrome (328 of the 442 answered by the
+Results so far (Navidrome 0.64.2-sonus.10): `corpus/read-only.json`, 443 requests, and `corpus/writes.json`, 34, come
+out identical between Navidrome and the Rust server in front of its own Navidrome (329 of the 443 answered by the
 Rust server itself), and between two Navidromes.
 
 **Who answered.** A debug build of the Rust server marks the answers it made itself from the database
@@ -247,6 +247,10 @@ Found while writing these, all checked by the suite or the corpora:
   it once). Read by its owner it changes `changed` and carries `validUntil`.
 - After start-up Navidrome works through `artwork_queue` in the background, and cover art ids change as it goes
   (`al-<id>` becomes `al-<id>_<hash>`). The build waits for the queue to empty, so every copy answers the same.
+- A few seconds after every start Navidrome also looks for items without artwork state and makes their covers. A
+  playlist gets its cover when it is changed through the Subsonic API; a smart playlist made through the native API
+  has none until then (or until its cover is asked for). The build asks for every playlist's cover and waits for the
+  state, or two servers started a moment apart would answer different ids for a while.
 - Artist `roles` come in random order (a Go map); so do `getSimilarSongs2`'s songs.
 - `sortName` lowercases as Go does: `İnce Yol` → `ince yol`, `Işık` → `isık` (Rust's `to_lowercase` gives `i̇nce yol`).
 - A song's and an album's `year` is the original date's when there is one (2015, not 2019).

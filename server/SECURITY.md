@@ -488,13 +488,27 @@ whose frames claim more than its header cannot make it allocate more. Only JPEG,
 WebP with ffmpeg) is Navidrome's; animated WebP and PNG are served as they are.
 
 **CPU and memory.** At most two resizes at once, on blocking threads; a request waits at most 10 s for its turn
-(Navidrome gives `getCoverArt` 10 s), then goes to Navidrome. The output is never larger than the size asked for nor
-than the picture (never enlarged), so it is at most the original's pixel count.
+(Navidrome gives `getCoverArt` 10 s), then goes to Navidrome. A fitted output is never larger than the size asked for
+nor than the picture (never enlarged), so it is at most the original's pixel count. A **square** is a canvas of
+size × size whatever the picture's own area, so a picture of extreme shape (65535 × 1, within the pixel cap) asked for
+as a square at its own size would need gigabytes: a square canvas over 64 Mi pixels (above 8192 × 8192) is never
+made here, and the original is served as it is, under the resized validator. This is a deliberate difference:
+Navidrome allocates such a canvas (`image.NewNRGBA(size, size)`) and may run out of memory.
 
 **The cache.** Resized covers are kept in a folder of this server's own (`<CacheFolder>/sonus-images`), bounded by
 `ImageCacheSize` (Navidrome's; `0`: none), the same file cache as the transcoding cache (named by the SHA-256 of the
 representation's key, written whole then renamed, least recently used out first). Navidrome's own cache of resized
 covers is still read first and never written.
+
+**Disc covers** (`src/library/disc.rs`) are looked for at every request, as Navidrome does: among the image files the
+scanner listed in the album's folders (rows of `folder`: path, name, `image_files`), the file named by
+`DiscArtPriority`'s patterns or the disc's subtitle, else the picture embedded in the disc's first song. The client
+names the album and the disc number only; every path read is the library's folder joined with the scanner's relative
+path, checked to stay inside it (`inside_library`), opened only when it is a regular file of at most 64 MiB. A song's
+embedded picture is read with lofty (pure Rust) for mp3, flac, m4a, ogg and opus only; anything else, or a file lofty
+cannot read, is Navidrome's (which then asks TagLib and ffmpeg). A file that is listed but cannot be opened is
+Navidrome's (it goes on with the next candidate), so an I/O fault never changes which picture is chosen. The patterns
+are the owner's setting, matched as Go's `filepath.Match` (a malformed one matches nothing).
 
 **Placeholders.** Navidrome's two placeholder pictures are compiled in and served as they are, with
 `Cache-Control: no-store` and no validators, exactly where Navidrome serves them: no id, an item settled without a

@@ -1685,3 +1685,65 @@ async fn placeholders_as_navidrome_sends_them() {
     assert_eq!(headers["content-length"], artist.len().to_string().as_str());
     assert!(w.reached().is_empty(), "Navidrome saw nothing");
 }
+
+/// Album Blue in folder `a` (its cover.jpg, and disc2.png numbered for disc 2), under the library's root folder.
+fn add_folders(w: &World, images: &str) {
+    let db = w.db();
+    db.execute("INSERT INTO folder (id, library_id, path, name, parent_id, num_audio_files) VALUES ('f-root', 1, '', '.', '', 0)", []).unwrap();
+    db.execute(
+        "INSERT INTO folder (id, library_id, path, name, parent_id, num_audio_files, image_files, images_updated_at) VALUES ('f-a', 1, '', 'a', 'f-root', 2, ?1, '2026-11-25 10:00:00+01:00')",
+        [images],
+    )
+    .unwrap();
+    db.execute("UPDATE album SET folder_ids = '[\"f-a\"]' WHERE id = 'al-b'", []).unwrap();
+    db.execute("UPDATE media_file SET folder_id = 'f-a' WHERE album_id = 'al-b'", []).unwrap();
+}
+
+#[tokio::test]
+async fn a_discs_cover_is_looked_for_as_navidrome_looks_for_it() {
+    let (w, music, _data) = world_with_pictures().await;
+    add_folders(&w, r#"["cover.jpg","disc2.png"]"#);
+    std::fs::write(music.join("a").join("disc2.png"), PNG).unwrap();
+    // disc 1: no file numbered for it, so the first match further down the priority: cover.jpg
+    let (status, headers, body) = w.cover("id=dc-al-b:1", None).await;
+    assert_eq!((status, body.as_slice()), (StatusCode::OK, JPEG));
+    assert_eq!(headers[library::ANSWERED_HEADER], "rust");
+    // validated by the newest of the album's times and its folders' image times, and by the priority
+    let newest = chrono::DateTime::parse_from_rfc3339("2026-11-25T10:00:00+01:00").unwrap().timestamp_nanos_opt().unwrap();
+    let key = format!("al-b:1|{newest}|disc*.*, cd*.*, cover.*, folder.*, front.*, discsubtitle, embedded");
+    assert_eq!(headers["etag"], format!("\"{key}.0.false.q75\""));
+    assert_eq!(headers["last-modified"], "Wed, 25 Nov 2026 09:00:00 GMT");
+    assert_eq!(headers["cache-control"], "public, no-cache");
+    // disc 2: its own numbered file
+    let (_, headers, body) = w.cover("id=dc-al-b:2", None).await;
+    assert_eq!((body.as_slice(), headers["content-type"].to_str().unwrap()), (PNG, "image/png"));
+    // a song without a picture of its own shows its disc's
+    assert_eq!(w.cover("id=mf-s-2", None).await.2, JPEG);
+    // an album bob may not read: Navidrome's error
+    let bob = w.request(Request::get(format!("/rest/getCoverArt?{BOB}&id=dc-al-b:1")).body(empty()).unwrap()).await;
+    assert_eq!(String::from_utf8(bob.2).unwrap(), failed(70, "Artwork not found"));
+    // what stays Navidrome's: a disc id it cannot read
+    w.navidromes(&format!("/rest/getCoverArt?{ALICE}&id=dc-al-b")).await;
+    assert!(w.reached().iter().all(|t| !t.contains("dc-al-b%3A1") && !t.contains("dc-al-b:1")));
+}
+
+#[tokio::test]
+async fn a_disc_without_a_picture_shows_its_albums() {
+    let options =
+        |data: &Path| LibraryOptions { data_folder: data.to_string_lossy().into_owned(), disc_art_priority: "disc*.*".into(), ..LibraryOptions::default() };
+    let data = std::env::temp_dir().join(format!("sonus-library-disc-{}-{}", std::process::id(), WORLDS.fetch_add(1, Ordering::Relaxed)));
+    std::fs::create_dir_all(&data).unwrap();
+    let w = world_with(options(&data), true).await;
+    // nothing matches the priority: the album's settled cover, under its own validator
+    w.db().execute("UPDATE item_artwork SET source = 'embedded' WHERE item_id = 'al-b'", []).unwrap();
+    let stored = data.join("artwork").join("hashed").join("90").join("46");
+    std::fs::create_dir_all(&stored).unwrap();
+    std::fs::write(stored.join(format!("{FOLDER_HASH}.jpg")), JPEG).unwrap();
+    w.db().execute("INSERT OR IGNORE INTO artwork (hash, mime) VALUES (?1, 'image/jpeg')", [FOLDER_HASH]).unwrap();
+    w.db().execute("INSERT OR REPLACE INTO item_artwork (item_kind, item_id, hash, source, updated_at) VALUES ('al', 'al-b', ?1, 'embedded', '2026-11-24 23:42:38.07+01:00')", [FOLDER_HASH]).unwrap();
+    add_folders(&w, r#"["cover.jpg"]"#);
+    let (status, headers, body) = w.cover(&format!("id=dc-al-b:1_{FOLDER_HASH}"), None).await;
+    assert_eq!((status, body.as_slice()), (StatusCode::OK, JPEG));
+    assert_eq!(headers["etag"], format!("\"{FOLDER_HASH}\""), "the album's picture, as it is");
+    assert_eq!(headers["cache-control"], "public, max-age=31536000, immutable", "the hash the client asked for is the album picture's");
+}

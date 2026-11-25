@@ -194,6 +194,8 @@ export function buildCorpus(db, { seed = 1, covers = false, streams = false } = 
     const ids = [
       ...sample(albums, 6, rnd).map(a => `al-${a.id}`), ...sample(songs, 4, rnd).map(s => `mf-${s.id}`),
       ...sample(artists, 3, rnd).map(a => `ar-${a.id}`), ...playlists.slice(0, 3).map(p => `pl-${p}`),
+      // discs: looked for in the album's folders at every request
+      ...sample(albums, 4, rnd).map(a => `dc-${a.id}:1`),
     ];
     for (const id of ids) {
       requests.push({ name: `getCoverArt ${id}`, method: 'getCoverArt', params: { id }, auth: { user: keys[0] } });

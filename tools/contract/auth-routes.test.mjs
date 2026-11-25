@@ -218,10 +218,20 @@ test('request bodies are bounded the same way: 8 KB under /auth, 4 MiB to the na
   const { listener } = servers.users;
   const seen = await same(servers, async base => {
     const session = (await post(base, '/login', creds(listener))).json.token;
+    // A server that refuses a body answers before it has read it, and may close the connection while the client is
+    // still sending its megabytes: the client then sees a reset instead of the answer, depending on timing alone (the
+    // gateway reads and discards up to 32 MiB to avoid it, Navidrome does not). What is tested is the answer, so a
+    // request that fails on the network, and only that, is sent again (at most three times).
     const send = async (path, bytes, type = 'application/json') => {
-      const res = await fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': type, 'X-ND-Authorization': `Bearer ${session}` }, body: Buffer.alloc(bytes, 0x20) });
-      const text = await res.text();
-      return [res.status, res.status === 413 ? text : ''];
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const res = await fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': type, 'X-ND-Authorization': `Bearer ${session}` }, body: Buffer.alloc(bytes, 0x20) });
+          const text = await res.text();
+          return [res.status, res.status === 413 ? text : ''];
+        } catch (e) {
+          if (attempt >= 3) throw e;
+        }
+      }
     };
     return [
       ['/auth: a sign-in within 8 KB', (await post(base, '/login', { ...creds(listener), padding: 'x'.repeat(7000) })).status],

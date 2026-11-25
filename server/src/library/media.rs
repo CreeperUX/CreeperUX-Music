@@ -216,9 +216,9 @@ fn is_image_hash(text: &str) -> bool {
 
 fn parse_cover_id(text: &str) -> Option<CoverId<'_>> {
     let (kind, rest) = text.split_once('-')?;
-    // albums, songs, playlists, artists: a disc's cover (`dc-`) has no state row, and is found by a walk through
-    // the album's folders; a radio's and an id that names an item without its kind are Navidrome's too
-    if !["al", "mf", "pl", "ar"].contains(&kind) {
+    // albums, songs, playlists, artists, discs (found by a walk through the album's folders: disc.rs); a radio's,
+    // and an id that names an item without its kind, are Navidrome's
+    if !["al", "mf", "pl", "ar", "dc"].contains(&kind) {
         return None;
     }
     let (id, suffix) = rest.split_once('_').unwrap_or((rest, ""));
@@ -444,7 +444,7 @@ pub struct PendingResize {
 
 /// `getCoverArt`: a picture Navidrome has settled, as it is or resized; a placeholder where Navidrome gives one.
 pub fn get_cover_art(scope: &Scope) -> Result<Reply, QueryError> {
-    let (params, options) = (scope.params, scope.options);
+    let params = scope.params;
     let text = match string(params, "id") {
         Ok(Some(text)) => text,
         // no id: the album placeholder (an empty id resolves to nothing to serve)
@@ -452,26 +452,48 @@ pub fn get_cover_art(scope: &Scope) -> Result<Reply, QueryError> {
         Err(_) => return Ok(Reply::Navidrome("an id that is not text")),
     };
     let Some(id) = parse_cover_id(text) else {
-        return Ok(Reply::Navidrome("a disc's cover, a radio's, or an id without its kind: Navidrome finds those"));
+        return Ok(Reply::Navidrome("a radio's cover, or an id without its kind: Navidrome finds those"));
     };
-    if id.kind == "mf" && !options.enable_media_file_cover_art {
-        return Ok(Reply::Navidrome("EnableMediaFileCoverArt is off: a song's cover is its disc's or album's"));
-    }
     let size = int_or(params, "size", 0).max(0);
     let square = std::str::from_utf8(params.get("square")).map(|v| ["true", "on", "1"].contains(&v.to_lowercase().as_str())).unwrap_or(false);
+    // the hash the client asked for decides the caching of whatever picture answers, as in imghttp
+    serve(scope, id.kind, id.id, size, square, id.hash)
+}
+
+/// `Artwork.Get` for one id: a settled picture, a disc's (looked for now), a song's falling back to its disc's or
+/// album's, or a placeholder.
+fn serve(scope: &Scope, kind: &str, item: &str, size: i64, square: bool, requested: &str) -> Result<Reply, QueryError> {
+    let options = scope.options;
+    if kind == "dc" {
+        return serve_disc(scope, item, size, square, requested);
+    }
+    if kind == "mf" && !options.enable_media_file_cover_art {
+        // a song's own picture is not shown: its disc's or album's
+        return serve_song_fallback(scope, item, size, square, requested);
+    }
+    let id = CoverId { kind, id: item, hash: requested };
     let Some(state) = state_of(scope, &id)? else {
+        if kind == "mf" {
+            // no row: a song that has a picture of its own is looked for (Navidrome's provisional read, which writes
+            // to the queue); one that has none shows its disc's or album's
+            return match song(scope, item)? {
+                None => Ok(Reply::error(NOT_FOUND, "Artwork not found")),
+                Some(s) if s.has_cover_art => Ok(Reply::Navidrome("a song's own picture with no state yet: Navidrome takes it out of the file")),
+                Some(s) => serve(scope, cover_kind(&s), &cover_item(&s), size, square, requested),
+            };
+        }
         return Ok(Reply::Navidrome("no artwork state yet: Navidrome looks for the picture and notes what it finds"));
     };
     if state.absent {
         // settled absent: the kind's placeholder; a song's falls back to its disc's and album's cover
-        return Ok(if id.kind == "mf" { Reply::Navidrome("a song without its own picture: its disc's or album's") } else { placeholder(id.kind) });
+        return if kind == "mf" { serve_song_fallback(scope, item, size, square, requested) } else { Ok(placeholder(kind)) };
     }
     if state.hash.is_empty() {
         return Ok(Reply::Navidrome("a picture Navidrome cannot find: it looks again (a write)"));
     }
     if !item_exists(scope, &id)? {
         // serveHash: the picture of an item this user does not see is never served
-        return Ok(placeholder(id.kind));
+        return Ok(placeholder(kind));
     }
     let file_backed = state.source == "folder" || state.source == "upload";
     let is_image_file =
@@ -479,56 +501,136 @@ pub fn get_cover_art(scope: &Scope) -> Result<Reply, QueryError> {
     if file_backed && !is_image_file {
         return Ok(Reply::Navidrome("a stored source that is not a picture: Navidrome looks again"));
     }
-    // imghttp.WriteImageHeaders
-    let header = |value: String| HeaderValue::from_str(&value).ok();
-    let etag = if size == 0 && !square { state.hash.clone() } else { representation_tag(&state.hash, size, square, options) };
-    let mut headers: Vec<(HeaderName, HeaderValue)> = Vec::new();
-    let Some(etag_value) = header(format!("\"{etag}\"")) else { return Ok(Reply::Navidrome("a validator no header carries")) };
-    headers.push((header::ETAG, etag_value));
     let Some(updated) = gotime::parse(&state.updated_at) else {
         return Ok(Reply::Navidrome("artwork state without its time: Navidrome's error"));
     };
-    if let Some(value) = header(updated.format("%a, %d %b %Y %H:%M:%S GMT").to_string()) {
-        headers.push((header::LAST_MODIFIED, value));
+    let etag = if size == 0 && !square { state.hash.clone() } else { representation_tag(&state.hash, size, square, options) };
+    let Some(headers) = image_headers(&etag, Some(updated), requested, &state.hash) else { return Ok(Reply::Navidrome("a validator no header carries")) };
+    let original = || original(options, &state);
+    let missing = "the picture's bytes are not where Navidrome's state says: Navidrome looks again";
+    match source(scope, &etag, size, square, headers, &original) {
+        Served::Reply(reply) => Ok(reply),
+        Served::Missing | Served::TooBig => Ok(Reply::Navidrome(missing)),
     }
-    // immutable only for the client that asked for this very picture; anyone else revalidates
-    let caching = if !id.hash.is_empty() && id.hash == state.hash { "public, max-age=31536000, immutable" } else { "public, no-cache" };
-    headers.push((header::CACHE_CONTROL, HeaderValue::from_static(caching)));
-    // serveSource: the picture as it is, or a resized one under its own validator
+}
+
+/// What `serveSource` made of a picture.
+enum Served {
+    Reply(Reply),
+    /// No bytes to open.
+    Missing,
+    /// Over `MaxImageSize` for a resize.
+    TooBig,
+}
+
+/// `serveSource`: the picture as it is, or resized under its own validator (cached by Navidrome or here, else made).
+fn source(scope: &Scope, etag: &str, size: i64, square: bool, headers: Vec<(HeaderName, HeaderValue)>, open: &dyn Fn() -> Option<Vec<u8>>) -> Served {
+    let options = scope.options;
+    let not_modified = || scope.if_none_match.is_some_and(|sent| if_none_match(sent, etag));
     let bytes = if size == 0 && !square {
-        match original(options, &state) {
+        match open() {
             Some(bytes) => bytes,
-            None => return Ok(Reply::Navidrome("the picture's bytes are not where Navidrome's state says: Navidrome looks again")),
+            None => return Served::Missing,
         }
     } else {
         let key = format!("h-{etag}");
         // made before, by Navidrome or here
-        match resized(options, &etag).or_else(|| scope.images.and_then(|cache| cache.get(&key)).and_then(|path| read_picture(&path))) {
+        match resized(options, etag).or_else(|| scope.images.and_then(|cache| cache.get(&key)).and_then(|path| read_picture(&path))) {
             Some(bytes) => bytes,
             None => {
                 if options.enable_webp_encoding {
-                    return Ok(Reply::Navidrome("WebP encoding is on: Navidrome's encoder"));
+                    return Served::Reply(Reply::Navidrome("WebP encoding is on: Navidrome's encoder"));
                 }
-                let Some(original) = original(options, &state) else {
-                    return Ok(Reply::Navidrome("the picture's bytes are not where Navidrome's state says: Navidrome looks again"));
-                };
+                let Some(original) = open() else { return Served::Missing };
                 if original.len() as u64 > max_image_bytes(options) {
-                    return Ok(Reply::Navidrome("a picture over MaxImageSize: Navidrome's error"));
+                    return Served::TooBig;
                 }
-                if scope.if_none_match.is_some_and(|sent| if_none_match(sent, &etag)) {
-                    return Ok(Reply::NotModified { headers });
+                if not_modified() {
+                    return Served::Reply(Reply::NotModified { headers });
                 }
                 let quality = u8::try_from(options.cover_art_quality.clamp(1, 100)).unwrap_or(75);
                 let size = u32::try_from(size).unwrap_or(u32::MAX);
-                return Ok(Reply::Resize(Box::new(PendingResize { original, size, square, quality, key, headers })));
+                return Served::Reply(Reply::Resize(Box::new(PendingResize { original, size, square, quality, key, headers })));
             }
         }
     };
-    let Some(content_type) = sniff(&bytes) else { return Ok(Reply::Navidrome("a picture of a kind Go would name")) };
-    if scope.if_none_match.is_some_and(|sent| if_none_match(sent, &etag)) {
-        return Ok(Reply::NotModified { headers });
+    let Some(content_type) = sniff(&bytes) else { return Served::Reply(Reply::Navidrome("a picture of a kind Go would name")) };
+    if not_modified() {
+        return Served::Reply(Reply::NotModified { headers });
     }
-    Ok(Reply::Bytes { content_type, body: bytes, headers })
+    Served::Reply(Reply::Bytes { content_type, body: bytes, headers })
+}
+
+/// `imghttp.WriteImageHeaders` for a picture that is no placeholder: the validator, its time, and immutable only for
+/// the client that asked for this very picture's hash.
+fn image_headers(etag: &str, updated: Option<chrono::DateTime<chrono::Utc>>, requested: &str, hash: &str) -> Option<Vec<(HeaderName, HeaderValue)>> {
+    let mut headers = vec![(header::ETAG, HeaderValue::from_str(&format!("\"{etag}\"")).ok()?)];
+    if let Some(updated) = updated {
+        headers.push((header::LAST_MODIFIED, HeaderValue::from_str(&updated.format("%a, %d %b %Y %H:%M:%S GMT").to_string()).ok()?));
+    }
+    let caching = if !requested.is_empty() && requested == hash { "public, max-age=31536000, immutable" } else { "public, no-cache" };
+    headers.push((header::CACHE_CONTROL, HeaderValue::from_static(caching)));
+    Some(headers)
+}
+
+/// A song as the user may read it: whether it has a picture of its own, its disc and its album.
+fn song(scope: &Scope, id: &str) -> Result<Option<Song>, QueryError> {
+    let list = ListOptions { filter: Some(Cond::eq("media_file.id", Value::Text(id.to_string()))), ..ListOptions::default() };
+    Ok(query::songs(scope.conn, scope.viewer, scope.options, &list)?.into_iter().next())
+}
+
+/// `MediaFile.DiscCoverArtID`: the disc's cover when the song has a disc number, else the album's.
+fn cover_kind(song: &Song) -> &'static str {
+    if song.disc_number > 0 { "dc" } else { "al" }
+}
+
+fn cover_item(song: &Song) -> String {
+    if song.disc_number > 0 { super::disc::disc_id(&song.album_id, song.disc_number) } else { song.album_id.clone() }
+}
+
+/// A song without a picture of its own shown: its disc's or album's (`serveMediaFile`).
+fn serve_song_fallback(scope: &Scope, item: &str, size: i64, square: bool, requested: &str) -> Result<Reply, QueryError> {
+    match song(scope, item)? {
+        None => Ok(Reply::error(NOT_FOUND, "Artwork not found")),
+        Some(s) => serve(scope, cover_kind(&s), &cover_item(&s), size, square, requested),
+    }
+}
+
+/// `serveDisc`: the disc's own picture, looked for now and validated by the album's and its folders' times; none:
+/// the album's cover.
+fn serve_disc(scope: &Scope, item: &str, size: i64, square: bool, requested: &str) -> Result<Reply, QueryError> {
+    let options = scope.options;
+    let Some((album_id, number)) = super::disc::parse_disc_id(item) else {
+        return Ok(Reply::Navidrome("a disc id Navidrome cannot read: its error"));
+    };
+    let reader = match super::disc::load(scope.conn, scope.viewer, album_id, number)? {
+        Ok(Some(reader)) => reader,
+        Ok(None) => return Ok(Reply::error(NOT_FOUND, "Artwork not found")),
+        Err(why) => return Ok(Reply::Navidrome(why)),
+    };
+    let Some(nanos) = reader.cache_time.timestamp_nanos_opt() else { return Ok(Reply::Navidrome("a disc's time out of Go's range")) };
+    // the cache key: the id, the newest time of the album and its images, and the priority
+    let key = format!("{item}|{nanos}|{}", options.disc_art_priority);
+    let etag = representation_tag(&key, size, square, options);
+    let Some(headers) = image_headers(&etag, Some(reader.cache_time), requested, "") else { return Ok(Reply::Navidrome("a validator no header carries")) };
+    let selected = std::cell::RefCell::new(None);
+    let open = || {
+        let picked = reader.select(&options.disc_art_priority);
+        let bytes = match &picked {
+            super::disc::Selected::Picture(bytes) => Some(bytes.clone()),
+            _ => None,
+        };
+        *selected.borrow_mut() = Some(picked);
+        bytes
+    };
+    match source(scope, &etag, size, square, headers, &open) {
+        Served::Reply(reply) => Ok(reply),
+        // nothing for the disc (or too big to resize): the album's cover
+        Served::Missing | Served::TooBig => match selected.into_inner() {
+            Some(super::disc::Selected::Navidromes(why)) => Ok(Reply::Navidrome(why)),
+            _ => serve(scope, "al", album_id, size, square, requested),
+        },
+    }
 }
 
 /// `maxImageBytes`: `MaxImageSize` (default 20 MB; unreadable: the default).
@@ -609,7 +711,8 @@ mod tests {
         assert_eq!(parse_cover_id("pl-abc_0"), Some(CoverId { kind: "pl", id: "abc", hash: "" }), "an old id's time stamp is no hash");
         assert_eq!(parse_cover_id("al-abc_9046B47AC73F2574").unwrap().hash, "", "a hash is lowercase");
         assert_eq!(parse_cover_id("ar-a-b_c_d"), Some(CoverId { kind: "ar", id: "a-b", hash: "" }));
-        for navidromes in ["dc-abc:1", "ra-abc", "abc", "", "al-", "xx-abc", "al"] {
+        assert_eq!(parse_cover_id("dc-abc:1"), Some(CoverId { kind: "dc", id: "abc:1", hash: "" }), "a disc: looked for here (disc.rs)");
+        for navidromes in ["ra-abc", "abc", "", "al-", "xx-abc", "al"] {
             assert_eq!(parse_cover_id(navidromes), None, "{navidromes}");
         }
     }

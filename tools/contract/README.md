@@ -307,6 +307,13 @@ node tools/contract/diff.mjs --db <navidrome.db> --corpus tools/fixtures/.work/<
   order; a song's `contributors`, which Go lists role by role in the order it walks the song's participants map (two
   Navidromes differ as soon as a song has two roles besides its artists); and `getSimilarSongs2`'s songs, which Navidrome shuffles (without Last.fm it picks from the artist's own).
 - Requests are the same bytes on both sides: tokens use a fixed salt.
+- An answer that ends short of its announced length (a transcode with `estimateContentLength`) is recorded as such
+  (`ended`), not thrown.
+- **Transcodes** need an ffmpeg, the same on both sides: put its folder first on the `PATH` (Navidrome's starter keeps the
+  `PATH` and drops other `ND_` variables; the Rust server looks for `ffmpeg` the same way). `server/README.md` names the
+  build used. Without one, both sides fail alike and the transcode requests compare nothing.
+- `--state`: what is left in the artwork tables of a playlist deleted during the run is compared as one leftover per
+  side, not row by row: Navidrome's cover worker meets it before or after the deletion at its own moment.
 
 ### Adding a case
 

@@ -470,9 +470,40 @@ look up in the server's own time zone is left to Navidrome rather than guessed.
 comes from Navidrome's own table by the song's suffix, never from the file's contents. Nothing from the request is
 reflected except the numbers of a range.
 
-**Left to Navidrome, as before:** anything Navidrome would transcode (a format asked for, a bit rate below the song's,
-a player with a transcoding or a lower bit rate), downloads (`download`, not used by Sonus clients), and every error
-Navidrome words with a path in it (a file that cannot be opened).
+**Left to Navidrome, as before:** downloads (`download`, not used by Sonus clients), and every error Navidrome words
+with a path in it (a file that cannot be opened).
+
+## Media: transcoding
+
+`src/library/transcode.rs` (the decision, ffmpeg's arguments), `src/library/transcoder.rs` (the processes, the caps,
+the cache). The first code here that starts programs.
+
+**What runs.** Only the program found as Navidrome finds it (`FFmpegPath`, else `ffmpeg` on the `PATH`), only for
+Navidrome's four built-in transcodings (mp3, opus, aac, flac) and only while the stored command for that format is
+Navidrome's built-in one: a command of the owner's own is a template with `%s`, which only Navidrome fills in (it
+stays Navidrome's). The program is started directly, never through a shell, with a fixed list of arguments; what
+comes from the request is numbers only (the bit rate, the offset), each parsed as an integer, and the target format,
+which must be one of the four. The file is the song's (the same lookup and path check as for its own bytes) and is
+given to ffmpeg as `file:<absolute path>` with `-protocol_whitelist file` and `-nostdin`: a stored path cannot be read
+as an option or as another protocol, and nothing in the file (a playlist, an `ffconcat`, an HLS manifest posing as
+audio) can make ffmpeg open anything but local files. Standard input is closed; standard error is kept to 4 KB, for
+the log only.
+
+**Bounds.** At most 16 ffmpeg processes at once, and Navidrome's `Transcoding.MaxConcurrent` and
+`MaxConcurrentPerUser` below that when they are set (over a cap: 429 with `Retry-After: 5`, as Navidrome answers). A
+process that writes nothing for 60 s is killed; one that writes more than 4 GiB is killed. A process whose client has
+gone is killed at once unless its output is going into the cache (as Navidrome lets it finish then, by default); with
+Navidrome's caps or `Transcoding.EnableCancellation` set it is killed in any case, as Navidrome does. Processes are
+killed when their task ends for any reason (`kill_on_drop`).
+
+**The cache.** A folder of this server's own (`<CacheFolder>/sonus-transcoding`, beside Navidrome's), bounded by
+`TranscodingCacheSize` (Navidrome's setting; `0` turns it off): an entry is written to a file of its own and renamed
+when ffmpeg ended well, so a half-written entry is never served (and is deleted at the next start); the least recently
+used entries are deleted when the total is over the size, and an entry bigger than the whole cache is not kept. Its
+name is the SHA-256 of the stream's key (the song's id and time, the bit rate, sample rate, bit depth, channels, format
+and offset): nothing from the client names a file there. A cached entry is served like the song's own file (ranges,
+conditions). One writer per entry; a second request while it is written runs a transcode of its own, uncached.
+
 
 ## Secrets
 
@@ -509,8 +540,9 @@ Navidrome words with a path in it (a file that cannot be opened).
   playlist's cover) and `scrobbles` (the user's own plays), and read `radio` to find an id as Navidrome does and
   `player.scrobble_enabled` for a stopped playback. Covers read `item_artwork` and `artwork`, and files:
   the pictures Navidrome's state names, its image store and its cache of resized pictures. Streams read `media_file`
-  and `library` as `getSong` does, `player.max_bit_rate` and `transcoding_id`, and a song's file (above). Nothing is
-  written there either.
+  and `library` as `getSong` does, `player.max_bit_rate` and `transcoding_id`, `transcoding` (a player's row, and a format's command and default bit
+  rate), and a song's file (above). Nothing is written there either; the only files written are the transcoding
+  cache's, in its own folder.
 - No change to Navidrome's schema, ever, and no VACUUM; the schema is checked at start and the server refuses any
   other. The server's own tables are additive (`CREATE TABLE IF NOT EXISTS`); a `sonus_connect_session` row refers to
   its user (`ON DELETE CASCADE`), which adds one indexed lookup to Navidrome's deleting of a user and nothing else.

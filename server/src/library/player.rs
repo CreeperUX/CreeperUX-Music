@@ -41,6 +41,8 @@ pub struct Player {
     pub report_real_path: bool,
     /// The player has a transcoding set (`transcoding_id`): songs then carry `transcodedSuffix`.
     pub transcodes: bool,
+    /// The transcoding it is set to (`transcoding_id`; empty: none).
+    pub transcoding_id: String,
     /// `MaxBitRate` (0: none): a stream above it is transcoded.
     pub max_bit_rate: i64,
     /// The `Set-Cookie` Navidrome answers this player's requests with.
@@ -146,7 +148,7 @@ impl Players {
         if row_client.as_bytes() != client || row_user != user_id {
             return None;
         }
-        Some(Player { id: player_id.to_string(), report_real_path, transcodes: !transcoding.is_empty(), max_bit_rate, cookie })
+        Some(Player { id: player_id.to_string(), report_real_path, transcodes: !transcoding.is_empty(), transcoding_id: transcoding, max_bit_rate, cookie })
     }
 
     /// One `ping` to Navidrome as this request's user and client: the `Set-Cookie` of the player it registered.

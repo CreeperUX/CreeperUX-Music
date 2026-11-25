@@ -508,7 +508,7 @@ a.cm-meta-strong:focus-visible { outline: 2px solid var(--cx-focus); outline-off
 .cm-tab[aria-current] .ui-icon { color: var(--cx-accent-text); }
 .cm-tab:focus-visible { outline: 2px solid var(--cx-focus); outline-offset: -4px; border-radius: 8px; }
 @media (max-width: 600px) {
-  .cm .cm-bar { display: none; }
+  .cm .cm-bar, .cm .cm-bar-where { display: none; }
   .cm-phone { display: block; }
   .cm[data-route="now"] .cm-mini { display: none; }
   .cm-top { min-height: 56px; }
@@ -523,3 +523,17 @@ a.cm-meta-strong:focus-visible { outline: 2px solid var(--cx-focus); outline-off
   .cm-set { padding: 16px; }
   .cm-codes { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* ---------------------------------------------------------------- Sonus Connect: where the session plays (shell/devices.js) */
+.cm-where { display: flex; align-items: center; gap: 6px; min-width: 0; margin: 0; color: var(--cx-muted); font-size: var(--cx-fs-sm); }
+.cm-where[data-playing="true"] { color: var(--cx-accent-text); font-weight: 600; }
+.cm-where > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cm-where .ui-icon { flex: none; width: 1rem; height: 1rem; }
+/* under the playback bar, Spotify's strip: in the accent while another device plays */
+.cm-bar-where { justify-content: flex-end; padding: 0 16px 6px; margin-top: -4px; }
+.cm-bar-where[data-playing="true"] { justify-content: center; margin: 0; padding: 4px 16px; background: var(--cx-accent); color: var(--cx-on-accent, #fff); font-size: var(--cx-fs-xs, .75rem); }
+.cm-mini-where { font-size: .6875rem; gap: 4px; }
+.cm-mini-where .ui-icon { width: .75rem; height: .75rem; }
+.cm-now-where { justify-content: center; }
+.cm-panel-where { padding: 0 4px 8px; }
+.cm-output[data-elsewhere] .ui-device-button, .ui-pb-volume[data-remote] { color: var(--cx-accent-text); }

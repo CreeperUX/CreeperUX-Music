@@ -66,7 +66,7 @@ const ctx = {
   UI, P, M, adapter, prefs, savePrefs, root,
   t: T,
   lib: { tracks: new Map(), albums: new Map(), artists: new Map(), trackList: [], albumList: [], artistList: [] },
-  playlists: [], player: adapter.player(), queue: [], outputs: [], connection: 'connecting', server: null, source: 'subsonic',
+  playlists: [], player: adapter.player(), queue: [], outputs: [], devices: [], connection: 'connecting', server: null, source: 'subsonic',
   on(type, fn) { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(fn); return () => listeners.get(type)?.delete(fn); },
   emit(type, payload) { for (const fn of [...(listeners.get(type) || [])]) { try { fn(payload); } catch (e) { console.error(e); } } },
   go(path, { replace = false } = {}) { const hash = `#${path.startsWith('/') ? path : `/${path}`}`; if (location.hash === hash) return; if (replace) location.replace(hash); else location.hash = hash; },
@@ -183,6 +183,8 @@ adapter.subscribe(e => {
   else if (e.type === 'playlists') { ctx.playlists = e.playlists; ctx.emit('playlists', e.playlists); }
   else if (e.type === 'track') { ctx.lib.tracks.set(e.track.id, e.track); ctx.lib.trackList = ctx.lib.trackList.map(t => (t.id === e.track.id ? e.track : t)); ctx.emit('track', e.track); }
   else if (e.type === 'outputs') { ctx.outputs = e.outputs; ctx.emit('outputs', e.outputs); }
+  else if (e.type === 'devices') { ctx.devices = e.devices; ctx.emit('devices', e.devices); } // Sonus Connect: the user's devices
+  else if (e.type === 'notice') { if (ctx.S && ctx.ready) UI.toast({ kind: e.kind, message: e.message }, ctx.S); }
   else if (e.type === 'library') { loadLibrary(e.library); ctx.emit('library', e.library); if (e.changed && ctx.ready) ctx.refreshView(); } // a real library changes under us
   else if (e.type === 'connection') {
     ctx.connection = e.status; ctx.emit('connection', e.status);
@@ -264,6 +266,7 @@ function trackScroll() {
 // back to the front, nothing playing): a queue saved since by another device is offered.
 let offeredAt = 0;
 async function offerContinue({ atStart = false } = {}) {
+  if (adapter.connected?.()) return; // Sonus Connect: the session on the server is this already (rule 6), on every device
   if (!adapter.remoteQueue || (!atStart && (ctx.isActive() || Date.now() - offeredAt < 15000))) return;
   offeredAt = Date.now();
   const q = await adapter.remoteQueue().catch(() => null);

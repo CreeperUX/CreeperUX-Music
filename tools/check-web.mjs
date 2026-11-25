@@ -222,28 +222,119 @@ for (const [engine, launch] of engines) {
       assert(!(await audio()).paused, 'audio paused');
       await until(async () => (await barTitle()) === (await app(n => __app.track(n).title, next)), 'bar title');
     });
-    await check('the queue is saved on the server for another device (savePlayQueue)', async () => {
-      const id = await app(() => __app.player.trackId);
-      await app(() => __app.adapter.pause());
-      await until(async () => { const q = (await api('getPlayQueue')).playQueue; return q.current === id && /Sonus/.test(q.changedBy); }, 'server queue current');
-    });
-    await check('another device signs in and is offered to continue where this one stopped', async () => {
-      const ctx2 = await browser.newContext({ viewport: { width: 1280, height: 800 } }), p2 = await ctx2.newPage();
-      watch(p2);
-      const [id, pos] = await app(() => [__app.player.trackId, __app.player.position]);
-      await p2.goto(`${site}/?theme=dark#/`);
-      await p2.locator('.cm-login').waitFor();
-      await signIn(p2);
-      await p2.waitForFunction(() => window.__ready === true, null, { timeout: 60000 });
-      await until(() => app(id => __app.player.trackId === id && __app.player.state === 'paused', id, p2), 'the other device shows the song, paused');
-      assert(Math.abs((await app(() => __app.player.position, undefined, p2)) - pos) < 2, 'position');
-      const toast = p2.locator('.ui-toast').filter({ hasText: '接着听' });
-      await until(() => toast.count(), 'continue toast');
-      await toast.getByRole('button', { name: '接着播放' }).click();
-      await until(async () => { const a = await audio(p2); return !a.paused && Math.abs(a.time - pos) < 4; }, 'plays from the saved position', 8000);
-      await app(() => __app.adapter.pause(), undefined, p2);
-      await ctx2.close();
-    });
+    // Sonus Connect version 2 (docs/protocol/connect.md): on a server that offers it the queue and what plays are the
+    // user's one session, shown by every browser and played by one; without it, the queue is saved for another device
+    const v2 = await app(() => __app.adapter.connected?.() === true);
+    console.log(`    Sonus Connect version 2: ${v2 ? 'offered, the session is on the server' : 'not offered, the queue is this browser\'s own'}`);
+    if (!v2) {
+      await check('the queue is saved on the server for another device (savePlayQueue)', async () => {
+        const id = await app(() => __app.player.trackId);
+        await app(() => __app.adapter.pause());
+        await until(async () => { const q = (await api('getPlayQueue')).playQueue; return q.current === id && /Sonus/.test(q.changedBy); }, 'server queue current');
+      });
+      await check('another device signs in and is offered to continue where this one stopped', async () => {
+        const ctx2 = await browser.newContext({ viewport: { width: 1280, height: 800 } }), p2 = await ctx2.newPage();
+        watch(p2);
+        const [id, pos] = await app(() => [__app.player.trackId, __app.player.position]);
+        await p2.goto(`${site}/?theme=dark#/`);
+        await p2.locator('.cm-login').waitFor();
+        await signIn(p2);
+        await p2.waitForFunction(() => window.__ready === true, null, { timeout: 60000 });
+        await until(() => app(id => __app.player.trackId === id && __app.player.state === 'paused', id, p2), 'the other device shows the song, paused');
+        assert(Math.abs((await app(() => __app.player.position, undefined, p2)) - pos) < 2, 'position');
+        const toast = p2.locator('.ui-toast').filter({ hasText: '接着听' });
+        await until(() => toast.count(), 'continue toast');
+        await toast.getByRole('button', { name: '接着播放' }).click();
+        await until(async () => { const a = await audio(p2); return !a.paused && Math.abs(a.time - pos) < 4; }, 'plays from the saved position', 8000);
+        await app(() => __app.adapter.pause(), undefined, p2);
+        await ctx2.close();
+      });
+    } else {
+      // two browsers signed in as the same user are two devices (each its own id in its own storage)
+      let ctx2 = null, p2 = null;
+      const silent = async (p = page) => { const a = await audio(p); return a.paused || !a.src; };
+      const playable = () => app(([demo, missing]) => __app.lib.trackList.find(t => (demo ? t.codec === 'FLAC' : !/^DSD/.test(t.codec ?? '') && t.id !== missing) && !t.unavailable && t.id !== __app.player.trackId).id, [demo, cat?.missing ?? '']);
+      await check('Sonus Connect: another browser shows what plays here, where, and the position moving; it stays silent', async () => {
+        ctx2 = await browser.newContext({ viewport: { width: 1280, height: 800 } }); p2 = await ctx2.newPage();
+        watch(p2);
+        if (!(await app(() => __app.player.trackId))) await app(id => __app.playContext('album', id), album.id); // run alone (--grep)
+        else if ((await audio()).paused) await app(() => __app.adapter.resume());
+        await until(async () => !(await audio()).paused, 'playing here', 8000);
+        const id = await app(() => __app.player.trackId);
+        await p2.goto(`${site}/?theme=dark#/`);
+        await p2.locator('.cm-login').waitFor();
+        await signIn(p2);
+        await p2.waitForFunction(() => window.__ready === true, null, { timeout: 60000 });
+        await until(() => app(id => __app.player.trackId === id && __app.player.state === 'playing' && __app.player.where?.playing === true, id, p2), 'the other browser shows the song, playing elsewhere');
+        const a = await app(() => __app.player.position, undefined, p2); await sleep(1500);
+        const [b, here] = [await app(() => __app.player.position, undefined, p2), await app(() => __app.player.position)];
+        assert(b - a > 0.8, `the position moves there: ${a.toFixed(1)} → ${b.toFixed(1)} s`);
+        assert(Math.abs(b - here) < 2, `the same position: ${b.toFixed(1)} s there, ${here.toFixed(1)} s here`);
+        assert(await silent(p2), 'the other browser plays audio too');
+        await until(async () => /正在「.+」上播放/.test(await p2.locator('.cm-bar-where').textContent()) && p2.locator('.cm-bar-where').isVisible(), 'its strip says where it plays');
+        assert(await page.locator('.cm-bar-where').isHidden(), 'the playing browser shows a strip about itself');
+        await snap(p2, 'connect-elsewhere');
+        // at phone width: the mini player's third line, and Now playing with the device picker
+        await p2.setViewportSize({ width: 390, height: 844 });
+        await until(async () => /正在「.+」上播放/.test(await p2.locator('.cm-mini-where').textContent()) && p2.locator('.cm-mini-where').isVisible(), 'the mini player says where it plays');
+        await snap(p2, 'connect-phone-mini');
+        await app(() => { location.hash = '#/now'; }, undefined, p2);
+        await until(() => p2.locator('.cm-now .cm-now-devices .ui-device-button').isVisible(), 'Now playing has the device picker');
+        await until(() => p2.locator('.cm-now-where').isVisible(), 'and says where it plays');
+        await snap(p2, 'connect-phone-now');
+        await app(() => { location.hash = '#/'; }, undefined, p2);
+        await p2.setViewportSize({ width: 1280, height: 800 });
+      });
+      await check('Sonus Connect: the other browser\'s controls steer this one: next, pause, one queue, play', async () => {
+        const before = await app(() => __app.player.trackId);
+        await app(() => __app.adapter.next(), undefined, p2);
+        await until(async () => { const id = await app(() => __app.player.trackId), a = await audio(); return id !== before && !a.paused && a.src.includes(`id=${id}`); }, 'this browser plays the next song');
+        const now = await app(() => __app.player.trackId);
+        await until(() => app(id => __app.player.trackId === id, now, p2), 'the other shows it');
+        assert(await silent(p2), 'the other browser plays audio');
+        await app(() => __app.adapter.pause(), undefined, p2);
+        await until(async () => (await audio()).paused && (await app(() => __app.player.state)) === 'paused', 'paused here');
+        await until(() => app(() => __app.player.state === 'paused', undefined, p2), 'paused there');
+        const q = await playable();
+        await app(id => __app.adapter.queueAdd([id], { next: true }), q, p2);
+        await until(() => app(id => __app.queue[0]?.trackId === id && __app.queue[0].section === 'queue', q), 'queued there, listed here');
+        await app(() => __app.adapter.resume(), undefined, p2);
+        await until(async () => !(await audio()).paused, 'plays here again');
+        assert(await silent(p2), 'the other browser plays audio');
+        await app(() => __app.adapter.queueClear('queue'), undefined, p2); // songs queued by hand outlive a new context
+        await until(() => app(() => !__app.queue.some(e => e.section === 'queue')), 'cleared there, gone here');
+      });
+      await check('Sonus Connect: the device picker moves playback; the browser it leaves stops and shows where it plays', async () => {
+        const pos = await app(() => __app.player.position);
+        await p2.locator('.cm-bar .cm-output .ui-device-button').click();
+        await snap(p2, 'connect-picker');
+        await p2.getByRole('radio', { name: /这个浏览器/ }).click();
+        await until(async () => { const a = await audio(p2); return !a.paused && a.time > 0; }, 'plays in the other browser', 8000);
+        await until(() => silent(page), 'this browser stops');
+        const t2 = (await audio(p2)).time;
+        assert(Math.abs(t2 - pos) < 4, `from where it was: ${pos.toFixed(1)} s → ${t2.toFixed(1)} s`);
+        await until(() => app(() => __app.player.where?.playing === true && __app.player.state === 'playing'), 'this browser shows it playing there');
+        await p2.keyboard.press('Escape');
+      });
+      await check('Sonus Connect: each device has its own volume; the bar sets the playing device\'s', async () => {
+        const mine = await app(() => __app.adapter.devices().find(d => d.self).volume);
+        await app(() => __app.adapter.setVolume(0.3)); // the other browser plays: this sets its volume
+        await until(() => app(() => Math.abs(__app.player.volume - 0.3) < 0.01, undefined, p2), 'the playing browser at 30 %');
+        await until(() => app(() => Math.abs(__app.player.volume - 0.3) < 0.01), 'this bar shows the playing browser\'s volume');
+        assert(Math.abs((await app(() => __app.adapter.devices().find(d => d.self).volume)) - mine) < 0.01, 'this browser\'s own volume changed');
+        await app(() => __app.adapter.setVolume(1), undefined, p2);
+      });
+      await check('Sonus Connect: the playing browser goes away; the session stops where it was, and play here continues it', async () => {
+        const id = await app(() => __app.player.trackId, undefined, p2);
+        await p2.goto('about:blank'); // the page says goodbye (WebSocket close 1000): no grace period
+        await ctx2.close(); p2 = null;
+        await until(() => app(() => __app.player.state === 'paused' && __app.player.where?.playing === false), 'stopped, saying where it played last');
+        await until(async () => /上次在「.+」播放/.test(await page.locator('.cm-bar-where').textContent()), 'the strip');
+        const pos = await app(() => __app.player.position);
+        await page.locator('.cm-bar .ui-pb-play').click();
+        await until(async () => { const a = await audio(); return !a.paused && a.src.includes(`id=${id}`) && Math.abs(a.time - pos) < 4; }, 'plays here, from where it stopped', 8000);
+      });
+    }
     await check('start radio from a song: the song, then similar ones from getSimilarSongs2', async () => {
       const seed = demo ? await app(() => __app.lib.trackList.find(t => t.genre === 'City Pop' && !t.unavailable)) : await app(id => __app.track(id), cat.radio.id);
       await app(id => __app.onTrackMenu({ id: 'radio' }, [id]), seed.id);
@@ -295,6 +386,12 @@ for (const [engine, launch] of engines) {
       await until(async () => (await testLog()).streams.some(s => s.id === id && s.format === 'opus'), 'format=opus');
     });
     if (!demo && !cat.missing) skip('a song the server cannot stream shows an error, not silence', 'no song whose file is gone (manifest key track.missingFile)');
+    else if (v2) await check('a song that cannot play is skipped: the session moves on, and a toast names it', async () => {
+      const id = demo ? await app(() => __app.lib.trackList[57].id) : cat.missing;
+      await app(id => __app.playContext('library', 'all', { trackId: id }), id);
+      await until(() => page.locator('.ui-toast').filter({ hasText: '无法播放' }).count(), 'the toast');
+      await until(() => app(id => !!__app.player.trackId && __app.player.trackId !== id, id), 'on to the next song');
+    });
     else await check('a song the server cannot stream shows an error, not silence', async () => {
       const id = demo ? await app(() => __app.lib.trackList[57].id) : cat.missing;
       await app(id => __app.playContext('library', 'all', { trackId: id }), id);

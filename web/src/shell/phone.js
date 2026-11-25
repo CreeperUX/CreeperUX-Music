@@ -3,6 +3,7 @@
 // the playback bar; the stylesheet shows one or the other by width (--cm-phone, styles.css), so nothing here measures
 // the window, and both follow the same player.
 import { h, ic } from '../dom.js';
+import { whereLine } from './devices.js';
 
 export function mountPhone(slot, ctx) {
   const { t, P, S } = ctx;
@@ -13,7 +14,9 @@ export function mountPhone(slot, ctx) {
   const artBox = h('span', { class: 'cm-mini-art' });
   const art = P.createImage(artBox, { alt: '', lazy: false, placeholder: 'music', shape: 'rounded' }, S);
   const title = h('span', { class: 'cm-mini-title' }), artist = h('span', { class: 'cm-mini-artist' });
-  const open = h('a', { class: 'cm-mini-open', href: '#/now', title: t.openNow }, artBox, h('span', { class: 'cm-mini-text' }, title, artist));
+  // the third line: where the session plays, while another device plays it (Sonus Connect)
+  const where = whereLine(ctx, 'cm-mini-where').el;
+  const open = h('a', { class: 'cm-mini-open', href: '#/now', title: t.openNow }, artBox, h('span', { class: 'cm-mini-text' }, title, artist, where));
   const like = h('button', { type: 'button', class: 'cm-mini-btn', onClick: () => { const c = ctx.currentTrack(); if (c) ctx.setLiked(c.id, !c.liked); } });
   const play = h('button', { type: 'button', class: 'cm-mini-btn cm-mini-play', onClick: () => ctx.togglePlay() });
   const line = h('span', { class: 'cm-mini-line', 'aria-hidden': 'true' }, h('i'));

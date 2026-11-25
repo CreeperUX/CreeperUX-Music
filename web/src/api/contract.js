@@ -97,6 +97,10 @@
  * @property {'track' | 'album' | 'off'} replayGain
  * @property {{ kind: string, id: string, label: string } | null} context
  * @property {string} output          The output device id.
+ * @property {{ playing: boolean, id: string, name: string } | null} [where]   With Sonus Connect: another device plays the
+ *   session now (playing: true), or none does and this one played it last (false); null while this browser plays it.
+ * @property {{ id: string, name: string, kind: string } | null} [remote]   With Sonus Connect: the device that plays, when
+ *   it is not this browser; `volume` and `muted` are then that device's.
  */
 
 /**
@@ -173,29 +177,36 @@
  * @property {{ replayGain?: boolean }} [capabilities]   false hides a control the player cannot change.
  */
 
-// ---------------------------------------------------------------- Connect, version 2 (docs/protocol/connect.md): not implemented yet
+// ---------------------------------------------------------------- Connect, version 2 (docs/protocol/connect.md)
 // One playback session per user lives on the server; one device plays it (the active device), the others show it and
 // send commands. For the interface nothing above changes: `player` and `queue` then describe the session, and play,
-// next, queueAdd, setOrder … are commands to it. A client that speaks Connect adds what follows, and the interface
-// shows the devices in the playback bar's device picker (shell/bar.js), next to this browser's own outputs.
+// next, queueAdd, setOrder … are commands to it (api/subsonic.js, api/connect.js, api/session.js). A client that speaks
+// Connect adds what follows, and the interface shows the devices in the device picker (shell/devices.js) in place of
+// this browser's audio outputs (which stay in Settings).
 
 /**
  * @typedef {Object} Device   One of the user's connected players.
  * @property {string} id
- * @property {string} name            e.g. '书房电脑', '浏览器 k3x9a2'.
- * @property {'computer' | 'phone' | 'browser' | 'speaker'} kind
+ * @property {string} name            e.g. '书房电脑', 'Edge · Windows'.
+ * @property {'desktop' | 'web' | 'phone' | 'tablet' | 'speaker' | 'other'} kind
+ * @property {boolean} canPlay        false: a remote that never plays.
  * @property {boolean} active         It is the one that plays.
  * @property {boolean} self           It is this client.
  * @property {number} volume          0–1: each device's own (rule 8).
+ * @property {boolean} muted
+ * @property {string} status          What it does, in words: '正在播放 · 渡口', '已暂停', '空闲', '只能遥控'.
+ * @property {boolean} connected      This client's connection to the session is up.
  */
 
 /**
- * @typedef {Object} ConnectClient   What a MusicClient adds when the server has Connect (capabilities.connect === true).
+ * @typedef {Object} ConnectClient   What a MusicClient adds when the server has Connect (connected() === true).
+ * @property {() => boolean} connected   The session is the server's (the server offers version 2).
  * @property {() => Device[]} devices
  * @property {(deviceId: string) => Promise<void>} transfer      Moves playback there; the device it leaves stops and becomes a remote.
- * @property {(deviceId: string, volume: number) => Promise<void>} setDeviceVolume
- * Events: { type: 'devices', devices: Device[] }. While another device is active, this client's `player` still reports
- * the session (the position moving), and its own audio stays silent.
+ * @property {(deviceId: string, volume?: number, muted?: boolean) => Promise<void>} setDeviceVolume
+ * Events: { type: 'devices', devices: Device[] }, { type: 'notice', kind, message } (a song skipped, autoplay refused).
+ * While another device is active, this client's `player` still reports the session (the position moving), and its own
+ * audio stays silent.
  */
 
 const REQUIRED = ['connect', 'library', 'playlists', 'player', 'queue', 'outputs', 'subscribe', 'play', 'pause', 'resume', 'next', 'previous', 'seek', 'setVolume', 'setMuted', 'setOrder',

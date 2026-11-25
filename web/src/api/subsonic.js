@@ -6,11 +6,16 @@
 //   artists keep the server's ids, so they group the way Navidrome groups them (album artist, compilations).
 // - Playlists, likes (star / unstar; "Liked Songs" is the starred songs), play counts (scrobble), artwork
 //   (getCoverArt), lyrics (getLyricsBySongId, then getLyrics), search (search3), song radio (getSimilarSongs2),
-//   artist biographies (getArtistInfo2) and the queue to continue on another device (savePlayQueue / getPlayQueue)
-//   live on the server, so every device sees the same.
+//   artist biographies (getArtistInfo2) live on the server, so every device sees the same.
 // - Playback happens here: two <audio> elements play stream URLs. The second one loads the next song before the first
 //   ends, so the change of track has no network wait (a few milliseconds of gap remain; true gapless needs a native
-//   player). The queue, playback order and "stop after current" are this client's own.
+//   player).
+// - On a server that offers Sonus Connect version 2 (sonusConnect, versions [.., 2]: the Sonus server) what plays, the
+//   queue, the order and "stop after current" are the user's one session on the server (api/connect.js,
+//   api/session.js, docs/protocol/connect.md): every action here is a command to it, the session's active device plays
+//   it, and this browser's <audio> plays only while this browser is that device (it follows the session and reports
+//   what really happens). Elsewhere the queue and order are this client's own, and the queue is saved on the server
+//   for another device to continue (savePlayQueue / getPlayQueue); with a session that is the session's job (rule 6).
 // - Formats a browser cannot decode (DSD, APE, WavPack …) are asked for transcoded (Opus); Navidrome does that with
 //   ffmpeg when a transcoding for Opus is configured (it is by default).
 // - A play counts once the position passes half the song or four minutes, whichever comes first.
@@ -25,6 +30,9 @@ import { orderToBar, barToOrder } from './contract.js';
 import { lower, parseLyrics } from './lyrics.js';
 import { md5 } from './md5.js';
 import { createAuthApi } from './sonus.js';
+import { command, report, follow, modeOf, orderOf, windowOf, pickerDevices, newDeviceId, validDeviceId, QUIET_ERRORS } from './connect.js';
+import { openSession } from './session.js';
+import { VERSION } from '../version.js';
 
 const API_VERSION = '1.16.1', APP = 'Sonus', PAGE = 500;
 const LOGIN_KEY = 'sonus.login', LAST_SERVER_KEY = 'sonus.server';
@@ -81,6 +89,20 @@ export const clientName = () => {
   if (!id) { id = Math.random().toString(36).slice(2, 8); storage.set('sonus.device', id); }
   return `${APP} (${deviceName || `浏览器 ${id}`})`;
 };
+/** This browser profile's Connect device id, made once and kept: a reload, or the next visit, is the same device. */
+function connectDeviceId() {
+  let id = storage.get('sonus.connect.device');
+  if (!validDeviceId(id)) { id = newDeviceId(); storage.set('sonus.connect.device', id); }
+  return id;
+}
+/** How the other devices list this browser: "Edge · Windows", "Safari · iPhone". */
+export function browserName() {
+  const ua = globalThis.navigator?.userAgent ?? '';
+  const browser = /Edg\//.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : '浏览器';
+  const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS X/.test(ua) ? 'Mac' : /CrOS/.test(ua) ? 'ChromeOS' : /Linux/.test(ua) ? 'Linux' : '';
+  return deviceName || (os ? `${browser} · ${os}` : browser);
+}
+const deviceKind = () => (/iPad|Tablet/.test(globalThis.navigator?.userAgent ?? '') ? 'tablet' : /iPhone|Android.*Mobile/.test(globalThis.navigator?.userAgent ?? '') ? 'phone' : 'web');
 
 /** "music.example.com", "http://host:4533/", "https://host/rest" → "https://music.example.com", "http://host:4533", "https://host". */
 export function normalizeServer(input) {
@@ -148,7 +170,7 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
   const base = login.server, rest = `${base}/rest/`;
   const listeners = new Set();
   const emit = e => { for (const fn of listeners) { try { fn(e); } catch (err) { console.error(err); } } };
-  let connection = 'connecting', server = { name: 'Navidrome', version: '' }, extensions = new Set();
+  let connection = 'connecting', server = { name: 'Navidrome', version: '' }, extensions = new Set(), versions = new Map();
   const setConnection = s => { if (s !== connection) { connection = s; emit({ type: 'connection', status: s }); } };
 
   async function call(method, extra, { post = false, signal } = {}) {
@@ -276,7 +298,14 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
   const el = () => audio[cur];
   const player = { trackId: null, state: 'stopped', error: null, position: 0, duration: null, volume: storage.get('sonus.volume') ?? 0.8, muted: false, order: 'default', stopAfterCurrent: false, replayGain: storage.get('sonus.replaygain') ?? 'album', context: null, output: 'default' };
   let contextIds = [], pointer = -1, queue = [], qid = 0;
-  const snapshot = () => ({ ...player, context: player.context && { ...player.context } });
+  const snapshot = () => {
+    const p = { ...player, context: player.context && { ...player.context }, where: null, remote: null };
+    const away = sess?.state.activeElsewhere;
+    if (sess) p.where = sess.state.place();
+    // another device plays: the bar's volume is that device's (rule 8)
+    if (away) Object.assign(p, { remote: { id: away.id, name: away.name, kind: away.kind }, volume: away.volume ?? 1, muted: !!away.muted });
+    return p;
+  };
   const pushPlayer = () => { emit({ type: 'player', player: snapshot() }); mediaSession(); };
   const queueEntries = () => [...queue.map(q => ({ ...q, section: 'queue' })), ...contextIds.slice(pointer + 1).map((trackId, i) => ({ id: `c${pointer + 1 + i}:${trackId}`, trackId, section: 'context' }))];
   const pushQueue = () => { emit({ type: 'queue', queue: queueEntries() }); if (player.trackId) saveQueue(); };
@@ -308,17 +337,22 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
     if (!autoplay) return;
     el().play().then(() => {
       if (my !== ticket) return;
-      player.state = 'playing'; pushPlayer(); saveQueue({ soon: true });
+      player.state = 'playing'; pushPlayer(); saveQueue({ soon: true }); say('playing');
       if (scrobble) call('scrobble', { id: trackId, submission: false }).catch(() => {}); // "now playing"
     }).catch(err => {
       if (my !== ticket || err?.name === 'AbortError') return;
-      if (err?.name === 'NotAllowedError') { player.state = 'paused'; pushPlayer(); return; } // the browser wants a click first
+      if (err?.name === 'NotAllowedError') { // the browser wants a click first
+        player.state = 'paused'; pushPlayer(); say('paused');
+        if (sess) emit({ type: 'notice', kind: 'warn', message: '浏览器没有允许自动播放：点一下播放键，就在这里接着放。' });
+        return;
+      }
       fail(t, err?.message);
     });
   }
   function fail(t, detail) {
     Object.assign(player, { state: 'error', error: `无法播放“${t?.title ?? ''}”：${detail || '未知错误'}` });
     pushPlayer();
+    say('failed'); // with a session: the server skips it and says so
   }
   function stop() { el().pause(); Object.assign(player, { state: 'stopped', position: 0 }); try { el().currentTime = 0; } catch { /* nothing loaded */ } pushPlayer(); }
   /** What plays after the current song, without moving there (for loading it early). */
@@ -342,6 +376,7 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
     a.preload = 'auto';
     a.addEventListener('ended', () => {
       if (a !== el()) return;
+      if (sess) { say('ended'); return; } // the session says what follows
       if (player.stopAfterCurrent) { player.stopAfterCurrent = false; stop(); return; }
       if (player.order === 'repeat-track') { a.currentTime = 0; a.play().catch(() => {}); counted = false; return; }
       advance(1);
@@ -349,13 +384,22 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
     a.addEventListener('error', () => { if (a === el() && a.getAttribute('src')) fail(T.get(player.trackId), MEDIA_ERRORS[a.error?.code]); });
     a.addEventListener('durationchange', () => { if (a === el() && Number.isFinite(a.duration) && a.duration > 0 && !player.duration) { player.duration = a.duration; pushPlayer(); } });
     // paused or resumed from outside (the system's media controls, a headset button)
-    a.addEventListener('pause', () => { if (a === el() && !a.ended && player.state === 'playing') { player.state = 'paused'; pushPlayer(); } });
-    a.addEventListener('play', () => { if (a === el() && player.state === 'paused') { player.state = 'playing'; pushPlayer(); } });
+    a.addEventListener('pause', () => { if (a === el() && !a.ended && player.state === 'playing') { player.state = 'paused'; pushPlayer(); say('paused'); } });
+    a.addEventListener('play', () => { if (a === el() && player.state === 'paused') { player.state = 'playing'; pushPlayer(); say('playing'); } });
   }
   setInterval(() => {
+    if (sess && !here()) {
+      // another device plays the session (or none does): its position, moving on while it plays there
+      if (player.state !== 'playing') return;
+      player.position = sessPosition();
+      emit({ type: 'position', position: player.position });
+      return;
+    }
+    if (sess && sayPositionAt && Date.now() >= sayPositionAt) { sayPositionAt = 0; say('position'); } // a seek done
     if (player.state !== 'playing') return;
     player.position = el().currentTime;
     emit({ type: 'position', position: player.position });
+    if (sess && Date.now() - saidAt > 30_000) say('position'); // at least every 30 s
     if (Date.now() - savedAt > 30_000) saveQueue({ soon: true }); // the position, for another device
     const d = player.duration || el().duration;
     if (!counted && d > 0 && player.position >= Math.min(240, d / 2)) {
@@ -430,16 +474,180 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
     return { id: ids.slice(from, from + 500), current: player.trackId, position: Math.round((player.position || 0) * 1000) };
   }
   function saveQueue({ soon = false } = {}) {
+    if (sess) return; // with a session the server keeps it (rule 6)
     clearTimeout(saveT);
     saveT = setTimeout(() => { const q = queueForServer(); if (!q) return; savedAt = Date.now(); call('savePlayQueue', q, { post: true }).catch(() => {}); }, soon ? 0 : 1500);
   }
   // closing the window: the position as it is (a beacon still goes out while the page unloads)
-  addEventListener('pagehide', () => { const q = queueForServer(); if (q && player.state !== 'stopped') navigator.sendBeacon?.(`${rest}savePlayQueue.view`, authParams(login, q)); });
+  addEventListener('pagehide', () => {
+    if (sess) { sess.close(); sess = null; return; } // a goodbye: the session stops at once if it played here
+    const q = queueForServer(); if (q && player.state !== 'stopped') navigator.sendBeacon?.(`${rest}savePlayQueue.view`, authParams(login, q));
+  });
+  // back from the browser's page cache: the connection was closed on the way out
+  addEventListener('pageshow', e => { if (e.persisted && versions.get('sonusConnect')?.includes(2)) location.reload(); });
   async function remoteQueue() {
+    if (sess) return null; // the session is the user's, on the server: nothing to offer
     const r = (await call('getPlayQueue')).playQueue;
     if (!r?.entry?.length || !r.current) return null;
     for (const s of r.entry) if (!T.has(s.id)) T.set(s.id, trackOf(s));
     return { trackIds: r.entry.map(e => e.id), current: r.current, position: (r.position ?? 0) / 1000, changed: Date.parse(r.changed) || 0, changedBy: r.changedBy || '', mine: r.changedBy === clientName() };
+  }
+
+  // ---------------------------------------------------------------- Sonus Connect version 2: the user's one session
+  let sess = null;              // the session's connection (api/session.js), on a server that offers version 2
+  let engKey = null;            // the session entry this browser's <audio> has loaded
+  let loadedSaid = false, saidAt = 0, sayPositionAt = 0;
+  let pending = [];             // reports made while the connection was down (this device plays on): said when it is back
+  let sentVolume = null;
+  const here = () => !!sess?.state.isActive && !sess.replaced; // another tab of this browser may be this device now
+  const sessPosition = () => sess.state.positionAt(sess.state.serverNow()) / 1000;
+
+  function startSession() {
+    if (sess || !versions.get('sonusConnect')?.includes(2)) return;
+    const wsUrl = `${rest}connect.view?${authParams(login, { protocol: 2 })}`.replace(/^http/, 'ws');
+    sess = openSession({
+      url: () => wsUrl, deviceId: connectDeviceId(), name: browserName(), kind: deviceKind(), client: `Sonus ${VERSION} (web)`,
+      volume: () => ({ volume: player.volume, muted: player.muted }),
+      // this device was the active one and still plays (a short network loss)
+      resume: st => (st.isActive && engKey && player.trackId ? { rev: st.session.rev, playing: player.state === 'playing' || player.state === 'loading', positionMs: Math.round((el().currentTime || player.position || 0) * 1000) } : null),
+      onConnection: status => {
+        if (status === 'online') {
+          applySession(true);
+          if (here()) for (const r of pending) sess.send(report(r.event, r.key, r.positionMs, sess.state.session.rev, r.extra));
+          pending = []; sentVolume = null; sayVolume();
+        }
+        if (status === 'replaced') { // another tab of this browser is this device now: this one is silent
+          silence();
+          Object.assign(player, { state: player.trackId ? 'paused' : 'stopped' }); pushPlayer();
+          emit({ type: 'notice', kind: 'info', message: '这个浏览器的另一个标签页接管了播放。在这里按播放就回到这个标签页。' });
+        }
+        emit({ type: 'devices', devices: devices() });
+      },
+      onChange: (what, st) => {
+        if (what.volume) { // another device changed this one's volume (rule 8)
+          if (what.volume.muted !== undefined) setMutedHere(what.volume.muted);
+          if (what.volume.volume !== undefined) setVolumeHere(what.volume.volume);
+        }
+        // errors that answer a command come back to the caller; the others (a song this device could not play) are said here
+        if (what.error && what.error.ref == null && !QUIET_ERRORS.has(what.error.code)) emit({ type: 'notice', kind: what.error.code === 'unplayable' ? 'warn' : 'error', message: what.error.message || '服务器拒绝了这个操作。' });
+        if (what.session || what.queue) applySession(what.welcome);
+        if (what.devices || what.session) { emit({ type: 'devices', devices: devices() }); if (!here()) pushPlayer(); }
+      },
+    });
+  }
+
+  let appliedRev = -1, appliedQueueRev = -1;
+  /** The session changed: its queue is shown; this browser's audio follows it while this is the active device, and is
+   *  silent otherwise (the device playback leaves stops at once, rule 4). */
+  function applySession(force = false) {
+    const st = sess.state, s = st.session, q = st.queue;
+    if (!st.queueReady) return; // the queue message comes first: wait for it when the session names a newer one
+    if (!force && s.rev === appliedRev && q.queueRev === appliedQueueRev) return;
+    appliedRev = s.rev; appliedQueueRev = q.queueRev;
+    contextIds = q.order; pointer = q.pointer; queue = q.manual.map(m => ({ id: m.key, trackId: m.trackId }));
+    Object.assign(player, { order: orderOf(s.mode), stopAfterCurrent: s.stopAfterCurrent, context: s.context ? { kind: s.context.kind, id: s.context.id, label: s.context.label } : null });
+    emit({ type: 'queue', queue: queueEntries() });
+    if (here()) followHere(s); else showElsewhere(s);
+  }
+  function silence() {
+    if (engKey || el().getAttribute('src')) { ++ticket; unload(audio[0]); unload(audio[1]); }
+    engKey = null; preloadId = null;
+  }
+  function showElsewhere(s) {
+    silence();
+    const t = s.current && T.get(s.current.trackId);
+    Object.assign(player, {
+      trackId: s.current?.trackId ?? null, state: !s.current ? 'stopped' : s.playing ? 'playing' : 'paused', error: null,
+      position: sessPosition(), duration: s.durationMs > 0 ? s.durationMs / 1000 : t?.duration || null,
+    });
+    pushPlayer();
+  }
+  function engineNow() {
+    const a = el();
+    const state = !engKey ? 'none' : player.state === 'error' ? 'error' : a.ended ? 'ended' : player.state === 'loading' ? 'loading' : player.state === 'playing' ? 'playing' : 'paused';
+    return { key: engKey, trackId: player.trackId, state, position: (a.currentTime || 0) * 1000 };
+  }
+  /** The active device's audio made to match the session: the current entry loaded, the position (when more than 1.5 s
+   *  off), playing or paused, the next song preloaded. */
+  function followHere(s) {
+    const plan = follow(s, sess.state.deviceId, engineNow(), sess.state.positionAt(sess.state.serverNow()));
+    if (plan.stop) { silence(); Object.assign(player, { trackId: null, state: 'stopped', position: 0, error: null }); pushPlayer(); return; }
+    if (plan.load) {
+      engKey = plan.load.key; loadedSaid = false;
+      load(plan.load.trackId, { autoplay: plan.load.play, at: plan.load.at / 1000 });
+      if (player.state === 'error') say('failed'); // not in this library
+      else if (!plan.load.play) whenLoaded(() => say('paused'));
+      return;
+    }
+    if (plan.idle) {
+      // the song ended here and the session stopped there (the end of the queue, stop after current)
+      if (!s.playing && el().ended) Object.assign(player, { state: 'paused', position: sessPosition() });
+      pushPlayer(); return;
+    }
+    const a = el();
+    if (plan.seek !== undefined) { try { a.currentTime = plan.seek / 1000; } catch { /* not loaded yet */ } player.position = plan.seek / 1000; emit({ type: 'position', position: player.position }); sayPositionAt = Date.now() + 500; }
+    if (plan.play) { player.state = 'loading'; a.play().then(() => { if (a === el() && engKey) { player.state = 'playing'; pushPlayer(); say('playing'); } }).catch(err => { if (err?.name === 'NotAllowedError') { player.state = 'paused'; pushPlayer(); say('paused'); emit({ type: 'notice', kind: 'warn', message: '浏览器没有允许自动播放：点一下播放键，就在这里接着放。' }); } }); }
+    if (plan.pause) { a.pause(); player.state = 'paused'; player.position = a.currentTime || player.position; say('paused'); }
+    if (plan.preload && plan.preload !== preloadId && T.has(plan.preload)) { preloadId = plan.preload; audio[1 - cur].src = streamUrl(T.get(plan.preload)); applyVolume(); }
+    else if (!plan.preload && preloadId) { unload(audio[1 - cur]); preloadId = null; }
+    pushPlayer();
+  }
+  function whenLoaded(fn) { const a = el(), key = engKey; if (a.readyState >= 1) fn(); else a.addEventListener('loadedmetadata', () => { if (a === el() && engKey === key) fn(); }, { once: true }); }
+  /** What this browser's audio really did, for the session (the active device only): `loaded` first for a new entry. */
+  function say(event) {
+    if (!sess || !here() || !engKey) return;
+    const key = engKey, a = el(), at = (a.currentTime || 0) * 1000;
+    const send = (ev, extra) => {
+      if (sess.connected) sess.send(report(ev, key, at, sess.state.session.rev, extra));
+      else { // kept for when the connection is back: the last of playing / paused / position is enough; endings all
+        if (['playing', 'paused', 'position'].includes(ev)) pending = pending.filter(p => !['playing', 'paused', 'position'].includes(p.event));
+        if (pending.length < 50) pending.push({ event: ev, key, positionMs: at, extra });
+      }
+    };
+    if (!loadedSaid && event !== 'failed') {
+      loadedSaid = true;
+      const t = T.get(player.trackId), d = Number.isFinite(a.duration) && a.duration > 0 ? a.duration : t?.duration;
+      send('loaded', { durationMs: d ? d * 1000 : undefined, now: t ? { title: t.title, artist: t.artist, album: t.album, albumId: t.albumId, coverArt: A.get(t.albumId)?.coverArt ?? t.coverArt } : undefined });
+    }
+    send(event);
+    saidAt = Date.now();
+  }
+  /** This device's own volume, for the others' pickers (on every change). */
+  function sayVolume() {
+    if (!sess?.connected) return;
+    const v = Math.round(player.volume * 1000) / 1000, key = `${v}|${player.muted}`;
+    if (key === sentVolume) return;
+    sentVolume = key; sess.send({ type: 'device', volume: v, muted: player.muted });
+  }
+  function setVolumeHere(v) { player.volume = Math.max(0, Math.min(1, v)); if (v > 0) player.muted = false; storage.set('sonus.volume', player.volume); applyVolume(); pushPlayer(); sayVolume(); }
+  function setMutedHere(m) { player.muted = m; applyVolume(); pushPlayer(); sayVolume(); }
+
+  // a volume slider dragged while another device plays: the latest value, at most every 100 ms
+  let volumeWanted = null, volumeTimer = 0;
+  function remoteVolume(device, v) {
+    volumeWanted = { device: device.id, volume: Math.max(0, Math.min(1, v)), muted: v > 0 && device.muted ? false : undefined };
+    if (volumeTimer) return;
+    const send = () => { const w = volumeWanted; volumeWanted = null; if (!w) { volumeTimer = 0; return; } cmd('volume', w).catch(err => emit({ type: 'notice', kind: 'error', message: err.message })); volumeTimer = setTimeout(send, 100); };
+    send();
+  }
+  /** A command for the session (connect.md, Commands); true when sent that way. A refusal is thrown (stale and
+   *  notActive are not: the session moved on, and what it is now is on its way). Waits a moment for the connection. */
+  async function cmd(action, fields) {
+    if (!sess) return false;
+    if (!sess.connected && !(await sess.ready(3000))) throw new Error('正在重新连接服务器，稍后再试。');
+    const r = await sess.request(command(action, fields));
+    if (!r.ok && !QUIET_ERRORS.has(r.code)) throw new Error(r.message || '服务器拒绝了这个操作。');
+    return true;
+  }
+  /** Without the connection, the active device does what its audio can do by itself; the reports tell the server later. */
+  const offlineHere = () => sess && !sess.connected && !sess.replaced && here();
+  /** Shuffling by album or folder: the sender arranges the context (the server may not know albums and folders). */
+  const arranged = (ids, order, start) => (order === 'shuffle-albums' || order === 'shuffle-folders' ? ordered(ids, order, start) : undefined);
+  function devices() {
+    if (!sess) return [];
+    const t = T.get(player.trackId) ?? null;
+    return pickerDevices(sess.state, { hereKind: deviceKind(), volumeHere: player.volume, mutedHere: player.muted, title: t?.title ?? sess.state.session.now?.title ?? null })
+      .map(d => ({ ...d, connected: sess.connected }));
   }
 
   // ---------------------------------------------------------------- staying in step with other clients
@@ -461,12 +669,12 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
     capabilities: { replayGain: true },
     async connect() {
       const r = await call('ping');
-      try { for (const x of (await call('getOpenSubsonicExtensions')).openSubsonicExtensions ?? []) extensions.add(x.name); } catch { /* plain Subsonic */ }
+      try { for (const x of (await call('getOpenSubsonicExtensions')).openSubsonicExtensions ?? []) { extensions.add(x.name); versions.set(x.name, x.versions ?? []); } } catch { /* plain Subsonic */ }
       const name = r.type === 'navidrome' ? 'Navidrome' : r.type ? r.type[0].toUpperCase() + r.type.slice(1) : 'Subsonic';
       server = { name, version: `${name} ${r.serverVersion ?? ''}`.trim(), api: r.version };
       return { ...server };
     },
-    async library() { await loadLibrary(); await loadPlaylists(); refreshedAt = Date.now(); refreshOutputs(); return libCopy(); },
+    async library() { await loadLibrary(); await loadPlaylists(); refreshedAt = Date.now(); refreshOutputs(); startSession(); return libCopy(); },
     async playlists() { return appPlaylists(); },
     player: snapshot,
     queue: queueEntries,
@@ -476,13 +684,22 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
     account: () => ({ server: base, user: login.user, client: clientName(), kind: login.apiKey ? 'key' : 'token' }),
     /** The server's OpenSubsonic extensions by name (known after connect). */
     extensions: () => new Set(extensions),
-    async signOut() { unload(audio[0]); unload(audio[1]); await signOut(); },
+    async signOut() { if (sess) { sess.close(); sess = null; } unload(audio[0]); unload(audio[1]); await signOut(); },
     loginStorage,
     refresh,
     /** The <audio> element playing now (diagnostics and acceptance checks). */
     mediaElement: () => el(),
 
     async play({ context, trackId, shuffle }) {
+      if (sess) {
+        const ids = windowOf(context.trackIds.filter(id => T.has(id)), trackId ?? null);
+        if (!ids.length) return;
+        const order = shuffle && !ORDERS_SHUFFLE(player.order) ? 'shuffle-tracks' : player.order;
+        const start = trackId ?? (arranged(ids, order) ? ids[Math.floor(Math.random() * ids.length)] : undefined);
+        const order2 = arranged(ids, order, start);
+        await cmd('playContext', { context: { kind: context.kind, id: context.id, label: context.label }, ids, startId: start, shuffle: shuffle ? true : undefined, order: order2 });
+        return;
+      }
       if (shuffle && !ORDERS_SHUFFLE(player.order)) player.order = 'shuffle-tracks';
       const ids = context.trackIds.filter(id => T.has(id));
       if (!ids.length) return;
@@ -491,24 +708,44 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
       player.context = { kind: context.kind, id: context.id, label: context.label };
       pushQueue(); load(contextIds[pointer]);
     },
-    async pause() { if (player.state === 'playing' || player.state === 'loading') { el().pause(); player.state = 'paused'; player.position = el().currentTime || player.position; pushPlayer(); saveQueue({ soon: true }); } },
+    async pause() { if (sess && !offlineHere()) { await cmd('pause'); return; } if (player.state === 'playing' || player.state === 'loading') { el().pause(); player.state = 'paused'; player.position = el().currentTime || player.position; pushPlayer(); saveQueue({ soon: true }); } },
     async resume() {
+      if (sess) {
+        if (sess.replaced) sess.reconnect(); // this tab takes the device back
+        // a song that failed here: tried again here
+        if (here() && player.state === 'error' && player.trackId) { load(player.trackId, { at: player.position }); return; }
+        if (!offlineHere()) { await cmd('play'); return; }
+      }
       if (!player.trackId) return;
       if (player.state === 'error' || player.state === 'stopped' || !el().getAttribute('src')) { load(player.trackId); return; }
       player.state = 'playing'; pushPlayer();
       await el().play().catch(err => { if (err?.name !== 'AbortError') { player.state = 'paused'; pushPlayer(); throw new Error('浏览器没有允许播放：先点一下页面再试。'); } });
     },
-    async next() { advance(1); },
-    async previous() { if (player.position > 3) await api.seek(0); else advance(-1); },
+    async next() { if (await cmd('next')) return; advance(1); },
+    async previous() { if (await cmd('previous')) return; if (player.position > 3) await api.seek(0); else advance(-1); },
     async seek(s) {
+      if (sess && !offlineHere()) { await cmd('seek', { positionMs: Math.max(0, Math.round(s * 1000)) }); return; }
       const to = Math.max(0, Math.min(player.duration ?? Infinity, s));
       try { el().currentTime = to; } catch { /* not loaded yet */ }
       player.position = to; emit({ type: 'position', position: to }); saveQueue(); mediaPosition();
       if (to < (player.duration ?? 0) - 20 && preloadId) { unload(audio[1 - cur]); preloadId = null; } // seeking back: load the next one again later
     },
-    async setVolume(v) { player.volume = Math.max(0, Math.min(1, v)); if (v > 0) player.muted = false; storage.set('sonus.volume', player.volume); applyVolume(); pushPlayer(); },
-    async setMuted(m) { player.muted = m; applyVolume(); pushPlayer(); },
+    async setVolume(v) {
+      const away = sess?.state.activeElsewhere;
+      if (away) { remoteVolume(away, v); return; } // rule 8: the device that plays
+      if (sess) { setVolumeHere(v); return; }
+      player.volume = Math.max(0, Math.min(1, v)); if (v > 0) player.muted = false; storage.set('sonus.volume', player.volume); applyVolume(); pushPlayer(); },
+    async setMuted(m) {
+      const away = sess?.state.activeElsewhere;
+      if (away) { await cmd('volume', { device: away.id, muted: m }); return; }
+      if (sess) { setMutedHere(m); return; }
+      player.muted = m; applyVolume(); pushPlayer(); },
     async setOrder(order) {
+      if (sess) {
+        const source = appPlaylists().find(p => p.id === player.context?.id)?.trackIds ?? contextIds;
+        await cmd('mode', { mode: modeOf(order), order: contextIds.length ? arranged(source.filter(id => contextIds.includes(id)), order, player.trackId) : undefined });
+        return;
+      }
       const was = player.order; player.order = order;
       if (contextIds.length && (ORDERS_SHUFFLE(order) || ORDERS_SHUFFLE(was))) {
         const source = appPlaylists().find(p => p.id === player.context?.id)?.trackIds ?? contextIds, c = player.trackId;
@@ -517,8 +754,24 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
       if (preloadId) { unload(audio[1 - cur]); preloadId = null; }
       pushQueue(); pushPlayer();
     },
-    async setStopAfterCurrent(on) { player.stopAfterCurrent = on; if (on && preloadId) { unload(audio[1 - cur]); preloadId = null; } pushPlayer(); },
+    async setStopAfterCurrent(on) { if (await cmd('stopAfterCurrent', { on: !!on })) return; player.stopAfterCurrent = on; if (on && preloadId) { unload(audio[1 - cur]); preloadId = null; } pushPlayer(); },
     async setReplayGain(mode) { player.replayGain = mode; storage.set('sonus.replaygain', mode); applyVolume(); pushPlayer(); },
+    // ---- Sonus Connect version 2 (contract.js, ConnectClient): the user's devices, and moving playback between them
+    /** True while this client shows the user's session on the server (the server offers version 2). */
+    connected: () => !!sess,
+    /** The devices for the picker: this browser first ({ id, name, kind, canPlay, volume, muted, active, self, status, connected }). */
+    devices,
+    /** Moves playback to that device (rule 4): the one it leaves stops. This browser included ("play here"). */
+    async transfer(deviceId) {
+      if (deviceId === sess?.state.deviceId && sess.replaced) sess.reconnect();
+      await cmd('transfer', { to: deviceId });
+    },
+    /** Any device's volume (rule 8): this one's here, another's through the server. */
+    async setDeviceVolume(deviceId, volume, muted) {
+      if (!sess || deviceId === sess.state.deviceId) { if (muted !== undefined) setMutedHere(muted); if (volume !== undefined) setVolumeHere(volume); return; }
+      await cmd('volume', { device: deviceId, volume, muted });
+    },
+
     async setOutput(id) {
       if (!el().setSinkId) throw new Error('这个浏览器不能切换输出设备。');
       const o = outputs.find(x => x.id === id); if (!o) return;
@@ -531,12 +784,14 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
     },
 
     async queueAdd(trackIds, { next = false } = {}) {
+      if (await cmd('add', { ids: trackIds.filter(id => T.has(id)), next: !!next })) return;
       const entries = trackIds.filter(id => T.has(id)).map(trackId => ({ id: `q${++qid}`, trackId }));
       queue = next ? [...entries, ...queue] : [...queue, ...entries];
       if (preloadId) { unload(audio[1 - cur]); preloadId = null; }
       pushQueue();
     },
     async queueMove({ order, keys, section }) {
+      if (await cmd('move', { order, keys, manual: section === 'queue' })) return;
       const entries = new Map(queueEntries().map(e => [e.id, e]));
       const placed = order.map(id => { const e = entries.get(id); return keys.includes(id) ? { ...e, section } : e; }).filter(Boolean);
       queue = placed.filter(e => e.section === 'queue').map(e => (e.id.startsWith('q') ? { id: e.id, trackId: e.trackId } : { id: `q${++qid}`, trackId: e.trackId }));
@@ -545,13 +800,15 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
       pushQueue();
     },
     async queueRemove(ids) {
+      if (await cmd('remove', { entries: ids })) return;
       const ctxIdx = new Set(ids.filter(id => id.startsWith('c')).map(id => Number(id.slice(1, id.indexOf(':')))));
       queue = queue.filter(q => !ids.includes(q.id)); contextIds = contextIds.filter((_, i) => !ctxIdx.has(i));
       if (preloadId) { unload(audio[1 - cur]); preloadId = null; }
       pushQueue();
     },
-    async queueClear(section) { if (section === 'queue') queue = []; else contextIds = contextIds.slice(0, pointer + 1); if (preloadId) { unload(audio[1 - cur]); preloadId = null; } pushQueue(); },
+    async queueClear(section) { if (await cmd('clear', { manual: section === 'queue' })) return; if (section === 'queue') queue = []; else contextIds = contextIds.slice(0, pointer + 1); if (preloadId) { unload(audio[1 - cur]); preloadId = null; } pushQueue(); },
     async playQueueEntry(entryId) {
+      if (await cmd('jump', { entry: entryId })) return;
       const e = queueEntries().find(x => x.id === entryId); if (!e) return;
       if (e.section === 'queue') queue = queue.filter(q => q.id !== entryId);
       else pointer = Number(entryId.slice(1, entryId.indexOf(':')));

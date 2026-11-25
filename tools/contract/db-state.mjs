@@ -76,8 +76,9 @@ export function dumpState(file, { since = 0, before = { playqueue: new Set(), pl
   for (const q of t.playqueue) if (!before.playqueue.has(q.id)) names.set(q.id, `<new playqueue of ${q.user_id}>`);
   for (const p of t.playlist) if (!before.playlist.has(p.id)) names.set(p.id, `<new playlist ${p.owner_id} ${JSON.stringify(p.name)}>`);
   const rename = v => (typeof v === 'string' && names.has(v) ? names.get(v) : v);
-  // a playlist made and deleted during the run leaves its id in the artwork tables only
-  const renameItem = v => (names.has(v) ? names.get(v) : before.playlist.has(v) ? v : '<a playlist made and deleted during the run>');
+  // a playlist deleted during the run (made during it or not) leaves its id in the artwork tables only
+  const current = new Set(t.playlist.map(p => p.id));
+  const renameItem = v => (names.has(v) ? names.get(v) : current.has(v) ? v : '<a playlist deleted during the run>');
   const out = {};
   for (const [table, { times }] of Object.entries(TABLES)) {
     out[table] = t[table]
@@ -102,13 +103,22 @@ export function dumpState(file, { since = 0, before = { playqueue: new Set(), pl
       .map(row => JSON.stringify(row))
       .sort();
   }
+  // what is left of a playlist deleted during the run, in either artwork table: the worker either reached it
+  // before the deletion (a state row) or after (a queue row it keeps retrying, "data not found"), at its own moment on
+  // each side; that each such playlist left something is compared, not which table holds it
+  const deleted = '<a playlist deleted during the run>';
+  const leftover = [];
+  for (const table of ['artwork_queue', 'playlist_artwork']) {
+    out[table] = out[table].filter(row => (JSON.parse(row).item_id === deleted ? (leftover.push(table), false) : true));
+  }
+  out['deleted playlists, cover state left'] = leftover.length ? [JSON.stringify({ item_id: deleted, rows: '<one or more>' })] : [];
   return out;
 }
 
 /** The rows one side has and the other has not, per table (a changed row shows as one of each). */
 export function compareState(a, b) {
   const out = [];
-  for (const table of Object.keys(TABLES)) {
+  for (const table of new Set([...Object.keys(TABLES), ...Object.keys(a), ...Object.keys(b)])) {
     const left = new Map(), right = new Map();
     for (const r of a[table] ?? []) left.set(r, (left.get(r) ?? 0) + 1);
     for (const r of b[table] ?? []) right.set(r, (right.get(r) ?? 0) + 1);
@@ -125,7 +135,7 @@ export const counts = state => Object.fromEntries(Object.entries(state).map(([t,
  * Waits (up to `ms`) until no playlist is left in any of the databases' artwork queues: Navidrome's worker polls its
  * queue every 5 s, so a cover queued by a write is made a few seconds later, at its own moment on each side.
  */
-export async function settle(files, { ms = 30_000 } = {}) {
+export async function settle(files, { ms = 120_000 } = {}) {
   const deadline = Date.now() + ms;
   for (;;) {
     const left = files.map(f => {

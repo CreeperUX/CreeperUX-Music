@@ -124,6 +124,14 @@ pub struct LibraryOptions {
     pub cache_folder: String,
     /// `DefaultDownsamplingFormat` (default `opus`): what a stream asked for at a lower bit rate is transcoded to.
     pub default_downsampling_format: String,
+    /// `FFmpegPath` (empty: `ffmpeg` on the `PATH`) and `TranscodingCacheSize` (default `100MB`; `0`: no cache).
+    pub ffmpeg_path: String,
+    pub transcoding_cache_size: String,
+    /// `Transcoding.MaxConcurrent`, `Transcoding.MaxConcurrentPerUser` (0: no cap; over one, Navidrome answers 429)
+    /// and `Transcoding.EnableCancellation` (a transcode ends when its client goes).
+    pub transcode_max_concurrent: i64,
+    pub transcode_max_per_user: i64,
+    pub transcode_enable_cancellation: bool,
 }
 
 impl Default for LibraryOptions {
@@ -152,6 +160,11 @@ impl Default for LibraryOptions {
             data_folder: ".".into(),
             cache_folder: String::new(),
             default_downsampling_format: "opus".into(),
+            ffmpeg_path: String::new(),
+            transcoding_cache_size: "100MB".into(),
+            transcode_max_concurrent: 0,
+            transcode_max_per_user: 0,
+            transcode_enable_cancellation: false,
         }
     }
 }
@@ -374,6 +387,20 @@ impl Config {
                     data_folder: nd.get("datafolder")?.unwrap_or(d.data_folder),
                     cache_folder: nd.get("cachefolder")?.unwrap_or_default(),
                     default_downsampling_format: nd.get("defaultdownsamplingformat")?.unwrap_or(d.default_downsampling_format),
+                    ffmpeg_path: nd.get("ffmpegpath")?.unwrap_or_default(),
+                    transcoding_cache_size: nd.get("transcodingcachesize")?.unwrap_or(d.transcoding_cache_size),
+                    transcode_max_concurrent: match nd.get("transcoding.maxconcurrent")? {
+                        Some(v) => v.trim().parse().map_err(|_| format!("Transcoding.MaxConcurrent={v} is not a number"))?,
+                        None => 0,
+                    },
+                    transcode_max_per_user: match nd.get("transcoding.maxconcurrentperuser")? {
+                        Some(v) => v.trim().parse().map_err(|_| format!("Transcoding.MaxConcurrentPerUser={v} is not a number"))?,
+                        None => 0,
+                    },
+                    transcode_enable_cancellation: match nd.get_bool("transcoding.enablecancellation")? {
+                        Some(v) => v,
+                        None => nd.get_bool("enabletranscodingcancellation")?.unwrap_or(false),
+                    },
                 }
             },
         };

@@ -1507,8 +1507,119 @@ async fn streams_that_stay_navidromes() {
     // the player's settings: a lower bit rate, a transcoding
     w.db().execute("UPDATE player SET max_bit_rate = 128", []).unwrap();
     navidromes(w.stream("GET", "id=s-1", &[]).await);
-    w.db().execute("UPDATE player SET max_bit_rate = 0, transcoding_id = 'mp3'", []).unwrap();
+    // (a transcoding id without its row makes Navidrome register no player: no cookie, so all of it is Navidrome's)
+    w.db().execute("INSERT INTO transcoding (id, name, target_format, default_bit_rate) VALUES ('t-mp3', 'mp3 audio', 'mp3', 192)", []).unwrap();
+    w.db().execute("UPDATE player SET max_bit_rate = 0, transcoding_id = 't-mp3'", []).unwrap();
     navidromes(w.stream("GET", "id=s-1", &[]).await);
     let (status, headers, _) = w.stream("GET", "id=s-1&format=raw", &[]).await;
     assert_eq!((status, &headers[library::ANSWERED_HEADER]), (StatusCode::OK, &hyper::header::HeaderValue::from_static("rust")), "raw is raw for any player");
+}
+
+// ---------------------------------------------------------------- transcoding (phase 5, part 2)
+
+/// A stand-in for ffmpeg: it writes down its arguments, then does what `mode.txt` says (`ok`: writes `payload.bin`;
+/// `fail`: exits 1 without a byte; `slow`: waits two seconds first).
+fn fake_ffmpeg(dir: &Path) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("mode.txt"), "ok").unwrap();
+    std::fs::write(dir.join("payload.bin"), "ID3 transcoded audio, as ffmpeg would write it ".repeat(50)).unwrap();
+    if cfg!(windows) {
+        let script = dir.join("ffmpeg.cmd");
+        std::fs::write(
+            &script,
+            "@echo off\r\necho %*>\"%~dp0args.txt\"\r\nset /p MODE=<\"%~dp0mode.txt\"\r\nif \"%MODE%\"==\"fail\" exit /b 1\r\n\
+             if \"%MODE%\"==\"slow\" ping -n 3 127.0.0.1 >nul\r\ntype \"%~dp0payload.bin\"\r\n",
+        )
+        .unwrap();
+        script
+    } else {
+        let script = dir.join("ffmpeg");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nhere=$(dirname \"$0\")\necho \"$*\" > \"$here/args.txt\"\nmode=$(cat \"$here/mode.txt\")\n\
+             [ \"$mode\" = fail ] && exit 1\n[ \"$mode\" = slow ] && sleep 2\ncat \"$here/payload.bin\"\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        script
+    }
+}
+
+async fn world_with_ffmpeg(max_concurrent: i64) -> (World, PathBuf) {
+    let tools = std::env::temp_dir().join(format!("sonus-fake-ffmpeg-{}-{}", std::process::id(), WORLDS.fetch_add(1, Ordering::Relaxed)));
+    let program = fake_ffmpeg(&tools);
+    let options = LibraryOptions {
+        ffmpeg_path: program.to_string_lossy().into_owned(),
+        cache_folder: tools.join("cache").to_string_lossy().into_owned(),
+        transcode_max_concurrent: max_concurrent,
+        ..LibraryOptions::default()
+    };
+    let w = world_with(options, true).await;
+    let music = w.dir.join("music");
+    std::fs::create_dir_all(music.join("a")).unwrap();
+    std::fs::write(music.join("a").join("One.flac"), b"fLaC and then the song").unwrap();
+    w.db().execute("UPDATE library SET path = ?1", [music.to_string_lossy()]).unwrap();
+    (w, tools)
+}
+
+#[tokio::test]
+async fn a_transcode_is_run_here_then_served_from_the_cache() {
+    let (w, tools) = world_with_ffmpeg(0).await;
+    let payload = std::fs::read(tools.join("payload.bin")).unwrap();
+    // flac at 320 asked for as mp3 at 128: lossless to lossy at the client's bit rate, Navidrome's arguments
+    let (status, headers, body) = w.stream("GET", "id=s-1&format=mp3&maxBitRate=128", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[library::ANSWERED_HEADER], "rust");
+    assert_eq!(body, payload);
+    assert_eq!(headers[header::CONTENT_TYPE], "audio/mpeg");
+    assert_eq!(headers[header::ACCEPT_RANGES], "none", "not seekable while it is made");
+    assert!(headers.get(header::CONTENT_LENGTH).is_none());
+    assert_eq!(headers["x-content-duration"], "61.9");
+    let args = std::fs::read_to_string(tools.join("args.txt")).unwrap();
+    assert!(args.starts_with("-nostdin -protocol_whitelist file -i file:"), "{args}");
+    assert!(args.contains("One.flac -map 0:a:0 -map_metadata 0 -map_metadata 0:s:a:0 -c:a libmp3lame -b:a 128k -ar 44100 -ac 2 -v 0 -f mp3 -"), "{args}");
+    // once finished it is a file in the cache: a length, ranges, the song's time
+    let mut cached = None;
+    for _ in 0..50 {
+        let answer = w.stream("GET", "id=s-1&format=mp3&maxBitRate=128", &[]).await;
+        if answer.1.get(header::CONTENT_LENGTH).is_some() {
+            cached = Some(answer);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (status, headers, body) = cached.expect("the transcode is cached");
+    assert_eq!((status, body), (StatusCode::OK, payload.clone()));
+    assert_eq!(headers[header::ACCEPT_RANGES], "bytes");
+    assert_eq!(headers[header::LAST_MODIFIED], "Thu, 01 Jan 2026 12:00:00 GMT");
+    std::fs::write(tools.join("mode.txt"), "fail").unwrap();
+    let (status, headers, body) = w.stream("GET", "id=s-1&format=mp3&maxBitRate=128", &[("Range", "bytes=4-9")]).await;
+    assert_eq!((status, &body[..]), (StatusCode::PARTIAL_CONTENT, &payload[4..10]), "from the cache: ffmpeg is not run again");
+    assert_eq!(headers[header::CONTENT_TYPE], "audio/mpeg");
+    // another bit rate is another entry: ffmpeg fails before its first byte, so Navidrome answers (in its words)
+    let (_, headers, body) = w.stream("GET", "id=s-1&format=mp3&maxBitRate=96", &[]).await;
+    assert_eq!(body, b"from navidrome");
+    assert!(headers.get(library::ANSWERED_HEADER).is_none());
+    let _ = std::fs::remove_dir_all(&tools);
+}
+
+#[tokio::test]
+async fn transcodes_over_navidromes_cap_are_refused_as_navidrome_refuses_them() {
+    let (w, tools) = world_with_ffmpeg(1).await;
+    std::fs::write(tools.join("mode.txt"), "slow").unwrap();
+    let first = w.stream("GET", "id=s-1&format=opus", &[]);
+    let second = async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        w.stream("GET", "id=s-1&format=mp3", &[]).await
+    };
+    let ((status, _, body), (busy, headers, refusal)) = tokio::join!(first, second);
+    assert_eq!((status, body.len() as u64), (StatusCode::OK, std::fs::metadata(tools.join("payload.bin")).unwrap().len()), "the first runs");
+    assert_eq!(busy, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(headers[header::RETRY_AFTER], "5");
+    assert_eq!(String::from_utf8(refusal).unwrap(), failed(0, "too many concurrent transcodes, please retry shortly"));
+    let _ = std::fs::remove_dir_all(&tools);
 }

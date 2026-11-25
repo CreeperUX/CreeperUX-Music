@@ -5,7 +5,8 @@
 //! `core/stream/legacy_client.go`): what Navidrome calls a "raw" stream, served as Go's `http.ServeContent` serves a
 //! file: ranges, `HEAD`, and the `If-…` conditions, with the song's `updated_at` as the file's time. A stream
 //! Navidrome would transcode (a format asked for, a bit rate below the song's, a player with a transcoding or a lower
-//! bit rate set) is Navidrome's until transcoding moves here too.
+//! bit rate set) is decided as Navidrome decides it (transcode.rs) and run by ffmpeg (transcoder.rs); once in the
+//! transcoding cache it is a file like the song's own.
 //!
 //! The file's path is never the client's: the client names a song by its id, the song's row (as the user may read it)
 //! gives its path inside its library's folder, and a path that would leave that folder is not opened here.
@@ -16,6 +17,7 @@ use std::path::{Component, Path, PathBuf};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc};
 use hyper::StatusCode;
 use hyper::header::{self, HeaderMap, HeaderName, HeaderValue};
+use rusqlite::OptionalExtension;
 use rusqlite::types::Value;
 
 use crate::gotime;
@@ -23,7 +25,7 @@ use crate::subsonic::respond::MISSING_PARAMETER;
 
 use super::browse::{int_or, string};
 use super::query::{self, Cond, ListOptions, QueryError, Song};
-use super::{NOT_FOUND, Reply, Scope, entities};
+use super::{NOT_FOUND, Reply, Scope, entities, transcode, transcoder};
 
 /// What is sent: a status, headers beside Navidrome's usual ones, and a body.
 pub struct Media {
@@ -35,13 +37,17 @@ pub struct Media {
 pub enum MediaBody {
     /// No body (a `HEAD`, 304, 412).
     Empty,
-    /// Go's `http.Error` text.
-    Text(String),
+    /// A body known whole: Go's `http.Error` text, a short transcode.
+    Text(Vec<u8>),
     /// `length` bytes of the open file from `start` on.
     File { file: std::fs::File, start: u64, length: u64 },
+    /// A running transcode's output.
+    Transcode(tokio::sync::mpsc::Receiver<transcoder::Chunk>),
+    /// The first bytes of a running transcode, held, then the rest of it.
+    Held(Vec<u8>, tokio::sync::mpsc::Receiver<transcoder::Chunk>),
 }
 
-/// `stream`: the song's file as it is, or Navidrome's to answer.
+/// `stream`: the song's file as it is, transcoded, or Navidrome's to answer.
 pub fn stream(scope: &Scope) -> Result<Reply, QueryError> {
     let params = scope.params;
     let id = match string(params, "id") {
@@ -54,37 +60,41 @@ pub fn stream(scope: &Scope) -> Result<Reply, QueryError> {
         Ok(format) => format.unwrap_or(""),
         Err(reply) => return Ok(reply),
     };
+    let offset = int_or(params, "timeOffset", 0);
     let list = ListOptions { filter: Some(Cond::eq("media_file.id", Value::Text(id.to_string()))), ..ListOptions::default() };
     let songs = query::songs(scope.conn, scope.viewer, scope.options, &list)?;
     let Some(song) = songs.first() else { return Ok(Reply::error(NOT_FOUND, "data not found")) };
-    if let Some(why) = transcoded(song, format, max_bit_rate, scope) {
-        return Ok(Reply::Navidrome(why));
+    let Some(player) = scope.player else { return Ok(Reply::Navidrome("no player: Navidrome's")) };
+    // the player's transcoding, as Navidrome's middleware loads it
+    let forced = if player.transcoding_id.is_empty() {
+        None
+    } else {
+        match transcoding(scope.conn, "id", &player.transcoding_id)? {
+            Some(row) => Some(row),
+            None => return Ok(Reply::Navidrome("a player whose transcoding is not there")),
+        }
+    };
+    let find = |format: &str| transcoding(scope.conn, "target_format", format).ok().flatten();
+    let cx = transcode::Context {
+        player_max_bit_rate: player.max_bit_rate,
+        player_transcoding: forced.as_ref(),
+        default_downsampling_format: &scope.options.default_downsampling_format,
+        find: &find,
+    };
+    let request = transcode::resolve_request(song, format, max_bit_rate, &cx);
+    if request.is_raw() {
+        return Ok(serve_raw(song, scope.http_method, scope.headers));
     }
-    Ok(serve_raw(song, scope.http_method, scope.headers))
+    Ok(transcoded(song, &request, offset, scope, &find))
 }
 
-/// Why Navidrome would not send the file as it is (`ResolveRequest`), if it would not.
-fn transcoded(song: &Song, format: &str, max_bit_rate: i64, scope: &Scope) -> Option<&'static str> {
-    if format == "raw" {
-        // asked for as it is: whatever the player's settings
-        return None;
-    }
-    if !format.is_empty() {
-        return Some("a format asked for: transcoding is Navidrome's");
-    }
-    let Some(player) = scope.player else { return Some("no player: Navidrome's") };
-    if player.transcodes {
-        return Some("the player has a transcoding set");
-    }
-    // buildLegacyClientInfo: a bit rate below the song's, from the request or the player, makes Navidrome transcode
-    // to DefaultDownsamplingFormat; otherwise every profile plays the file directly, and a player's lower bit rate
-    // alone, with no profile to transcode to, falls back to the file as it is
-    let downsampling = &scope.options.default_downsampling_format;
-    let below = |limit: i64| limit > 0 && limit < song.bit_rate;
-    if !downsampling.is_empty() && (below(max_bit_rate) || below(player.max_bit_rate)) {
-        return Some("a bit rate below the song's: Navidrome transcodes it");
-    }
-    None
+/// `ds.Transcoding(ctx)`: a row by its id or its format.
+fn transcoding(conn: &rusqlite::Connection, column: &str, value: &str) -> Result<Option<transcode::Transcoding>, QueryError> {
+    let sql = format!("SELECT target_format, coalesce(default_bit_rate, 0), coalesce(command, '') FROM transcoding WHERE {column} = ? LIMIT 1");
+    Ok(conn
+        .prepare_cached(&sql)?
+        .query_row([value], |r| Ok(transcode::Transcoding { target_format: r.get(0)?, default_bit_rate: r.get(1)?, command: r.get(2)? }))
+        .optional()?)
 }
 
 /// Whether a song's stored path stays inside its library's folder: relative, without `..`.
@@ -95,6 +105,14 @@ pub fn inside_library(path: &str) -> bool {
 /// `mf.AbsolutePath()`.
 pub fn file_of(song: &Song) -> PathBuf {
     Path::new(&song.library_path).join(&song.path)
+}
+
+/// The song's time as Go has it (none: Go's zero time); Err when it cannot be read as Go reads it.
+fn song_time(song: &Song) -> Result<Option<DateTime<Utc>>, ()> {
+    match song.updated_at.as_deref() {
+        None => Ok(None),
+        Some(text) => gotime::parse(text).map(|time| Some(time).filter(|time| !is_go_zero(time))).ok_or(()),
+    }
 }
 
 /// The song's file as `http.ServeContent` serves it, or Navidrome's to answer.
@@ -109,24 +127,86 @@ fn serve_raw(song: &Song, method: &str, request: &HeaderMap) -> Reply {
     let Some(content_type) = entities::content_type(&song.suffix) else {
         return Reply::Navidrome("a song whose content type Go would take from the operating system's tables");
     };
-    // the song's time (none: Go's zero time); the conditions and Last-Modified leave out the epoch too
-    let stored = match song.updated_at.as_deref() {
-        None => None,
-        Some(text) => match gotime::parse(text) {
-            Some(time) => Some(time).filter(|time| !is_go_zero(time)),
-            None => return Reply::Navidrome("a song's time this server does not read as Go does"),
-        },
-    };
-    let modtime = stored.filter(|time| !is_zero_time(time));
-    let mut file = match std::fs::File::open(file_of(song)) {
+    let Ok(stored) = song_time(song) else { return Reply::Navidrome("a song's time this server does not read as Go does") };
+    let file = match std::fs::File::open(file_of(song)) {
         Ok(file) => file,
         Err(_) => return Reply::Navidrome("the song's file cannot be opened: Navidrome's error"),
     };
+    serve_file(file, content_type, song.duration, stored, method, request)
+}
+
+/// A transcoded stream (`NewStream` past `ResolveRequest`): the finished cache entry as a file, or a transcode to run.
+fn transcoded(song: &Song, request: &transcode::Request, offset: i64, scope: &Scope, find: &dyn Fn(&str) -> Option<transcode::Transcoding>) -> Reply {
+    if !transcode::is_default_command(&request.format, &transcode::command_for(&request.format, find)) {
+        return Reply::Navidrome("a transcoding with a command of its own, which only Navidrome runs");
+    }
+    if !scope.transcoder.available() {
+        return Reply::Navidrome("no ffmpeg found: Navidrome's error");
+    }
+    if !inside_library(&song.path) {
+        return Reply::Navidrome("a song whose stored path leaves its library's folder");
+    }
+    let path = file_of(song);
+    if !path.is_file() {
+        return Reply::Navidrome("the song's file is not there: Navidrome's error");
+    }
+    let Some(content_type) = entities::content_type(&request.format) else { return Reply::Navidrome("a format without a content type") };
+    let Ok(stored) = song_time(song) else { return Reply::Navidrome("a song's time this server does not read as Go does") };
+    // streamJob.Key(): a new entry once the song's row changes
+    let key = format!(
+        "{}.{}.{}.{}.{}.{}.{}.{}",
+        song.id,
+        song.updated_at.as_deref().unwrap_or(""),
+        request.bit_rate,
+        request.sample_rate,
+        request.bit_depth,
+        request.channels,
+        request.format,
+        offset
+    );
+    if let Some(cached) = scope.transcoder.cached(&key) {
+        // a finished transcode is a file: ranges and conditions as for the song's own
+        if let Ok(file) = std::fs::File::open(&cached) {
+            return serve_file(file, content_type, song.duration, stored, scope.http_method, scope.headers);
+        }
+    }
+    let Some(input) = transcoder::ffmpeg_input(&path) else { return Reply::Navidrome("a path ffmpeg cannot be given") };
+    let Some(ffmpeg_args) = transcode::ffmpeg_args(request, &input, offset) else { return Reply::Navidrome("a format only Navidrome transcodes") };
+    // ffmpeg reads no keyboard and opens nothing but files
+    let mut args: Vec<String> = ["-nostdin", "-protocol_whitelist", "file"].map(String::from).to_vec();
+    args.extend(ffmpeg_args);
+    let estimate =
+        std::str::from_utf8(scope.params.get("estimateContentLength")).map(|v| ["true", "on", "1"].contains(&v.to_lowercase().as_str())).unwrap_or(false);
+    let job = transcoder::Job { key, args, flac_duration: song.duration as f32 - offset as f32, user: scope.viewer.id.clone() };
+    Reply::Transcode(Box::new(Pending {
+        job,
+        content_type,
+        duration: go_float32(song.duration as f32),
+        length: estimate.then(|| transcode::estimated_length(song.duration, request.bit_rate)),
+        head: scope.http_method == "HEAD",
+    }))
+}
+
+/// A transcode to start once the database is let go (mod.rs).
+pub struct Pending {
+    pub job: transcoder::Job,
+    pub content_type: &'static str,
+    /// `X-Content-Duration`.
+    pub duration: String,
+    /// `estimateContentLength`: the length announced.
+    pub length: Option<i64>,
+    pub head: bool,
+}
+
+/// `http.ServeContent` of an open file, with the song's time and duration.
+fn serve_file(mut file: std::fs::File, content_type: &'static str, duration: f64, stored: Option<DateTime<Utc>>, method: &str, request: &HeaderMap) -> Reply {
+    // the conditions and Last-Modified leave out the epoch as well as Go's zero time
+    let modtime = stored.filter(|time| !is_zero_time(time));
     let size = match file.metadata() {
         Ok(meta) if meta.is_file() => meta.len(),
         _ => return Reply::Navidrome("the song's path is not a file"),
     };
-    let mut headers = vec![(HeaderName::from_static("x-content-duration"), HeaderValue::from_str(&go_float32(song.duration as f32)).expect("digits"))];
+    let mut headers = vec![(HeaderName::from_static("x-content-duration"), HeaderValue::from_str(&go_float32(duration as f32)).expect("digits"))];
     if let Some(time) = &modtime {
         headers.push((header::LAST_MODIFIED, HeaderValue::from_str(&http_date(time)).expect("a date")));
     }
@@ -151,7 +231,7 @@ fn serve_raw(song: &Song, method: &str, request: &HeaderMap) -> Reply {
             }
             headers.push((header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8")));
             let text = if error == RangeError::NoOverlap { "invalid range: failed to overlap" } else { "invalid range" };
-            return Reply::Media(Media { status: StatusCode::RANGE_NOT_SATISFIABLE, headers, body: MediaBody::Text(format!("{text}\n")) });
+            return Reply::Media(Media { status: StatusCode::RANGE_NOT_SATISFIABLE, headers, body: MediaBody::Text(format!("{text}\n").into_bytes()) });
         }
     };
     // a request for more bytes than the file has is answered with the whole file

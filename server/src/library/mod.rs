@@ -26,6 +26,8 @@ pub mod playing;
 pub mod query;
 pub mod search;
 pub mod stream;
+pub mod transcode;
+pub mod transcoder;
 pub mod writes;
 
 use std::collections::HashMap;
@@ -117,6 +119,7 @@ pub struct Library {
     /// What is playing now (`scrobble` without `submission`, `getNowPlaying`): kept here, as Navidrome kept it in
     /// its memory.
     now_playing: Arc<playing::NowPlaying>,
+    transcoder: Arc<transcoder::Transcoder>,
     /// How many requests were answered here, and how many went on to Navidrome.
     answered: AtomicU64,
     passed: AtomicU64,
@@ -166,6 +169,8 @@ pub enum Reply {
     },
     /// A song's file, or part of it, with the status and headers Go's `ServeContent` gives it (stream.rs).
     Media(stream::Media),
+    /// A transcode to run (stream.rs, transcoder.rs).
+    Transcode(Box<stream::Pending>),
     Navidrome(&'static str),
 }
 
@@ -201,6 +206,8 @@ pub struct Scope<'a> {
     /// The HTTP method, and the request's headers as they would go on to Navidrome (a stream's `Range`, `If-…`).
     pub http_method: &'a str,
     pub headers: &'a HeaderMap,
+    /// ffmpeg, its caps and the transcoding cache.
+    pub transcoder: &'a transcoder::Transcoder,
 }
 
 impl Scope<'_> {
@@ -230,6 +237,7 @@ pub fn seeded_order(seed: u64, id: &str) -> u64 {
 
 impl Library {
     pub fn new(setup: Setup) -> Library {
+        let transcoder = Arc::new(transcoder::Transcoder::new(transcoder_settings(&setup.options)));
         Library {
             players: Players::new(setup.db.clone(), setup.upstream, &setup.base_path, setup.user_header),
             db: setup.db,
@@ -238,6 +246,7 @@ impl Library {
             frame_options: HeaderValue::from_str(&setup.frame_options).unwrap_or(HeaderValue::from_static("DENY")),
             seeds: Arc::new(Mutex::new(HashMap::new())),
             now_playing: Arc::new(playing::NowPlaying::default()),
+            transcoder,
             answered: AtomicU64::new(0),
             passed: AtomicU64::new(0),
         }
@@ -307,7 +316,8 @@ impl Library {
             .or_else(|| player.as_ref().map(|player| player.id.clone()))
             .unwrap_or_default();
         let player_id = player.as_ref().map(|player| player.id.clone()).unwrap_or_default();
-        let (db, options, seeds, now_playing) = (self.db.clone(), self.options.clone(), self.seeds.clone(), self.now_playing.clone());
+        let (db, options, seeds, now_playing, transcoder) =
+            (self.db.clone(), self.options.clone(), self.seeds.clone(), self.now_playing.clone(), self.transcoder.clone());
         let (user_id, client, params) = (user.user_id.clone(), client.to_string(), params.clone());
         let (http_method_owned, request_headers, player_owned) = (http_method.to_string(), headers.clone(), player.clone());
         let reply = tokio::task::spawn_blocking(move || {
@@ -327,6 +337,7 @@ impl Library {
                     player: player_owned.as_ref(),
                     http_method: &http_method_owned,
                     headers: &request_headers,
+                    transcoder: &transcoder,
                 };
                 Ok(browse::answer(method, &scope))
             };
@@ -361,6 +372,7 @@ impl Library {
             Reply::Navidrome(why) => Err(why),
             Reply::Error { .. } if !json => Err("an error answer in a format other than JSON"),
             Reply::Media(media) => Ok(self.media(media, headers, player.as_ref())),
+            Reply::Transcode(pending) => self.transcode(*pending, headers, player.as_ref(), json).await,
             Reply::Error { code, message } => {
                 let (content_type, body) = respond::render(&self.envelope, &Format::Json, &Payload::Error { code, message: &message });
                 Ok(self.response(content_type, body, headers, player.as_ref(), Vec::new()))
@@ -425,8 +437,35 @@ impl Library {
     }
 }
 
+/// Go's `bufferBeforeChunkingSize`: an answer that ends within it goes out with its length.
+const GO_UNCHUNKED: usize = 2048;
+
 /// How much of a song's file is read at a time.
 const CHUNK: u64 = 64 << 10;
+
+/// The transcoder's settings from Navidrome's: ffmpeg where Navidrome would find it, the cache in a folder of this
+/// server's own beside Navidrome's caches.
+fn transcoder_settings(options: &LibraryOptions) -> transcoder::Settings {
+    let program = if options.ffmpeg_path.trim().is_empty() { "ffmpeg" } else { options.ffmpeg_path.trim() };
+    let caches = if options.cache_folder.is_empty() { std::path::Path::new(&options.data_folder).join("cache") } else { options.cache_folder.clone().into() };
+    transcoder::Settings {
+        ffmpeg: transcoder::find_program(program),
+        cache: transcoder::cache_size(&options.transcoding_cache_size).map(|size| (caches.join("sonus-transcoding"), size)),
+        max_concurrent: options.transcode_max_concurrent.max(0) as usize,
+        max_per_user: options.transcode_max_per_user.max(0) as usize,
+        enable_cancellation: options.transcode_enable_cancellation,
+    }
+}
+
+/// A running transcode's output, as it comes.
+fn transcode_body(held: Vec<u8>, output: tokio::sync::mpsc::Receiver<transcoder::Chunk>) -> Body {
+    use futures_util::StreamExt;
+    let first = (!held.is_empty()).then(|| Ok::<_, std::io::Error>(Bytes::from(held)));
+    let rest = futures_util::stream::unfold(output, |mut output| async move { Some((output.recv().await?, output)) });
+    let chunks =
+        StreamExt::map(futures_util::stream::iter(first).chain(rest), |chunk| chunk.map(hyper::body::Frame::data).map_err(crate::gateway::BoxError::from));
+    BodyExt::boxed(http_body_util::StreamBody::new(chunks))
+}
 
 /// The bytes of an open file, `length` of them from where it stands, read as they are sent.
 fn file_body(file: std::fs::File, length: u64) -> Body {
@@ -451,6 +490,60 @@ fn file_body(file: std::fs::File, length: u64) -> Body {
 }
 
 impl Library {
+    /// A transcode as Navidrome sends one it has not cached (`Stream.Serve`, not seekable): as it comes, without
+    /// ranges; over a cap, Navidrome's 429; ffmpeg failing before its first byte, Navidrome's to answer.
+    async fn transcode(&self, pending: stream::Pending, request: &HeaderMap, player: Option<&Player>, json: bool) -> Result<Response<Body>, &'static str> {
+        let output = match self.transcoder.start(pending.job).await {
+            Ok(output) => output,
+            Err(transcoder::Refused::Busy) if json => {
+                let message = "too many concurrent transcodes, please retry shortly";
+                let (content_type, body) = respond::render(&self.envelope, &Format::Json, &Payload::Error { code: 0, message });
+                let retry = vec![(header::RETRY_AFTER, HeaderValue::from_static("5"))];
+                let mut response = self.response(content_type, body, request, player, retry);
+                *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+                return Ok(response);
+            }
+            Err(transcoder::Refused::Busy) => return Err("too many transcodes, answered in a format other than JSON"),
+            Err(transcoder::Refused::Failed) => return Err("ffmpeg failed before its first byte: Navidrome's error"),
+        };
+        let mut headers = vec![
+            (HeaderName::from_static("x-content-duration"), HeaderValue::from_str(&pending.duration).expect("digits")),
+            (header::ACCEPT_RANGES, HeaderValue::from_static("none")),
+            (header::CONTENT_TYPE, HeaderValue::from_static(pending.content_type)),
+        ];
+        if let Some(length) = pending.length {
+            headers.push((header::CONTENT_LENGTH, HeaderValue::from(length)));
+        }
+        // a HEAD lets the transcode go on into the cache, as Navidrome drains it; nobody reads it here
+        let body = if pending.head {
+            drop(output);
+            stream::MediaBody::Empty
+        } else {
+            // Go's server holds the first 2048 bytes of an answer (bufferBeforeChunkingSize): an output that ends
+            // within them goes out with its length, a longer one in chunks
+            let mut output = output;
+            let mut held = Vec::new();
+            let mut ended = false;
+            while held.len() <= GO_UNCHUNKED {
+                match output.recv().await {
+                    Some(Ok(bytes)) => held.extend_from_slice(&bytes),
+                    Some(Err(_)) => return Err("ffmpeg failed within the first bytes: Navidrome's error"),
+                    None => {
+                        ended = true;
+                        break;
+                    }
+                }
+            }
+            if ended && pending.length.is_none() {
+                headers.push((header::CONTENT_LENGTH, HeaderValue::from(held.len())));
+                stream::MediaBody::Text(held)
+            } else {
+                stream::MediaBody::Held(held, output)
+            }
+        };
+        Ok(self.media(stream::Media { status: StatusCode::OK, headers, body }, request, player))
+    }
+
     /// A song's file as Navidrome sends it (stream.rs): its status and headers, Navidrome's usual ones, the player's
     /// cookie; never compressed.
     fn media(&self, media: stream::Media, request: &HeaderMap, player: Option<&Player>) -> Response<Body> {
@@ -458,6 +551,8 @@ impl Library {
             stream::MediaBody::Empty => Full::new(Bytes::new()).map_err(|never| match never {}).boxed(),
             stream::MediaBody::Text(text) => Full::new(Bytes::from(text)).map_err(|never| match never {}).boxed(),
             stream::MediaBody::File { file, length, .. } => file_body(file, length),
+            stream::MediaBody::Transcode(output) => transcode_body(Vec::new(), output),
+            stream::MediaBody::Held(held, output) => transcode_body(held, output),
         };
         let mut response = Response::new(body);
         *response.status_mut() = media.status;

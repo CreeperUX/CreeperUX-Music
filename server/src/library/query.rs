@@ -429,6 +429,9 @@ pub struct Song {
     pub sample_rate: i64,
     pub bit_depth: Option<i64>,
     pub channels: i64,
+    /// The codec the scanner stored, and what ffprobe found (JSON; empty: never probed).
+    pub codec: String,
+    pub probe_data: String,
     pub genre: String,
     pub sort_title: String,
     pub order_title: String,
@@ -782,6 +785,8 @@ pub(super) fn song_from(row: &Row) -> QueryResult<Song> {
         sample_rate: int(row, "sample_rate"),
         bit_depth: optional_int(row, "bit_depth"),
         channels: int(row, "channels"),
+        codec: text(row, "codec"),
+        probe_data: text(row, "probe_data"),
         genre,
         sort_title: text(row, "sort_title"),
         order_title: text(row, "order_title"),

@@ -523,7 +523,7 @@ The roadmap's phase 5: the songs' files, transcoding, covers, players, and the R
 | | As Navidrome |
 |---|---|
 | Which song | the id looked up as `getSong` does, as the signed-in user: unknown or in a library they are not granted, 70 `data not found`; no id, 10 |
-| Raw or not | `format=raw` is raw for any player; without a format, raw unless a bit rate below the song's (`maxBitRate`, or the player's) and `DefaultDownsamplingFormat` (default `opus`) make Navidrome transcode; a player with a transcoding set is Navidrome's |
+| Raw or not | `format=raw` is raw for any player; otherwise as Navidrome's decision (part 2, below) |
 | Answer | 200 with `Content-Type` (by the suffix, Navidrome's table), `Content-Length`, `Accept-Ranges: bytes`, `Last-Modified` (the song's `updated_at`, none for Go's zero time or the epoch), `X-Content-Duration` (the duration as Go writes a `float32`), Navidrome's usual headers and the player's cookie; never compressed |
 | `Range` | one range: 206 with `Content-Range`; past the end: 416 `invalid range: failed to overlap` with `Content-Range: bytes */size`; malformed: 416 `invalid range`; ranges adding up to more than the file: the whole file |
 | Conditions | `If-Match`, `If-Unmodified-Since` (412), `If-None-Match`, `If-Modified-Since` (304), `If-Range` (a range only for the same time to the second; an entity tag never matches, as Navidrome sends none); the three date layouts of Go's `http.ParseTime` |
@@ -531,8 +531,31 @@ The roadmap's phase 5: the songs' files, transcoding, covers, players, and the R
 | `timeOffset` | ignored for a raw stream, as by Navidrome |
 | Formats | the same file whatever `f` names; an error asked for in another format than JSON is Navidrome's |
 
-**Navidrome's still:** anything it would transcode (part 2), several ranges in one request (its multipart answer has a
-random boundary), a song whose file cannot be opened or is not a regular file (Navidrome's error names the path), a
+**Part 2: transcoding** (`src/library/transcode.rs`, `src/library/transcoder.rs`). The decision is Navidrome's legacy
+path, ported with its tests (`legacy_client.go`, `decider.go`): a `format` (an unknown one falls back to
+`DefaultDownsamplingFormat`, then to the file as it is), a `maxBitRate` below the song's, the player's `MaxBitRate`, or
+the player's forced transcoding; the source as stored probe data has it, else as the scanner read it; lossless to lossy
+at the client's (else the format's default) bit rate, lossy keeping its own, never lossy to lossless; opus at 48 kHz,
+mp3 at most 48 kHz and two channels, aac at most 96 kHz, DSD at an eighth of its rate and 24-bit. ffmpeg gets
+Navidrome's own arguments (`buildDynamicArgs`: `-map 0:a:0`, both `-map_metadata`, the codec, `-b:a`, `-ar`, `-ac`,
+`-sample_fmt` for flac, `-v 0`, the container), so the same ffmpeg writes the same bytes; a FLAC output gets the total
+sample count ffmpeg leaves out on a pipe, as Navidrome writes it in.
+
+| | As Navidrome |
+|---|---|
+| Not cached yet | 200, `Accept-Ranges: none`, the format's `Content-Type`, `X-Content-Duration`, no length (`estimateContentLength=true`: Navidrome's estimate), the bytes as ffmpeg writes them; `HEAD`: the headers, and the transcode goes on into the cache |
+| Cached | the finished entry served like the song's own file: length, ranges, conditions, `Last-Modified` the song's |
+| Caps | Navidrome's `Transcoding.MaxConcurrent`/`MaxConcurrentPerUser`: 429, `Retry-After: 5`, error 0 `too many concurrent transcodes, please retry shortly`; this server's own: at most 16 ffmpeg processes |
+| ffmpeg fails before its first byte | Navidrome's to answer (its error names the path) |
+| ffmpeg fails later | the answer ends short, as Navidrome's |
+
+The transcoding cache is this server's own (the roadmap: "转码缓存用自己的文件夹"): `<CacheFolder>/sonus-transcoding`,
+`TranscodingCacheSize` (default `100MB`, `0`: none), the least recently used entries dropped first. Navidrome's own
+cache (`<CacheFolder>/transcoding`) is no longer filled by Sonus clients and ages out as before. Bounds and the
+protection of the command line: `SECURITY.md`, "Media: transcoding".
+
+**Navidrome's still:** a transcoding with a command of its own (the owner's template), several ranges in one request
+(its multipart answer has a random boundary), a song whose file cannot be opened or is not a regular file (Navidrome's error names the path), a
 stored path that would leave its library's folder (`SECURITY.md`), a suffix Go finds no content type for in Navidrome's
 table, a date in a condition with a zone Go would look up locally, and **`download`**: no Sonus client downloads (the
 roadmap's decision 1), and its file name (`Content-Disposition`) is Navidrome's own ASCII folding and escaping, to be
@@ -706,6 +729,42 @@ These start this server as its image runs it: `cargo run`, which starts Navidrom
 database.
 
 ## Checked against the real Navidrome
+
+### Media (phase 5, part 2: transcoding), 2026-11-25
+
+Windows on ARM, Navidrome 0.64.2-sonus.10, `cargo run` (a debug build) in front of it. Both servers ran the same
+ffmpeg: `ffmpeg-n7.1.5-1-g7d0e842004-winarm64-gpl-7.1.zip` from BtbN/FFmpeg-Builds (release
+`autobuild-2026-06-30-13-34`), SHA-256 `2e61ed624facb68d8d9288f59cd8627807590dbd62882edc3a1004d46a3af87c`, unpacked under
+`tools/fixtures/.work/ffmpeg/` (never committed) and put first on the `PATH`. **Production runs the image's own Linux
+ffmpeg, another build: the same bytes here show the arguments and the plumbing are Navidrome's, not the bytes
+production will make.**
+
+- `node tools/contract/diff.mjs --go-vs-gateway --corpus tools/contract/corpus/read-only.json`: 532 of 532 the same,
+  430 answered here. 35 transcode requests: every format of the generated library to mp3 at 320, flac and mp3 to aac,
+  wav and flac to flac, mp3 and flac to opus, lossy to flac (falls back to opus), an unknown format (falls back), a
+  `maxBitRate` below the song's (opus), the song's own format at its bit rate (the file), `timeOffset`,
+  `estimateContentLength` (the answer then ends short of the announced length, on both sides), `HEAD`; then each
+  again from the cache (with a length, `Accept-Ranges: bytes`), with ranges, a condition, `HEAD`, and one cached by an
+  earlier `HEAD`. mp3, aac and flac are the same byte for byte; opus is the same but for its Ogg serial number, which
+  ffmpeg picks at random (two Navidromes differ the same way: `@sha256` volatile, the length compared). A mono song
+  asked for as opus at 320 kbit/s: libopus refuses more than 256 for one channel, ffmpeg fails before its first byte,
+  and both sides answer with Navidrome's error (a finding for the web client, which asks for opus at 320).
+- Before that, `--go-vs-go` on the transcode requests: 34 of 34 (the outputs are deterministic but for opus).
+- Found on the way: Go's server sends a `Content-Length` instead of chunks when a whole answer fits its 2048-byte
+  buffer (`bufferBeforeChunkingSize`); a short transcode is answered the same way here now.
+- The writes corpus with `--state`, ffmpeg present: 187 of 187, databases the same, twice; `--go-vs-go --state`: the
+  same. With ffmpeg present Navidrome's cover worker meets a playlist deleted during the run at another moment on each
+  side (before the deletion: a cover row; after: a queue row it retries, "data not found"); `db-state.mjs` now compares
+  such leftovers as "a deleted playlist left cover state", not row by row.
+- A corpus made from the golden database with `--streams`: 789 of 789. **On two copies of the production database**
+  (no music files on this computer; its four transcodings are Navidrome's built-in commands, no player has a
+  transcoding or a bit rate): 195 stream requests, 195 the same; the original's hash unchanged, copies and corpus
+  deleted.
+- `cargo test`: 297 (7 unit tests of the decision with Navidrome's own `legacy_client_test.go` cases and more, 3 of the
+  runner and cache, 2 integration tests with a stand-in ffmpeg: arguments, cache, ranges from the cache, a failure
+  before the first byte, Navidrome's 429). `run.mjs --through-gateway`: 132 of 132; node tests: 35 of 35.
+- **Correction to part 1**: its two transcode requests (`format=mp3`, a lower `maxBitRate`) were the same only because
+  neither Navidrome had an ffmpeg; they are now compared for real.
 
 ### Media (phase 5, part 1: songs' files), 2026-11-25
 

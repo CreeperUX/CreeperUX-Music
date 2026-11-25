@@ -136,10 +136,13 @@ async function answer(base, r, manifest, saved) {
   let res;
   const started = performance.now();
   try { res = await fetch(url, init); } catch (e) { return { error: `no answer: ${e.cause?.code ?? e.message}` }; }
-  const buf = Buffer.from(await res.arrayBuffer());
+  // a body that ends short of what was announced (a transcode's estimated length) is recorded, not thrown
+  let buf, ended = null;
+  try { buf = Buffer.from(await res.arrayBuffer()); } catch (e) { buf = Buffer.alloc(0); ended = `cut short: ${e.cause?.code ?? e.message}`; }
   const ms = performance.now() - started;
   const type = res.headers.get('content-type') ?? '';
   const out = { status: res.status };
+  if (ended) out.ended = ended;
   Object.defineProperty(out, 'ms', { value: ms, enumerable: false });
   // who answered is not part of the comparison (Navidrome never says): kept beside the answer
   Object.defineProperty(out, 'answeredBy', { value: res.headers.get(ANSWERED_HEADER) ?? null, enumerable: false });

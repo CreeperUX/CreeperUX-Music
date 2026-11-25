@@ -291,6 +291,10 @@ node tools/contract/diff.mjs --db <navidrome.db> --corpus tools/fixtures/.work/<
   warnings. Who answers is counted, not checked: on a database of unknown content that is the finding. `--json` writes
   everything, with the answers that differ. `--release` runs the Rust server's release build, for the times (it does
   not mark its own answers).
+- **Give both sides one public address**: `--env ND_BASEURL=https://music.example.com`. Without it, links Navidrome
+  builds from the address it was reached at (`artistImageUrl` in `search3` and `getStarred2` for artists with
+  pictures) name each side's own port and differ, though the rest of them is the same. The production-copy runs use
+  it.
 - **On the golden database** (`--env ND_PASSWORDENCRYPTIONKEY=<the manifest's>`): 650 requests, all the same.
 
 

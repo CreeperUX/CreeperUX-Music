@@ -251,6 +251,11 @@ impl Connect {
                 save_soon.notified().await;
                 let Some(inner) = weak.upgrade() else { return };
                 tokio::time::sleep(inner.setup.save_after).await;
+                // stop() wrote every session last: what the closing connections change after it is not written,
+                // so a stopped server never writes over the next one's rows
+                if inner.stopping.load(Ordering::Relaxed) {
+                    return;
+                }
                 let _ = tokio::task::spawn_blocking(move || inner.flush()).await;
             }
         });

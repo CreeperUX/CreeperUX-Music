@@ -32,6 +32,7 @@ pub mod search;
 pub mod stream;
 pub mod transcode;
 pub mod transcoder;
+pub mod useragent;
 pub mod writes;
 
 use std::collections::HashMap;
@@ -44,7 +45,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::header::{self, HeaderMap, HeaderName, HeaderValue};
-use hyper::{Response, StatusCode, Uri};
+use hyper::{Response, StatusCode};
 use tracing::{debug, warn};
 
 use crate::config::LibraryOptions;
@@ -105,10 +106,8 @@ pub struct Setup {
     pub envelope: Envelope,
     /// `HTTPHeaders.FrameOptions`.
     pub frame_options: String,
-    /// Navidrome's address, `BaseURL`'s path, and the header it takes the user from.
-    pub upstream: Uri,
+    /// `BaseURL`'s path (the player cookie's path).
     pub base_path: String,
-    pub user_header: HeaderName,
     /// Navidrome's public secret (`JWTPublicSecret`), which signs `artistImageUrl`; none: such answers are Navidrome's.
     pub public_signer: Option<crate::jwt::Signer>,
 }
@@ -256,7 +255,7 @@ impl Library {
         let images = images_cache(&setup.options);
         let link_settings = links::Settings { share_url: setup.options.share_url.clone(), base_url: setup.options.base_url.clone() };
         Library {
-            players: Players::new(setup.db.clone(), setup.upstream, &setup.base_path, setup.user_header),
+            players: Players::new(setup.db.clone(), &setup.base_path, setup.options.default_report_real_path),
             db: setup.db,
             options: Arc::new(setup.options),
             envelope: setup.envelope,
@@ -311,8 +310,8 @@ impl Library {
             None
         } else {
             // Navidrome registers the player before the method runs (getPlayer), and answers with its cookie
-            let registration = Registration { user_id: &user.user_id, user: user_header, client: params.get("c"), version: params.get("v"), headers };
-            let Some(player) = self.players.register(registration).await else { return Err("Navidrome registered no player") };
+            let registration = Registration { user_id: &user.user_id, user_name: user_header.as_bytes(), client: params.get("c"), headers };
+            let Some(player) = self.players.register(registration).await else { return Err("no player registered here: Navidrome's") };
             // (a write's answer holds no song: the player's transcoding and real paths do not matter to it; a stream
             // looks at the player's settings itself)
             let media = MEDIA.contains(&method);

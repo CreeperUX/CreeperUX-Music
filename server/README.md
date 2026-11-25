@@ -392,17 +392,15 @@ picture's hash as `ETag` (a resized one has a validator of its own), the state's
 Navidrome. A read from Navidrome's cache does not tell Navidrome the entry was used: when the cache is full, Navidrome
 may drop an entry sooner than it would have, and make it again when asked.
 
-**The player.** Navidrome registers a player for every Subsonic request: it finds it by the `nd-player-…` cookie, else
-by user, client name (`c`) and the browser family it reads from `User-Agent`, else makes one; it writes the player's
-address and last-seen time at most once a minute, and answers with the cookie. A player's settings change a song
-(`ReportRealPath`: the `path`; a forced transcoding). Registering stays Navidrome's until the methods that write a
-player's state move here (phase 4): for a request answered here the server sends Navidrome one `ping` as the
-signed-in user, with the request's client name, cookies, `User-Agent` and client address, and gives the client the
-`Set-Cookie` Navidrome answers with (`player.rs`). So the player is the row Navidrome would have found or made, by
-Navidrome's own rules. That answer is remembered for a minute per user, client name, `User-Agent` and cookies (the
-time Navidrome lets pass between two writes of a player); the player's row is read again at every request, and a row
-that is gone, or no longer this user's and client's, is registered anew. In Navidrome's log a client's reads thus show
-as one `ping` a minute.
+**The player.** Navidrome registers a player for every Subsonic request: it finds it by the `nd-player-…` cookie (when
+that player is this user's and this client's), else by user, client name (`c`) and the browser it reads from
+`User-Agent` (the useragent library's name and OS: `useragent.rs`), else makes one; it writes the player's name,
+browser, address and last-seen time at most once a minute, and answers with the cookie. A player's settings change a
+song and a stream (`ReportRealPath`, a forced transcoding, `MaxBitRate`). Since phase 5, part 4 the same registration
+is made here (`player.rs`) for the requests answered here, by Navidrome's rules, every column as Navidrome's `Put`
+writes it, the cookie named after the user name as the request carries it; Navidrome sees nothing of those requests,
+not even a `ping`. The player's row is read again at every request. Requests left to Navidrome are registered by
+Navidrome, as always: the two write the same rows by the same rules.
 
 **The last access.** Navidrome notes a user's last access at every request it answers, at most once a minute; so does
 the gateway for the requests it answers here (the same code as for `tokenInfo`).
@@ -501,11 +499,7 @@ reads them back the same:
 - **Navidrome's web UI**: its now-playing count comes over its event stream, from Navidrome, which now has no
   sessions, so the badge no longer updates by itself; opening the panel reads `getNowPlaying` (answered here) and
   shows the right list and count (decision 2).
-- **Player registration stays with Navidrome** (the `ping` described under the reads). Moving it would port
-  Navidrome's rules for finding or making a player (client, user agent, user), its cookie and its once-a-minute
-  write, for nothing a Sonus client would see: Navidrome's web UI still edits players through `/api`, and streams
-  (phase 5) still read them there. A write only needs the player's id (the key of its now-playing session) and its
-  `scrobble_enabled`, both read from the row Navidrome keeps. It moves with the streams.
+- **Player registration** moved here with the streams (phase 5, part 4: under the reads, "The player").
 - **Not the same as Navidrome**: an answer to a request carrying `X-ND-Client-Unique-Id` does not set that header's
   cookie (Navidrome's middleware does, for its web UI's later requests without the header; every request of its web
   UI carries the header); `getNowPlaying` from a player with a transcoding set goes to Navidrome, which has no
@@ -709,9 +703,9 @@ pushes linux/amd64 and linux/arm64, tagged `latest`, the Cargo version and `sha-
   decoded as Go decodes them;
 - `tests/gateway.rs` also: the 4 MiB limit on bodies to `/api` and `/jellyfin`;
 - `tests/library.rs`: the library's reads through the gateway, on a database with Navidrome's own tables
-  (`tests/common/library.sql`: the statements of a database the fork made) and a fake Navidrome that registers players
-  as the real one does: a song in Navidrome's bytes; that Navidrome sees a client's registration once a minute and
-  nothing else of the requests answered here; everything that stays Navidrome's reaching it signed in and whole (XML,
+  (`tests/common/library.sql`: the statements of a database the fork made) and a fake Navidrome: a song in Navidrome's bytes;
+  that Navidrome sees nothing of the requests answered here, and the player registered here as Navidrome registers it
+  (the cookie's player, the user's for this client and browser, a new one; written once a minute); everything that stays Navidrome's reaching it signed in and whole (XML,
   JSONP, `musicFolderId`, a transcoding player, an unknown content type, rows Go would read otherwise, no player);
   what a user sees (no library: nothing; an admin: everything; each their own stars and counts); every list type's
   order, paging, `X-Total-Count` and errors; the random list's pages; `EnableNaturalSorting`, `PreferSortTags`,
@@ -771,6 +765,23 @@ These start this server as its image runs it: `cargo run`, which starts Navidrom
 database.
 
 ## Checked against the real Navidrome
+
+### Players registered here (phase 5, part 4), 2026-11-26
+
+Windows on ARM, Navidrome 0.64.2-sonus.10, `cargo run` (a debug build) in front of it, ffmpeg 7.1.5 on the `PATH`:
+
+- `db-state.mjs` now compares the `player` table too (a new player's random id named by whose, which client and which
+  browser it is; `last_seen` as a time of the run). `diff.mjs --go-vs-gateway --state`: reads 547 of 547 and writes
+  187 of 187, the databases the same, players included.
+- **On two copies of the production database**, `--covers --streams --state --env ND_BASEURL=…`: 9847 of 9847, the
+  databases the same (28 player rows on each side). The original's hash unchanged; copies and corpus deleted.
+- `gateway.test.mjs`: Navidrome's debug log shows none of the requests answered here, not even a `ping`, and the
+  player row is the one Navidrome alone makes for the same client (name, browser, address, settings).
+- `cargo test`: the useragent library's own 102 cases (name and OS); the player from its cookie (this user's and
+  client's only), from user, client and browser, made anew; written once a minute, its settings kept; the cookie named
+  after the user name as carried; a player whose transcoding is gone left to Navidrome. Also: the two-step
+  verification test that confirmed with the previous 30-second step's code now waits away from a step's end (it
+  failed when the step changed between computing the code and the server checking it).
 
 ### Media (phase 5, part 3c: artist image links), 2026-11-25
 

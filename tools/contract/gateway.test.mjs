@@ -178,7 +178,7 @@ test('signed in by the gateway, a request is to Navidrome what it was with crede
   }
 });
 
-test('the library’s reads are answered by the Rust server: Navidrome sees a player’s registration and nothing else', { timeout: 600_000 }, async t => {
+test('the library’s reads are answered by the Rust server: Navidrome sees nothing of them, not even a registration', { timeout: 600_000 }, async t => {
   // at debug level Navidrome logs every request it gets, with its whole query
   const { go, rust, users } = await both(t, { ND_LOGLEVEL: 'debug' });
   const { listener } = users;
@@ -256,9 +256,9 @@ test('the library’s reads are answered by the Rust server: Navidrome sees a pl
   const lines = rustLog.split(String.fromCharCode(10));
   const requestsFor = method => lines.filter(line => line.includes(`/rest/${method}`) && line.includes(`c=${client}`) && !line.includes('mark=left-'));
   for (const method of ANSWERED_BY_RUST.filter(m => m !== 'ping')) assert.equal(requestsFor(method).length, 0, `no ${method} of the Rust server's reached Navidrome`);
-  // what did reach it: the player's registration, a ping as this user and client, once (it is remembered for a minute)
+  // not even the player's registration: the Rust server registers players itself now (phase 5), no ping is sent
   const registrations = lines.filter(line => line.includes('HTTP: GET') && line.includes('/rest/ping?') && line.includes(`c=${client}`));
-  assert.equal(registrations.length, 1, 'one registration for all the requests of one client');
+  assert.equal(registrations.length, 0, 'no registration reaches Navidrome');
 
   // The player is Navidrome's own row, made by its rules, on both servers; and the user's last access is written.
   const playerOf = server => {

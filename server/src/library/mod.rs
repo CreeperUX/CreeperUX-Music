@@ -16,6 +16,7 @@
 
 pub mod browse;
 pub mod catalog;
+pub mod disc;
 pub mod entities;
 pub mod filecache;
 pub mod json;

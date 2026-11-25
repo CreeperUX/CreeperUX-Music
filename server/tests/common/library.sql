@@ -446,3 +446,7 @@ CREATE TABLE artwork_queue (
   PRIMARY KEY (item_kind, item_id, image_type)
 ) WITHOUT ROWID;
 CREATE INDEX ix_artwork_queue_drain ON artwork_queue(item_kind, priority DESC, enqueued_at, retry_at);
+
+-- folders and their image files (phase 5: disc covers)
+CREATE TABLE folder( id varchar not null primary key, library_id integer not null references library (id) on delete cascade, path varchar default '' not null, name varchar default '' not null, missing boolean default false not null, parent_id varchar default '' not null, num_audio_files integer default 0 not null, num_playlists integer default 0 not null, image_files jsonb default '[]' not null, images_updated_at datetime default '0000-00-00 00:00:00' not null, updated_at datetime default (datetime(current_timestamp, 'localtime')) not null, created_at datetime default (datetime(current_timestamp, 'localtime')) not null , hash varchar default '' not null);
+CREATE INDEX folder_parent_id on folder(parent_id);

@@ -119,6 +119,11 @@ fn format_of(data: &[u8]) -> Option<ImageFormat> {
     }
 }
 
+/// Whether a square canvas of this size stays within the pixel cap.
+pub fn square_fits(size: u32) -> bool {
+    u64::from(size) * u64::from(size) <= MAX_PIXELS
+}
+
 /// `resizeImageData` without WebP encoding (Navidrome's when `EnableWebPEncoding` is on).
 pub fn resize(data: &[u8], size: u32, square: bool, quality: u8) -> Resized {
     if is_animated_gif(data) {
@@ -137,6 +142,12 @@ pub fn resize(data: &[u8], size: u32, square: bool, quality: u8) -> Resized {
     let original = width.max(height);
     let size = size.min(original);
     if original <= size && !square {
+        return Resized::Original;
+    }
+    // a square canvas is size × size, whatever the picture's own area: one of extreme shape (65535 × 1) would ask
+    // for gigabytes (Navidrome allocates it, and may run out of memory); bounded as the picture is, the original is
+    // served instead
+    if square && !square_fits(size) {
         return Resized::Original;
     }
     // aspect fit, truncated as Go's int(float64(…))
@@ -229,6 +240,14 @@ mod tests {
         bomb[16..24].copy_from_slice(&[0, 0, 0x40, 0, 0, 0, 0x40, 0]); // 16384 × 16384 in the IHDR
         assert_eq!(resize(&bomb, 100, false, 75), Resized::Original);
         assert!(matches!(resize(&picture(ImageFormat::Jpeg, 1000, 1), 10, false, 75), Resized::Navidromes(_)), "scaled to nothing");
+        // a picture within the pixel cap whose square canvas is not: 9000 × 1 asked for as a 9000 square would be
+        // 81 M pixels (324 MB); the original instead, nothing allocated
+        let thin = picture(ImageFormat::Png, 9000, 1);
+        assert_eq!(resize(&thin, 9000, true, 75), Resized::Original);
+        assert_eq!(resize(&thin, 20_000, true, 75), Resized::Original, "the size clamped to the picture's, still too big a square");
+        assert!(square_fits(8192), "8192 × 8192 is the cap itself");
+        assert!(!square_fits(8193));
+        assert!(!square_fits(65_535));
     }
 
     #[test]

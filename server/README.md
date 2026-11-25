@@ -567,11 +567,26 @@ two resizes at once (`SECURITY.md`).
 |---|---|
 | Placeholders | no id, an item settled without a picture, an item the user does not see or that is gone: Navidrome's own album or artist placeholder, `Cache-Control: no-store`, no validators |
 | A short answer | a picture within Go's 2048-byte buffer goes out with its `Content-Length`, a longer one chunked, as Go's server sends it |
-| Not the same | the bytes of a resize (another encoder, other pixels at the edges of the scaling): the same format, width and height |
+| Not the same | the bytes of a resize (another encoder, other pixels at the edges of the scaling): the same format, width and height; a square over 8192 × 8192 (a picture of extreme shape): the original here, where Navidrome allocates the canvas (`SECURITY.md`) |
 
-**Navidrome's still (covers):** a picture with no artwork state yet, a disc's cover (`dc-`), a song's cover when it
-has none of its own, an animated GIF resized, `EnableWebPEncoding`, a size that scales the picture to nothing, a
-picture whose bytes are not where its state says (Navidrome looks again, a write). Part 3b.
+**Part 3b: disc covers, and a song's falling back** (`src/library/disc.rs`). A disc's cover (`dc-<album>:<disc>`) is
+looked for at every request, as Navidrome does (`core/artwork/disc.go`): the album's folders' image files (with its
+root folder's when the album lives in disc folders and that folder holds no other album's audio), in Navidrome's
+order (name in natural order, then shallower, then path), walked by `DiscArtPriority` (default
+`disc*.*, cd*.*, cover.*, folder.*, front.*, discsubtitle, embedded`): a file numbered for this disc first, else the
+first match (in a multi-folder album, in the disc's own folders); a file named as the disc's subtitle; the picture
+embedded in the disc's first song (lofty; TagLib's choice: a front cover, else a cover, else the first). Nothing
+found: the album's cover. Validated by the newest of the album's times and its folders' image times
+(`<id>|<nanoseconds>|<priority>`, the representation tag around it), resized and cached as any cover. A song's cover
+when the song has none of its own (settled absent, or no state and no picture in the file, or
+`EnableMediaFileCoverArt` off): its disc's, or its album's without a disc number. A disc or song the user does not
+see: error 70 `Artwork not found`, as Navidrome answers.
+
+**Navidrome's still (covers):** a picture with no artwork state yet (albums, artists, playlists, and a song with a
+picture of its own: Navidrome resolves it and queues the result, a write), an embedded picture in a format lofty does
+not read as TagLib (or a file it cannot read), a listed image file that cannot be opened, a disc id without a number,
+an animated GIF resized, `EnableWebPEncoding`, a size that scales the picture to nothing, a picture whose bytes are not
+where its state says (Navidrome looks again, a write).
 
 **Navidrome's still:** a transcoding with a command of its own (the owner's template), several ranges in one request
 (its multipart answer has a random boundary), a song whose file cannot be opened or is not a regular file (Navidrome's error names the path), a
@@ -748,6 +763,26 @@ These start this server as its image runs it: `cargo run`, which starts Navidrom
 database.
 
 ## Checked against the real Navidrome
+
+### Media (phase 5, part 3b: disc covers), 2026-11-25
+
+Windows on ARM, Navidrome 0.64.2-sonus.10, `cargo run` (a debug build) in front of it, ffmpeg 7.1.5 on the `PATH`:
+
+- `diff.mjs --go-vs-gateway` (reads): 547 of 547, 453 answered here. 54 cover requests, 11 new: discs 1 and 2 of a
+  two-disc album, a disc asked for by a hash, the disc of an album without a picture (its placeholder), a disc that
+  is not there (the album's cover), an unknown album (70), a disc id without a number (Navidrome's), a disc resized
+  and again from each side's cache, songs without a picture of their own (their disc's).
+- The writes corpus with `--state`: 187 of 187, databases the same. `run.mjs --through-gateway`: 132 of 132; node
+  tests 39 of 39 (`gateway.test.mjs` now counts a disc cover among the answers given here).
+- Corpora made from the golden database and **two copies of the production database** with `--covers --streams`
+  (now four disc covers per run) and `--env ND_BASEURL=https://music.example.com`: 841 of 841 and 9841 of 9841; the
+  original's hash unchanged, copies and corpora deleted.
+- `cargo test`: disc ids, Go's glob, Navidrome's image file order, TagLib's choice of picture; integration: a disc's
+  numbered file, the first match further down, the validator and its time, a song's disc, 70 for another user, a
+  disc without a picture showing its album's (immutable for the album's hash).
+- Also in this PR: a square canvas over 64 Mi pixels is never made (the original instead; `SECURITY.md`), the
+  placeholders' notice rewritten, and `auth-routes.test.mjs` sends a refused 4 MiB body again when the connection was
+  reset under it (a timing race of the test, not of the servers).
 
 ### Media (phase 5, part 3a: covers resized here, placeholders), 2026-11-25
 

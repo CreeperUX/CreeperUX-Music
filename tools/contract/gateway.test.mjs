@@ -205,6 +205,7 @@ test('the library’s reads are answered by the Rust server: Navidrome sees a pl
     ['getLyricsBySongId', { id: ids['track.syncedLyrics'] }],
     ['getCoverArt', { id: `al-${ids['album.folderCover']}` }],
     ['getCoverArt', { id: `al-${ids['album.compilation']}` }],
+    ['getCoverArt', { id: `dc-${ids['album.twoDiscs']}:1` }],
   ].map(([method, params], i) => [method, { ...params, mark: `taken-${i}-${method}${params.type === 'random' ? '-random' : ''}` }]);
   const left = [
     ['getSong', { id: ids['track.flac'], f: 'xml', mark: 'left-xml' }],
@@ -213,7 +214,7 @@ test('the library’s reads are answered by the Rust server: Navidrome sees a pl
     ['getPlaylist', { id: ids['playlist.otherUser'], f: 'xml', mark: 'left-playlist-xml' }],
     ['search3', { query: 'kenji', musicFolderId: 1, mark: 'left-search-music-folder' }],
     ['getLyricsBySongId', { id: ids['track.lrcSidecar'], mark: 'left-lyrics-file' }],
-    ['getCoverArt', { id: `dc-${ids['album.twoDiscs']}:1`, mark: 'left-disc-cover' }],
+    ['getCoverArt', { id: `dc-${ids['album.twoDiscs']}`, mark: 'left-disc-cover-without-a-number' }],
     ['getScanStatus', { mark: 'left-scan-status' }],
   ];
   for (const [method] of taken) assert.ok(ANSWERED_BY_RUST.includes(method), method);

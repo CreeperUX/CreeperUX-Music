@@ -21,7 +21,8 @@ use crate::gotime;
 use crate::subsonic::respond::{AUTHORIZATION_FAIL, GENERIC, MISSING_PARAMETER};
 
 /// The methods answered here that write.
-pub const METHODS: [&str; 7] = ["star", "unstar", "setRating", "savePlayQueue", "createPlaylist", "updatePlaylist", "deletePlaylist"];
+pub const METHODS: [&str; 9] =
+    ["star", "unstar", "setRating", "savePlayQueue", "createPlaylist", "updatePlaylist", "deletePlaylist", "scrobble", "reportPlayback"];
 
 /// What an id names, as `GetEntityByID` finds it: the table its annotations are kept for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

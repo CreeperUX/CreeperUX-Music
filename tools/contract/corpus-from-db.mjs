@@ -222,7 +222,8 @@ export function buildCorpus(db, { seed = 1, covers = false } = {}) {
  * compared: diff.mjs --db … --state). Stars and unstars (songs, albums, artists, every playlist: someone else's
  * private one is skipped), the same items rated by several users (averages), ratings cleared, the user's own stars
  * and ratings from before undone, unknown ids, the play queue saved, saved again, and emptied; playlists made,
- * changed, replaced and deleted, the user's own from before changed and replaced, someone else's refused.
+ * changed, replaced and deleted, the user's own from before changed and replaced, someone else's refused; plays at
+ * given times and without one, and what is playing now.
  */
 export function buildWritesCorpus(db, { seed = 1 } = {}) {
   const rnd = random(seed);
@@ -298,7 +299,27 @@ export function buildWritesCorpus(db, { seed = 1 } = {}) {
     if (notMine.length) req(user, "updatePlaylist someone else's (50, or 70 when private)", 'updatePlaylist', { playlistId: notMine[0], name: 'not yours' });
     req(user, 'deletePlaylist the first one', 'deletePlaylist', { id: `{{saved.${a}}}` }, { post: true });
     req(user, 'getPlaylists after the playlist changes', 'getPlaylists', {});
+    // plays: at given times (several in one call, an earlier one, a song with several artists), and now playing
+    const played = mine(songs, 10);
+    const base = 1767225600000 + u * 86_400_000;
+    req(user, 'scrobble 10 plays in one call', 'scrobble', { id: played, time: played.map((_, i) => String(base + i * 60_000)) }, { post: true });
+    req(user, 'scrobble an earlier play of the first', 'scrobble', { id: played[0], time: String(base - 365 * 86_400_000) });
+    const many = all(`select id from media_file where missing = 0 and json_array_length(participants, '$.artist') > 1 order by id`).map(r => r.id);
+    if (many.length) req(user, 'scrobble songs with several artists', 'scrobble', { id: sample(many, 3, rnd), time: ['1', '2', '3'].map(n => String(base + 7_200_000 + Number(n))) });
+    req(user, 'scrobble an unknown id and one without a time', 'scrobble.view', { id: ['not-a-song', played[1]] }, { post: true });
+    played.slice(0, 4).forEach((id, i) => req(user, `getSong played ${i}`, 'getSong', { id }));
+    // playback reports, as Navidrome's web UI sends them: on a tab of its own, started, paused, stopped far enough in
+    const tab = { headers: { 'X-ND-Client-Unique-Id': `diff-${user}` } };
+    const report = (state, positionMs, id = played[3]) => ({ mediaId: id, mediaType: 'song', positionMs: String(positionMs), state });
+    req(user, 'reportPlayback starting', 'reportPlayback', report('starting', 0), tab);
+    req(user, 'reportPlayback paused', 'reportPlayback', report('paused', 15000), { ...tab, post: true });
+    req(user, 'reportPlayback stopped 4 minutes in (a play when past half, or past 4 minutes)', 'reportPlayback', report('stopped', 240000), tab);
+    req(user, 'reportPlayback stopped early on another song', 'reportPlayback', report('stopped', 1000, played[4]));
+    req(user, 'now playing', 'scrobble', { id: played[2], submission: 'false', position: String(10 * (u + 1)) });
+    req(user, 'getAlbumList2 recent after the plays', 'getAlbumList2', { type: 'recent', size: '50' });
   });
+  // what is playing now: one session per user (the songs are minutes long: none has ended yet)
+  keys.forEach(user => req(user, 'getNowPlaying at the end', 'getNowPlaying', {}));
   // every user's view of the shared items once all have rated them
   keys.forEach(user => shared.songs.slice(0, 4).forEach((id, i) => req(user, `getSong shared ${i} at the end`, 'getSong', { id })));
   return {
@@ -311,6 +332,9 @@ export function buildWritesCorpus(db, { seed = 1 } = {}) {
       'subsonic-response.serverVersion', 'subsonic-response.**.starred', 'subsonic-response.playQueue.changed',
       'subsonic-response.playlist.changed', 'subsonic-response.playlist.created', 'subsonic-response.playlist.coverArt',
       'subsonic-response.playlists.playlist.*.changed', 'subsonic-response.playlists.playlist.*.created', 'subsonic-response.playlists.playlist.*.coverArt',
+      // a play scrobbled without a time is now; where a song is now is estimated from when it was last reported
+      'subsonic-response.song.played', 'subsonic-response.albumList2.album.*.played', 'subsonic-response.album.played', 'subsonic-response.album.song.*.played',
+      'subsonic-response.nowPlaying.entry.*.positionMs', 'subsonic-response.nowPlaying.entry.*.played',
     ],
     // getStarred2 lists by starred_at, newest first. Go on Windows reads a coarse wall clock: items starred in one
     // call often get the very same time there, and their order is then SQLite's; the Rust server's times differ, so

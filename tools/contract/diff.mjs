@@ -66,6 +66,7 @@ export const ANSWERED_BY_RUST = [
   'ping', 'getSong', 'getAlbum', 'getAlbumList2', 'search3', 'getStarred2', 'getPlaylists', 'getPlaylist', 'getPlayQueue', 'getLyricsBySongId', 'getCoverArt',
   // phase 4: writes
   'star', 'unstar', 'setRating', 'savePlayQueue', 'createPlaylist', 'updatePlaylist', 'deletePlaylist',
+  'scrobble', 'getNowPlaying', 'reportPlayback',
 ];
 
 // ---------------------------------------------------------------- the corpus

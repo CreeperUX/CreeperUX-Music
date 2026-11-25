@@ -136,6 +136,9 @@ pub struct LibraryOptions {
     pub max_image_size: String,
     /// `DiscArtPriority`: where a disc's cover is looked for, in order.
     pub disc_art_priority: String,
+    /// `ShareURL` and `BaseURL`: the address of the public links Navidrome writes (`artistImageUrl`).
+    pub share_url: String,
+    pub base_url: String,
 }
 
 impl Default for LibraryOptions {
@@ -171,6 +174,8 @@ impl Default for LibraryOptions {
             transcode_enable_cancellation: false,
             max_image_size: "20MB".into(),
             disc_art_priority: "disc*.*, cd*.*, cover.*, folder.*, front.*, discsubtitle, embedded".into(),
+            share_url: String::new(),
+            base_url: String::new(),
         }
     }
 }
@@ -409,6 +414,8 @@ impl Config {
                     },
                     max_image_size: nd.get("maximagesize")?.unwrap_or(d.max_image_size),
                     disc_art_priority: nd.get("discartpriority")?.unwrap_or(d.disc_art_priority),
+                    share_url: nd.get("shareurl")?.unwrap_or_default(),
+                    base_url: nd.get("baseurl")?.unwrap_or_default(),
                 }
             },
         };

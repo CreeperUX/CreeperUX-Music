@@ -38,7 +38,7 @@ pub fn search3(scope: &Scope) -> Result<Reply, QueryError> {
     let artists = if artists.max == 0 { Vec::new() } else { catalog::search_artists(scope.conn, scope.viewer, scope.options, &plan, artists)? };
     let albums = if albums.max == 0 { Vec::new() } else { catalog::search_albums(scope.conn, scope.viewer, scope.options, &plan, albums)? };
     let songs = if songs.max == 0 { Vec::new() } else { catalog::search_songs(scope.conn, scope.viewer, scope.options, &plan, songs)? };
-    if !artists.iter().all(entities::artist_is_answerable) {
+    if !artists.iter().all(|a| entities::artist_is_answerable(a, &scope.context)) {
         return Ok(Reply::Navidrome(SIGNED_LINK));
     }
     if !entities::songs_are_answerable(&songs) {
@@ -85,7 +85,7 @@ pub fn get_starred2(scope: &Scope) -> Result<Reply, QueryError> {
         scope.options,
         &ListOptions { filter: Some(of_items), order_by: Some(order(Table::MediaFile)), max: 0, offset: 0 },
     )?;
-    if !artists.iter().all(entities::artist_is_answerable) {
+    if !artists.iter().all(|a| entities::artist_is_answerable(a, &scope.context)) {
         return Ok(Reply::Navidrome(SIGNED_LINK));
     }
     if !entities::songs_are_answerable(&songs) {

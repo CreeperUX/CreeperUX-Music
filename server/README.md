@@ -582,6 +582,14 @@ when the song has none of its own (settled absent, or no state and no picture in
 `EnableMediaFileCoverArt` off): its disc's, or its album's without a disc number. A disc or song the user does not
 see: error 70 `Artwork not found`, as Navidrome answers.
 
+**Part 3c: artist image links** (`src/library/links.rs`). An artist with a picture (or whose picture is not resolved
+yet) carries `artistImageUrl` in `search3` and `getStarred2`; such answers were Navidrome's, because the link is signed.
+Now they are made here: `<address>/share/img/<token>?size=600`, the token signed with Navidrome's public secret
+(`JWTPublicSecret`, read at start), byte for byte Navidrome's token; the address `ShareURL`, else `BaseURL`'s, else the
+request's (`X-Forwarded-Host`, `X-Forwarded-Proto`/`-Scheme`, `Host`). The link itself is still served by Navidrome
+(its `/share/img` route). This reverses phase 3's "艺人图片链接不做": the brief for phase 5 asks for these searches to
+come over. Without the secret, or for an address Go would write otherwise, the answer stays Navidrome's.
+
 **Navidrome's still (covers):** a picture with no artwork state yet (albums, artists, playlists, and a song with a
 picture of its own: Navidrome resolves it and queues the result, a write), an embedded picture in a format lofty does
 not read as TagLib (or a file it cannot read), a listed image file that cannot be opened, a disc id without a number,
@@ -763,6 +771,16 @@ These start this server as its image runs it: `cargo run`, which starts Navidrom
 database.
 
 ## Checked against the real Navidrome
+
+### Media (phase 5, part 3c: artist image links), 2026-11-25
+
+- **On two copies of the production database** (594 artists, 340 with pictures), `--covers --streams --env
+  ND_BASEURL=https://music.example.com`: 9841 of 9841 the same; the 102 `search3` requests with artists that have
+  pictures, Navidrome's until now, are answered here with the very same signed links. Without `BaseURL`, two new
+  requests per user take the address from a proxy's `X-Forwarded-Host` (a list: its first) with `X-Forwarded-Proto`
+  or `X-Forwarded-Scheme`: 6 of 6. The original's hash unchanged; copies and corpora deleted.
+- `cargo test`: the address from each setting and header, what is left to Navidrome, the token's claims and their
+  bytes.
 
 ### Media (phase 5, part 3b: disc covers), 2026-11-25
 

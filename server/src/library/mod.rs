@@ -20,6 +20,7 @@ pub mod disc;
 pub mod entities;
 pub mod filecache;
 pub mod json;
+pub mod links;
 pub mod lists;
 pub mod media;
 pub mod natural;
@@ -108,6 +109,8 @@ pub struct Setup {
     pub upstream: Uri,
     pub base_path: String,
     pub user_header: HeaderName,
+    /// Navidrome's public secret (`JWTPublicSecret`), which signs `artistImageUrl`; none: such answers are Navidrome's.
+    pub public_signer: Option<crate::jwt::Signer>,
 }
 
 pub struct Library {
@@ -126,6 +129,8 @@ pub struct Library {
     /// Covers resized here, and how many are resized at once.
     images: Option<Arc<filecache::Cache>>,
     resizing: Arc<tokio::sync::Semaphore>,
+    public_signer: Option<crate::jwt::Signer>,
+    link_settings: links::Settings,
     /// How many requests were answered here, and how many went on to Navidrome.
     answered: AtomicU64,
     passed: AtomicU64,
@@ -249,6 +254,7 @@ impl Library {
     pub fn new(setup: Setup) -> Library {
         let transcoder = Arc::new(transcoder::Transcoder::new(transcoder_settings(&setup.options)));
         let images = images_cache(&setup.options);
+        let link_settings = links::Settings { share_url: setup.options.share_url.clone(), base_url: setup.options.base_url.clone() };
         Library {
             players: Players::new(setup.db.clone(), setup.upstream, &setup.base_path, setup.user_header),
             db: setup.db,
@@ -260,6 +266,8 @@ impl Library {
             transcoder,
             images,
             resizing: Arc::new(tokio::sync::Semaphore::new(RESIZES)),
+            link_settings,
+            public_signer: setup.public_signer,
             answered: AtomicU64::new(0),
             passed: AtomicU64::new(0),
         }
@@ -333,6 +341,7 @@ impl Library {
             (self.db.clone(), self.options.clone(), self.seeds.clone(), self.now_playing.clone(), self.transcoder.clone(), self.images.clone());
         let (user_id, client, params) = (user.user_id.clone(), client.to_string(), params.clone());
         let (http_method_owned, request_headers, player_owned) = (http_method.to_string(), headers.clone(), player.clone());
+        let image_links = links::for_request(self.public_signer.as_ref(), &self.link_settings, headers);
         let reply = tokio::task::spawn_blocking(move || {
             let run = |conn: &rusqlite::Connection| {
                 let Some(viewer) = Viewer::load(conn, &user_id)? else { return Ok(Ok(Reply::Navidrome("the user is gone"))) };
@@ -341,7 +350,7 @@ impl Library {
                     viewer: &viewer,
                     options: &options,
                     params: &params,
-                    context: entities::Context { options: &options, client: &client, report_real_path },
+                    context: entities::Context { options: &options, client: &client, report_real_path, image_links: image_links.as_ref() },
                     seeds: &seeds,
                     if_none_match: if_none_match.as_deref(),
                     now_playing: &now_playing,

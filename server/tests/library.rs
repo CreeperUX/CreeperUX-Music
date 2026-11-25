@@ -188,6 +188,7 @@ async fn world_with(options: LibraryOptions, registers: bool) -> World {
         upstream: format!("http://{navidrome}").parse().unwrap(),
         base_path: String::new(),
         user_header: SECRET_HEADER.parse().unwrap(),
+        public_signer: None,
     });
     let setup = GatewaySetup {
         upstream_user_header: SECRET_HEADER,

@@ -17,6 +17,8 @@ pub struct Context<'a> {
     pub client: &'a str,
     /// The player's `ReportRealPath`: songs carry the file's path, not one made up from the tags.
     pub report_real_path: bool,
+    /// The public links of this request (`artistImageUrl`); none: an artist with a picture is Navidrome's.
+    pub image_links: Option<&'a super::links::ImageLinks>,
 }
 
 /// Go's `int32(x)` of an `int`: the low 32 bits.
@@ -434,9 +436,9 @@ pub fn song_members(j: &mut Json, song: &Song, context: &Context) {
     });
 }
 
-/// `toArtistID3` (`responses.ArtistID3`) for an artist known to have no picture. One with a picture, or whose
-/// picture is not resolved yet, also carries `artistImageUrl`, a link signed by Navidrome: such answers are
-/// Navidrome's (`artist_is_answerable`).
+/// `toArtistID3` (`responses.ArtistID3`). An artist with a picture, or whose picture is not resolved yet, carries
+/// `artistImageUrl`, a link signed with Navidrome's public secret (links.rs); without one, its answer is Navidrome's
+/// (`artist_is_answerable`).
 pub fn artist(j: &mut Json, artist: &Artist, context: &Context) {
     let options = context.options;
     j.begin_object();
@@ -453,6 +455,10 @@ pub fn artist(j: &mut Json, artist: &Artist, context: &Context) {
     if options.enable_average_rating {
         j.float_ne("averageRating", artist.annotations.average_rating);
     }
+    // a link to the picture, signed with Navidrome's public secret, for any artist not known to have none
+    if let (false, Some(links)) = (artist.image.absent, context.image_links) {
+        j.string("artistImageUrl", &links.artist(&artist.id, &artist.image.hash));
+    }
     // toOSArtistID3: not for the clients named in Subsonic.LegacyClients, found by substring as for albums
     if !options.legacy_clients.contains(context.client) {
         j.string("musicBrainzId", &artist.mbz_artist_id);
@@ -463,9 +469,9 @@ pub fn artist(j: &mut Json, artist: &Artist, context: &Context) {
     j.end_object();
 }
 
-/// Whether an artist's answer can be made here: only when the artist is known to have no picture.
-pub fn artist_is_answerable(artist: &Artist) -> bool {
-    artist.image.absent
+/// Whether an artist's answer can be made here: when it is known to have no picture, or its link can be made.
+pub fn artist_is_answerable(artist: &Artist, context: &Context) -> bool {
+    artist.image.absent || context.image_links.is_some()
 }
 
 /// `buildPlaylist` (`responses.Playlist`)'s members: `song_count` and `duration` are the stored ones for a list of
@@ -518,7 +524,7 @@ mod tests {
     }
 
     fn context(options: &LibraryOptions) -> Context<'_> {
-        Context { options, client: "sonus", report_real_path: false }
+        Context { options, client: "sonus", report_real_path: false, image_links: None }
     }
 
     fn written(write: impl FnOnce(&mut Json)) -> String {
@@ -639,14 +645,14 @@ mod tests {
         assert!(written(|j| song(j, &s, &context(&by_mod_time))).contains(r#""created":"2026-01-01T13:00:00+01:00""#));
 
         // the player's ReportRealPath
-        let real = Context { options: &d, client: "sonus", report_real_path: true };
+        let real = Context { options: &d, client: "sonus", report_real_path: true, image_links: None };
         assert!(written(|j| song(j, &s, &real)).contains(r#""path":"/music/Aurora Lane/Northern Lights/01 - First Light.flac""#));
 
         // Subsonic.LegacyClients and MinimalClients
-        let legacy = Context { options: &d, client: "DSub", report_real_path: false };
+        let legacy = Context { options: &d, client: "DSub", report_real_path: false, image_links: None };
         let text = written(|j| song(j, &s, &legacy));
         assert!(text.ends_with(r#""type":"music","averageRating":4.5}"#), "{text}");
-        let minimal = Context { options: &d, client: "SubMusic", report_real_path: false };
+        let minimal = Context { options: &d, client: "SubMusic", report_real_path: false, image_links: None };
         assert_eq!(written(|j| song(j, &s, &minimal)), r#"{"id":"1qsif0m3qMNj6JVAix0aY9","isDir":false,"title":"First Light (Live)"}"#);
     }
 
@@ -691,7 +697,7 @@ mod tests {
         let d = options();
         let an_album = Album { id: "a".into(), name: "A".into(), ..Album::default() };
         for (client, with_extensions) in [("sonus", true), ("DSub", false), ("DSu", false), ("Sub", false), ("dsub", true)] {
-            let text = written(|j| album(j, &an_album, &Context { options: &d, client, report_real_path: false }));
+            let text = written(|j| album(j, &an_album, &Context { options: &d, client, report_real_path: false, image_links: None }));
             assert_eq!(text.contains("userRating"), with_extensions, "{client}: {text}");
         }
     }

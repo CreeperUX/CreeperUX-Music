@@ -489,6 +489,7 @@ impl Auth {
             user_id: user.id.clone(),
             is_admin: user.is_admin,
             epoch: user.token_epoch,
+            id: String::new(),
         }
     }
 

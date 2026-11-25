@@ -142,6 +142,12 @@ export function buildCorpus(db, { seed = 1, covers = false, streams = false } = 
       add(`search3 "" ${kind}s offset=${p * PAGE}`, 'search3', params);
     }
   }
+  // the first page of artists as a proxy in front forwards it: links to pictures name the proxy's address (unless the
+  // run sets BaseURL or ShareURL, which come first)
+  add('search3 "" artists through a proxy', 'search3', { query: '', songCount: '0', albumCount: '0', artistCount: '50' },
+    { headers: { 'X-Forwarded-Host': 'music.example.org, inner', 'X-Forwarded-Proto': 'https' } });
+  add('search3 "" artists through a proxy, X-Forwarded-Scheme', 'search3', { query: '', songCount: '0', albumCount: '0', artistCount: '50' },
+    { headers: { 'X-Forwarded-Host': 'music.example.org', 'X-Forwarded-Scheme': 'https' } });
   // the Windows client's search (SubsonicClient.SearchAsync)
   const words = new Map();
   const word = (w, why) => { const t = w?.trim(); if (t && !words.has(t)) words.set(t, why); };

@@ -11,7 +11,7 @@ use hyper::{Request, Uri};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use rusqlite::OptionalExtension;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::auth::{self, Auth};
 use crate::config::Shared;
@@ -45,6 +45,18 @@ fn session_secret(db: &Db, keys: &Keys) -> Result<Signer, String> {
     Ok(Signer::new(&secret))
 }
 
+/// Navidrome's `consts.JWTPublicSecretKey`: the secret its public links (`artistImageUrl`) are signed with.
+const PUBLIC_SECRET: &str = "JWTPublicSecret";
+
+/// The secret Navidrome signs its public links with; none (not made yet, or not to be opened): those answers stay
+/// Navidrome's.
+fn public_secret(db: &Db, keys: &Keys) -> Option<Signer> {
+    let sealed: Option<String> =
+        db.read_blocking(|conn| conn.query_row("SELECT value FROM property WHERE id = ?1", [PUBLIC_SECRET], |r| r.get(0)).optional()).ok()?;
+    let secret = keys.open(&sealed.filter(|s| !s.is_empty())?).ok()?;
+    Some(Signer::new(&secret))
+}
+
 /// Opens Navidrome's database and checks it; call when Navidrome answers (it migrates before it listens). The error
 /// says why the server cannot run.
 pub async fn local(shared: &Shared, upstream: &Uri, base_path: &str, user_header: &hyper::header::HeaderName) -> Result<Local, String> {
@@ -52,7 +64,7 @@ pub async fn local(shared: &Shared, upstream: &Uri, base_path: &str, user_header
     let keys = Keys::new(&shared.password_encryption_key);
     let opened = {
         let keys = keys.clone();
-        tokio::task::spawn_blocking(move || -> Result<(Arc<Db>, Signer, Connect), String> {
+        tokio::task::spawn_blocking(move || -> Result<(Arc<Db>, Signer, Option<Signer>, Connect), String> {
             let db = Db::open(&path)?;
             db.read_blocking(|conn| Ok(db::check_sqlite(conn).and_then(|()| db::check_schema(conn)))).map_err(|e| e.to_string())??;
             let hashed = credentials::fill_key_hashes(&db, &keys).map_err(|e| format!("cannot prepare app passwords as API keys: {e}"))?;
@@ -60,15 +72,19 @@ pub async fn local(shared: &Shared, upstream: &Uri, base_path: &str, user_header
                 info!(hashed, "app passwords made before API keys now work as API keys");
             }
             let signer = session_secret(&db, &keys)?;
+            let public_signer = public_secret(&db, &keys);
+            if public_signer.is_none() {
+                warn!("Navidrome's public secret (JWTPublicSecret) cannot be read: artists with pictures are left to Navidrome");
+            }
             auth::store::prepare(&db)?;
             // the server's own tables (additive: Navidrome's are never altered), made at the first start
             let connect = Connect::new(connect::Setup::new(db.clone()))?;
-            Ok((db, signer, connect))
+            Ok((db, signer, public_signer, connect))
         })
         .await
         .map_err(|_| "the database check did not finish".to_string())??
     };
-    let (opened, signer, connect) = opened;
+    let (opened, signer, public_signer, connect) = opened;
     info!(database = %opened.path().display(), schema = db::SCHEMA_VERSION, "Navidrome's database is the schema this server knows");
     let envelope = envelope(upstream, base_path).await?;
     let subsonic = Subsonic::new(Setup {
@@ -88,6 +104,7 @@ pub async fn local(shared: &Shared, upstream: &Uri, base_path: &str, user_header
         upstream: upstream.clone(),
         base_path: base_path.to_string(),
         user_header: user_header.clone(),
+        public_signer,
     });
     let auth = Auth::new(auth::Setup {
         db: opened,

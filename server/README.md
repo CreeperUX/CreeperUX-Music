@@ -671,7 +671,14 @@ in step with the library.
   - backing off and the daily retry;
   - a lost ledger.
 
-  Not yet tried against real R2, nor against another S3 server (see `docs/r2-mirror.md`, section 10).
+  `tests/mirror_s3.rs` runs the client against a real S3-compatible server when one is given (`SONUS_MIRROR_S3_*`;
+  skipped otherwise, and in CI). On 2026-11-26 it passed against Versity's S3 gateway (versitygw 1.11.0, Windows on
+  ARM, on 127.0.0.1 with throwaway keys), which took every request:
+  - single and multipart uploads, the listing, HEAD and DELETE;
+  - a presigned GET, served whole, while the same link tampered with, or expired, was refused;
+  - wrong keys, refused with 403.
+
+  MinIO no longer publishes Windows builds. Not yet tried against real R2 (`docs/r2-mirror.md`, section 10).
 
 ## Sonus Connect version 2
 

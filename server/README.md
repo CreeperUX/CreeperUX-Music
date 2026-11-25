@@ -554,6 +554,25 @@ The transcoding cache is this server's own (the roadmap: "转码缓存用自己�
 cache (`<CacheFolder>/transcoding`) is no longer filled by Sonus clients and ages out as before. Bounds and the
 protection of the command line: `SECURITY.md`, "Media: transcoding".
 
+**Part 3a: covers resized here, and placeholders** (`src/library/resize.rs`, `src/library/media.rs`). Until now a size
+Navidrome had not resized yet was Navidrome's; now it is resized here as Navidrome resizes (`core/artwork/resize.go`):
+fitted into the size asked for (never enlarged; above the picture's size, the original under the resized validator),
+or centered on a transparent square canvas; Catmull-Rom; PNG for a PNG source or a square, else JPEG at
+`CoverArtQuality`. The validator, `Last-Modified`, `Cache-Control` and 304s are Navidrome's (they name the
+representation, not the encoder's bytes). Navidrome's cache of resized covers is still read first; what is resized
+here is kept in `<CacheFolder>/sonus-images` (`ImageCacheSize`). Limits: `MaxImageSize` (default 20 MB), 64 Mi pixels,
+two resizes at once (`SECURITY.md`).
+
+| | As Navidrome |
+|---|---|
+| Placeholders | no id, an item settled without a picture, an item the user does not see or that is gone: Navidrome's own album or artist placeholder, `Cache-Control: no-store`, no validators |
+| A short answer | a picture within Go's 2048-byte buffer goes out with its `Content-Length`, a longer one chunked, as Go's server sends it |
+| Not the same | the bytes of a resize (another encoder, other pixels at the edges of the scaling): the same format, width and height |
+
+**Navidrome's still (covers):** a picture with no artwork state yet, a disc's cover (`dc-`), a song's cover when it
+has none of its own, an animated GIF resized, `EnableWebPEncoding`, a size that scales the picture to nothing, a
+picture whose bytes are not where its state says (Navidrome looks again, a write). Part 3b.
+
 **Navidrome's still:** a transcoding with a command of its own (the owner's template), several ranges in one request
 (its multipart answer has a random boundary), a song whose file cannot be opened or is not a regular file (Navidrome's error names the path), a
 stored path that would leave its library's folder (`SECURITY.md`), a suffix Go finds no content type for in Navidrome's
@@ -729,6 +748,26 @@ These start this server as its image runs it: `cargo run`, which starts Navidrom
 database.
 
 ## Checked against the real Navidrome
+
+### Media (phase 5, part 3a: covers resized here, placeholders), 2026-11-25
+
+Windows on ARM, Navidrome 0.64.2-sonus.10, `cargo run` (a debug build) in front of it, ffmpeg 7.1.5 on the `PATH`:
+
+- `node tools/contract/diff.mjs --go-vs-gateway --corpus tools/contract/corpus/read-only.json`: 536 of 536 the same,
+  441 answered here. The runner now reads a picture's format, width and height from its header (`pictureSize`), and
+  a resize made by each side's own encoder is compared by status, headers (type, `ETag`, `Last-Modified`,
+  `Cache-Control`), format and dimensions, its bytes and length left out. The 43 cover requests: sizes 600, 300, 64,
+  16, square 600 and 32, a size above the picture's (the original, byte for byte), each again from each side's cache,
+  by its hash and by another, 304s; the album, playlist and artist placeholders and the one without an id byte for
+  byte; a square without a size, discs, bare ids, unknown items and songs without state: Navidrome's.
+- The writes corpus with `--state`: 187 of 187, databases the same. `run.mjs --through-gateway`: 132 of 132; node
+  tests 39 of 39 (one new: `pictureSize`).
+- A corpus made from the golden database with `--covers --streams` and `--env ND_BASEURL=https://music.example.com`:
+  833 of 833. **On two copies of the production database** (the same flags; no pictures or music on this computer):
+  9833 of 9833; the original's hash unchanged, copies and corpus deleted.
+- `cargo test`: 3 new unit tests (fitting, squares, never enlarged, JPEG/PNG/GIF, unreadable and over-the-cap
+  pictures, animations), 3 new or rewritten integration tests (a real 800 × 600 JPEG resized here, served from this
+  server's cache once its source is gone, Navidrome's cache first; the placeholders).
 
 ### Media (phase 5, part 2: transcoding), 2026-11-25
 

@@ -155,9 +155,43 @@ async function answer(base, r, manifest, saved) {
     out.headers = Object.fromEntries(COMPARED_HEADERS.map(h => [h, res.headers.get(h)]).filter(([, v]) => v !== null));
     out.length = buf.length;
     out.sha256 = createHash('sha256').update(buf).digest('hex');
+    // a picture's format and size: what two encoders of the same resize agree on
+    const picture = pictureSize(buf);
+    if (picture) out.picture = picture;
     if (/^text\//.test(type)) out.text = buf.toString('utf8').slice(0, 500);
   }
   return out;
+}
+
+/** A picture's format and dimensions from its header (JPEG, PNG, GIF, WebP); null for anything else. */
+export function pictureSize(b) {
+  if (b.length > 24 && b.subarray(0, 8).equals(Buffer.from('\x89PNG\r\n\x1a\n', 'latin1'))) {
+    return { format: 'png', width: b.readUInt32BE(16), height: b.readUInt32BE(20) };
+  }
+  if (b.length > 10 && (b.subarray(0, 6).toString('latin1') === 'GIF87a' || b.subarray(0, 6).toString('latin1') === 'GIF89a')) {
+    return { format: 'gif', width: b.readUInt16LE(6), height: b.readUInt16LE(8) };
+  }
+  if (b.length > 30 && b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP') {
+    const chunk = b.subarray(12, 16).toString('latin1');
+    if (chunk === 'VP8 ') return { format: 'webp', width: b.readUInt16LE(26) & 0x3fff, height: b.readUInt16LE(28) & 0x3fff };
+    if (chunk === 'VP8L') { const v = b.readUInt32LE(21); return { format: 'webp', width: (v & 0x3fff) + 1, height: ((v >> 14) & 0x3fff) + 1 }; }
+    if (chunk === 'VP8X') return { format: 'webp', width: b.readUIntLE(24, 3) + 1, height: b.readUIntLE(27, 3) + 1 };
+  }
+  if (b.length > 4 && b[0] === 0xff && b[1] === 0xd8) {
+    // the frame header (SOFn) after the segments before it
+    let at = 2;
+    while (at + 9 < b.length) {
+      if (b[at] !== 0xff) return null;
+      const marker = b[at + 1];
+      if (marker === 0xff) { at++; continue; }
+      const length = b.readUInt16BE(at + 2);
+      if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) {
+        return { format: 'jpeg', width: b.readUInt16BE(at + 7), height: b.readUInt16BE(at + 5) };
+      }
+      at += 2 + length;
+    }
+  }
+  return null;
 }
 
 /** Whether a path (an array of keys) matches a pattern: '*' is any one key, '**' any number of them. */

@@ -41,6 +41,7 @@ const zh = {
     setupTitle: '设置两步验证', setupIntro: '这个服务器要求两步验证。用验证器 App（例如 1Password、Google Authenticator）扫描二维码，然后输入它显示的 6 位验证码。', qrAlt: '两步验证的二维码', secret: '不能扫码时，手动输入这串密钥', confirm: '确认',
     recoveryTitle: '保存恢复代码', recoveryIntro: '手机不在身边时，每个恢复代码可以代替验证码登录一次。把它们存到安全的地方：这里只显示这一次。', recoverySaved: '我已保存', copy: '复制', copied: '已复制',
     finishing: '正在为这个浏览器创建登录…',
+    enrolIntro: '第一次设置两步验证，需要管理员连同密码一起交给你的一次性绑定码。', enrolCode: '绑定码', enrolNext: '继续',
   },
   previous: '上一首', next: '下一首', repeat: '循环播放', repeatAll: '列表循环', repeatOne: '单曲循环',
   openLibrary: '在主视图中打开音乐库',
@@ -55,6 +56,7 @@ const zh = {
     none: '还没有应用专用密码。', neverUsed: '从未使用', lastUsed: (d, by) => `上次使用：${d}${by ? `（${by}）` : ''}`, createdAt: d => `创建于 ${d}`,
     devices: '允许应用登录', devicesIntro: '应用选择“在浏览器中登录”时会显示一个代码。在这里输入它，核对后允许。', devOpen: '输入代码',
     devTitle: '允许应用登录', devIntro: '一个应用请求登录你的账号。核对它显示的代码和下面的一致，再选择“允许”。', devAsk: '输入应用上显示的代码。', devCode: '代码', devNext: '继续', devClient: '应用', devDevice: '设备',
+    devFrom: '来自', devCodeIntro: '要允许它，请输入验证器 App 里的验证码，或一个恢复代码。', appCode: '创建应用专用密码需要验证码：输入验证器 App 里的验证码，或一个恢复代码，再点一次“创建”。',
     allow: '允许', deny: '拒绝', allowed: '已允许。可以回到那个应用了。', denied: '已拒绝这次登录。', devMissing: '没有等待这个代码的登录请求：可能已经过期，或者输错了。', toSignIn: '在这个浏览器里登录 Sonus',
   },
   set: {
@@ -110,6 +112,7 @@ const en = {
     setupTitle: 'Set up two-step verification', setupIntro: 'This server requires two-step verification. Scan the QR code with an authenticator app (1Password, Google Authenticator …), then enter the 6-digit code it shows.', qrAlt: 'QR code for two-step verification', secret: 'If you cannot scan it, enter this key by hand', confirm: 'Confirm',
     recoveryTitle: 'Save your recovery codes', recoveryIntro: 'Without your phone, each recovery code signs you in once in place of a code. Keep them somewhere safe: they are shown only now.', recoverySaved: 'I have saved them', copy: 'Copy', copied: 'Copied',
     finishing: 'Creating a sign-in for this browser…',
+    enrolIntro: 'To set up two-step verification for the first time, enter the one-time enrolment code your administrator gave you with your password.', enrolCode: 'Enrolment code', enrolNext: 'Continue',
   },
   previous: 'Previous', next: 'Next', repeat: 'Repeat', repeatAll: 'Repeat all', repeatOne: 'Repeat one',
   openLibrary: 'Open Your Library in the main view',
@@ -124,6 +127,7 @@ const en = {
     none: 'No app passwords yet.', neverUsed: 'Never used', lastUsed: (d, by) => `Last used ${d}${by ? ` (${by})` : ''}`, createdAt: d => `Created ${d}`,
     devices: 'Allow an app to sign in', devicesIntro: 'An app that offers “Sign in through the browser” shows a code. Enter it here, check it, and allow.', devOpen: 'Enter a code',
     devTitle: 'Allow an app to sign in', devIntro: 'An app asks to sign in to your account. Check that it shows the same code as below, then choose Allow.', devAsk: 'Enter the code the app shows.', devCode: 'Code', devNext: 'Continue', devClient: 'App', devDevice: 'Device',
+    devFrom: 'From', devCodeIntro: 'To allow it, enter a code from your authenticator app, or a recovery code.', appCode: 'Making an app password takes a code: enter one from your authenticator app, or a recovery code, then choose Create again.',
     allow: 'Allow', deny: 'Refuse', allowed: 'Allowed. You can go back to the app.', denied: 'This sign-in was refused.', devMissing: 'No sign-in is waiting for this code: it may have expired, or was mistyped.', toSignIn: 'Sign in to Sonus in this browser',
   },
   set: {

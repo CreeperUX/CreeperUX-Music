@@ -500,14 +500,16 @@ for (const [engine, launch] of engines) {
         await cx.close();
       });
 
-      // A stand-in for the Sonus server's /auth routes, written from the fork's handlers (server/auth.go,
-      // sonus_twofactor.go, sonus_device.go): the demo server has only the app's half of the browser sign-in. The account
+      // A stand-in for the Sonus server's /auth routes, written from the Rust server's handlers (server/src/auth, which
+      // ask for more than the fork's did: an enrolment code at a first set-up, a verification code to make an app
+      // password or allow an app, an app password made with the sign-in that asks for one): the demo server has only
+      // the app's half of the browser sign-in. The account
       // has two-step verification; its account password opens the web session only, and the app password the stand-in
       // hands out is the demo account's own password, so the Subsonic sign-in that follows is the demo server's real one.
-      const ACCOUNT_PW = 'account-password-2fa', CODE = '246810', JWT = 'stand-in.jwt', SETUP = 'stand-in.setup';
+      const ACCOUNT_PW = 'account-password-2fa', CODE = '246810', JWT = 'stand-in.jwt', SETUP = 'stand-in.setup', ENROL = 'abcd-efgh-jkmn';
       const codes = n => Array.from({ length: 10 }, (_, i) => `rc${n}-${String(i).padStart(4, '0')}`);
       const standIn = async (p, st) => {
-        Object.assign(st, { enabled: true, mode: 'optional', recovery: codes(0), apps: [], n: 0, ...st });
+        Object.assign(st, { enabled: true, mode: 'optional', recovery: codes(0), apps: [], n: 0, made: 0, ...st });
         await p.route(u => u.href.startsWith(`${server}/auth/`), async route => {
           const req = route.request(), path = new URL(req.url()).pathname.slice('/auth'.length), m = req.method();
           if (/^\/device\/(start|poll|revoke)$/.test(path)) return route.fallback(); // the demo server's own
@@ -517,32 +519,41 @@ for (const [engine, launch] of engines) {
           let body = {}; try { body = req.postDataJSON() ?? {}; } catch { /* none */ }
           const session = req.headers()['x-nd-authorization'] === `Bearer ${JWT}`, payload = { id: 'u1', name: account.user, username: account.user, isAdmin: false, token: JWT };
           const codeOk = c => c === CODE || (st.recovery.includes(c) && st.recovery.splice(st.recovery.indexOf(c), 1));
+          // what a session alone does not do, for an account with two-step verification: null when the code is good
+          const ownCode = () => (!st.enabled || codeOk(body.code) ? null : json(401, { error: body.code ? 'Invalid verification code' : 'Verification code required', twoFactor: 'code' }));
+          const makeApp = name => { const ap = { id: `ap${++st.made}`, name: name || 'App', createdAt: new Date().toISOString() }; st.apps.push(ap); return { appPassword: ap, password: account.password }; };
+          const withApp = answer => (typeof body.appPassword === 'string' ? { ...answer, newAppPassword: makeApp(body.appPassword) } : answer);
+          // a first set-up where two-step verification is required: the enrolment code, null when it is good
+          const enrolment = () => (st.enabled || st.mode !== 'required' || body.enrolmentCode === ENROL ? null
+            : json(401, { error: body.enrolmentCode ? 'Invalid enrolment code' : 'Enrolment code required', twoFactor: 'enrolment' }));
           if (path === '/login' && m === 'POST') {
             if (body.username !== account.user || body.password !== ACCOUNT_PW) return json(401, { error: 'Invalid username or password' });
             if (st.enabled && !body.otp) return json(401, { error: 'Verification code required', twoFactor: 'code' });
             if (st.enabled && !codeOk(body.otp)) return json(401, { error: 'Invalid verification code', twoFactor: 'code' });
-            if (!st.enabled && st.mode === 'required') return json(401, { error: 'Two-step verification must be set up', twoFactor: 'setup', setupToken: SETUP });
-            return json(200, payload);
+            if (!st.enabled && st.mode === 'required') return json(401, { error: 'Two-step verification must be set up', twoFactor: 'setup', setupToken: SETUP, enrolmentCodeRequired: true });
+            return json(200, withApp(payload));
           }
-          if (path === '/2fa/setup' && m === 'POST') return body.token === SETUP || session ? json(200, { secret: 'JBSWY3DPEHPK3PXP', uri: 'otpauth://totp/Sonus:demo?secret=JBSWY3DPEHPK3PXP', qr: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', issuer: 'Sonus', account: account.user }) : json(401, { error: 'Not authenticated' });
+          if (path === '/2fa/setup' && m === 'POST') return body.token !== SETUP && !session ? json(401, { error: 'Not authenticated' }) : enrolment() ?? json(200, { secret: 'JBSWY3DPEHPK3PXP', uri: 'otpauth://totp/Sonus:demo?secret=JBSWY3DPEHPK3PXP', qr: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', issuer: 'Sonus', account: account.user });
           if (path === '/2fa/confirm' && m === 'POST') {
             if (body.token !== SETUP && !session) return json(401, { error: 'Not authenticated' });
+            const refused = enrolment(); if (refused) return refused;
             if (body.code !== CODE) return json(401, { error: 'Invalid verification code', twoFactor: 'setup' });
             st.enabled = true; st.recovery = codes(++st.n);
-            return json(200, { ...payload, recoveryCodes: st.recovery });
+            return json(200, { ...withApp(payload), recoveryCodes: st.recovery });
           }
           if (!session) return json(401, { error: 'Not authenticated' });
           if (path === '/2fa' && m === 'GET') return json(200, { mode: st.mode, enabled: st.enabled, ...(st.enabled ? { enabledAt: new Date(Date.now() - 3 * 86400e3).toISOString() } : {}), recoveryCodesLeft: st.enabled ? st.recovery.length : 0 });
           if (path === '/2fa/recovery-codes' && m === 'POST') { if (!codeOk(body.code)) return json(401, { error: 'Invalid verification code', twoFactor: 'code' }); st.recovery = codes(++st.n); return json(200, { recoveryCodes: st.recovery }); }
           if (path === '/2fa/disable' && m === 'POST') { if (st.mode === 'required') return json(403, { error: 'Two-step verification is required on this server' }); if (!codeOk(body.code)) return json(401, { error: 'Invalid verification code', twoFactor: 'code' }); st.enabled = false; return json(204); }
           if (path === '/app-passwords' && m === 'GET') return json(200, st.apps);
-          if (path === '/app-passwords' && m === 'POST') { const ap = { id: `ap${st.apps.length + 1}`, name: body.name, createdAt: new Date().toISOString() }; st.apps.push(ap); return json(200, { appPassword: ap, password: account.password }); }
+          if (path === '/app-passwords' && m === 'POST') return ownCode() ?? json(200, makeApp(body.name));
           if (path.startsWith('/app-passwords/') && m === 'DELETE') { const i = st.apps.findIndex(a => a.id === decodeURIComponent(path.slice(15))); if (i < 0) return json(404, { error: 'No such app password' }); st.apps.splice(i, 1); return json(204); }
           const dev = /^\/device\/([^/]+)(\/approve|\/deny)?$/.exec(path);
           if (dev) {
             const code = decodeURIComponent(dev[1]), waiting = (await hook()).pending.find(x => x.userCode === code && x.status === 'pending');
             if (!waiting) return json(404, { error: 'No sign-in waiting for this code: it may have expired' });
-            if (!dev[2]) return json(200, { userCode: waiting.userCode, client: waiting.client, device: waiting.device, expiresIn: 540 });
+            if (!dev[2]) return json(200, { userCode: waiting.userCode, client: waiting.client, device: waiting.device, address: '203.0.113.7', expiresIn: 540, codeRequired: st.enabled });
+            if (dev[2] === '/approve') { const refused = ownCode(); if (refused) return refused; }
             await hook(`?code=${code}&decide=${dev[2] === '/approve' ? 'allow' : 'deny'}&u=${account.user}`);
             return json(204);
           }
@@ -553,7 +564,7 @@ for (const [engine, launch] of engines) {
       const st = {};
       const { cx: cx2, p: p2 } = await fresh();
       await standIn(p2, st);
-      await check('two-step verification: the password alone is refused for the API; password and code make this browser an app password, kept as a token', async () => {
+      await check('two-step verification: the password alone is refused for the API; password and one code make this browser an app password, kept as a token', async () => {
         await p2.goto(`${site}/?theme=dark#/`);
         await p2.locator('.cm-login').waitFor();
         await signIn(p2, ACCOUNT_PW);
@@ -585,7 +596,18 @@ for (const [engine, launch] of engines) {
         const v = await axe(p2); assert(!v.length, v.join(' | '));
         await p2.getByLabel('名称').fill('客厅的播放器');
         await p2.getByRole('button', { name: '创建', exact: true }).click();
+        // the session alone makes none: the page asks for a code, a wrong one is refused
+        await p2.locator('.cm-app-form').getByLabel('验证码').waitFor();
+        assert(st.apps.length === 1, 'an app password was made without a code');
+        const withField = await axe(p2); assert(!withField.length, withField.join(' | '));
+        await p2.locator('.cm-app-form').getByLabel('验证码').fill('000000');
+        await p2.getByRole('button', { name: '创建', exact: true }).click();
+        await until(async () => (await p2.locator('.cm-made .cm-login-error').count()) && (await p2.locator('.cm-made .cm-login-error').textContent()).includes('验证码不正确'), 'a wrong code says so');
+        assert(st.apps.length === 1, 'an app password was made with a wrong code');
+        await p2.locator('.cm-app-form').getByLabel('验证码').fill(CODE);
+        await p2.getByRole('button', { name: '创建', exact: true }).click();
         await until(async () => (await p2.locator('.cm-made .cm-secret').count()) && (await p2.locator('.cm-app-row').count()) === 2, 'the new password is shown, and listed');
+        assert(!(await p2.locator('.cm-app-form').getByLabel('验证码').count()), 'the code field goes once it was used');
         assert(st.apps[1]?.name === '客厅的播放器', JSON.stringify(st.apps));
         await snap(p2, 'account');
         await p2.getByRole('button', { name: '撤销 客厅的播放器' }).click();
@@ -606,9 +628,18 @@ for (const [engine, launch] of engines) {
         const code = await startBrowserSignIn(p);
         await app(c => { location.hash = `#/device?code=${c}`; }, code, p2); // the session of the account page is still open
         await until(async () => (await p2.locator('.cm-device .cm-code').count()) && (await p2.locator('.cm-device .cm-code').textContent()) === code, 'the approval page shows the same code');
-        assert((await p2.locator('.cm-device .cm-facts').textContent()).includes('Sonus'), 'it names the app');
+        const facts = await p2.locator('.cm-device .cm-facts').textContent();
+        assert(facts.includes('Sonus') && facts.includes('203.0.113.7'), `it names the app and the address that asked: ${facts}`);
         const v = await axe(p2); assert(!v.length, v.join(' | '));
         await snap(p2, 'approval');
+        // one click allows nothing: it takes a code, and a wrong one is refused
+        await p2.getByRole('button', { name: '允许', exact: true }).click();
+        await sleep(300);
+        assert(!(await p2.locator('.cm-device-done').count()) && (await hook()).pending.some(x => x.userCode === code && x.status === 'pending'), 'allowed without a code');
+        await p2.locator('.cm-device').getByLabel('验证码').fill('000000');
+        await p2.getByRole('button', { name: '允许', exact: true }).click();
+        await until(async () => (await p2.locator('.cm-device .cm-login-error:not([hidden])').count()) === 1, 'a wrong code says so');
+        await p2.locator('.cm-device').getByLabel('验证码').fill(CODE);
         await p2.getByRole('button', { name: '允许', exact: true }).click();
         await until(async () => (await p2.locator('.cm-device-done').count()) === 1, 'allowed');
         await p.waitForFunction(() => window.__ready === true, null, { timeout: 60000 });
@@ -637,7 +668,7 @@ for (const [engine, launch] of engines) {
         assert(!(await app(() => localStorage.getItem('sonus.login'), undefined, p3)), 'approving kept a sign-in in this browser');
         await cx3.close(); await cx.close();
       });
-      await check('a server that requires two-step verification: it is set up from the account page (QR code, a code to confirm, recovery codes)', async () => {
+      await check('a server that requires two-step verification: it is set up from the account page (the enrolment code, QR code, a code to confirm, recovery codes)', async () => {
         Object.assign(st, { enabled: false, mode: 'required' });
         await app(() => { location.hash = '#/'; }, undefined, p2);
         await p2.reload();
@@ -646,6 +677,16 @@ for (const [engine, launch] of engines) {
         await p2.getByRole('heading', { name: '确认是你' }).waitFor();
         await p2.getByLabel('密码', { exact: true }).fill(ACCOUNT_PW);
         await p2.getByRole('button', { name: '继续', exact: true }).click();
+        // the password alone sets nothing up: the enrolment code an admin handed over comes first
+        await p2.getByLabel('绑定码').waitFor();
+        assert(!(await p2.locator('.cm-qr').count()), 'a key to scan was shown before the enrolment code');
+        const asked = await axe(p2); assert(!asked.length, asked.join(' | '));
+        await snap(p2, 'two-step-enrolment');
+        await p2.getByLabel('绑定码').fill('aaaa-bbbb-cccc');
+        await p2.locator('.cm-setup').getByRole('button', { name: '继续', exact: true }).click();
+        await until(async () => (await p2.locator('.cm-setup .cm-login-error:not([hidden])').count()) && (await p2.locator('.cm-setup .cm-login-error:not([hidden])').textContent()).includes('绑定码不正确'), 'a wrong enrolment code says so');
+        await p2.getByLabel('绑定码').fill(ENROL);
+        await p2.locator('.cm-setup').getByRole('button', { name: '继续', exact: true }).click();
         await p2.locator('.cm-qr').waitFor();
         assert((await p2.locator('.cm-secret').textContent()) === 'JBSWY3DPEHPK3PXP', 'the key to type by hand');
         const v = await axe(p2); assert(!v.length, v.join(' | '));

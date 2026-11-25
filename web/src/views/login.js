@@ -5,8 +5,9 @@
 // Three ways in, the last two on a Sonus server only (api/sonus.js):
 // - the password, as a Subsonic token (any server);
 // - the password and a two-step code: when the server refuses the password for the API (two-step verification is on),
-//   the page opens a web session with password and code, makes an app password for this browser, and signs in with
-//   that. A user the server requires to set two-step verification up does it here first;
+//   the page signs in on the web with password and code, asking for an app password for this browser in the same
+//   request (one code for both), and signs in with that. A user the server requires to set two-step verification up
+//   does it here first, with the enrolment code an admin gave them;
 // - through the browser: the page shows a code, the user allows it on a page that is already signed in (this client's
 //   #/device, or the server's own), and the server hands this browser an API key. The password never comes here.
 import { h, ic } from '../dom.js';
@@ -76,10 +77,10 @@ export function mountLogin(root, { UI, S, t, server = '', demo = null, error = '
   /** Resolves true when it took over (signed in, or showing a further step); false to report the password as wrong. */
   async function webSignIn(address, user, password) {
     const auth = createAuthApi(normalizeServer(address));
-    try { await finish(auth, await auth.login({ username: user, password })); return true; }
+    try { await finish(auth, await auth.login({ username: user, password, appPassword: clientName() })); return true; }
     catch (err) {
       if (err.twoFactor === 'code') { codeStep(auth, user, password); return true; }
-      if (err.twoFactor === 'setup') { setupStep(auth, err.setupToken); return true; }
+      if (err.twoFactor === 'setup') { setupStep(auth, err.setupToken, err.enrolmentCodeRequired); return true; }
       return false; // the password is wrong there too (or the server has no web sign-in)
     }
   }
@@ -96,7 +97,7 @@ export function mountLogin(root, { UI, S, t, server = '', demo = null, error = '
     form.addEventListener('submit', async e => {
       e.preventDefault();
       alert.hidden = true; submit.update({ busy: true });
-      try { await finish(auth, await auth.login({ username: user, password, otp: field.value.trim() })); }
+      try { await finish(auth, await auth.login({ username: user, password, otp: field.value.trim(), appPassword: clientName() })); }
       catch (err) {
         if (!form.isConnected) return;
         alert.textContent = err.message; alert.hidden = false; submit.update({ busy: false }); field.input.focus(); field.input.select();
@@ -104,18 +105,21 @@ export function mountLogin(root, { UI, S, t, server = '', demo = null, error = '
     });
     field.input.focus();
   }
-  function setupStep(auth, token) {
+  function setupStep(auth, token, enrolment) {
     frame(L.setupTitle, L.setupIntro);
-    setupPanel(card, { UI, S, L, auth, token, onCancel: () => passwordStep(), onDone: payload => {
+    setupPanel(card, { UI, S, L, auth, token, enrolment, appPassword: clientName(), onCancel: () => passwordStep(), onDone: payload => {
       frame(L.recoveryTitle);
       recoveryPanel(card, { UI, S, L, codes: payload.recoveryCodes ?? [], onDone: () => finish(auth, payload).catch(err => passwordStep(err.message)) });
     } });
   }
-  /** With a web session: a password of this browser's own (listed under app passwords, revoked there), kept as a token. */
+  /**
+   * Signed in on the web: a password of this browser's own (listed under app passwords, revoked there), kept as a
+   * token. The Rust server made it with the sign-in (`newAppPassword`); the fork's is asked for one now.
+   */
   async function finish(auth, payload) {
     frame(L.title, L.finishing);
     try {
-      const made = await auth.createAppPassword(clientName());
+      const made = payload.newAppPassword ?? await auth.createAppPassword(clientName());
       await signIn({ server: auth.server, user: payload.username, password: made.password });
     } catch (err) { passwordStep(err.message); return; }
     done();

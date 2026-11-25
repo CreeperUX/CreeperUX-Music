@@ -94,13 +94,18 @@ export function accountView(holder, route, ctx) {
     const form = h('form', { class: 'cm-app-form', novalidate: '' });
     sec.append(form, made, list);
     const name = UI.createTextField(form, { label: A.appName, placeholder: A.appNameHint, maxLength: 64, name: 'app-password-name' }, S);
+    // with two-step verification on, the server makes one only with a code: the field comes when it asks for one
+    const codeBox = h('div', { hidden: '' });
+    form.append(codeBox);
+    let code = null;
     const create = UI.createButton(form, { label: A.create, icon: 'plus', variant: 'primary', type: 'submit' }, S);
     form.addEventListener('submit', async e => {
       e.preventDefault();
       create.update({ busy: true });
       try {
-        const r = await guard(auth.createAppPassword)(name.value.trim() || clientLabel());
+        const r = await guard(auth.createAppPassword)(name.value.trim() || clientLabel(), code?.value.trim() || undefined);
         if (r && alive) {
+          if (code) { codeBox.replaceChildren(); codeBox.hidden = true; code = null; }
           const secret = h('code', { class: 'cm-secret', dir: 'ltr' }, r.password);
           const row = h('div', { class: 'cm-made-row' }, secret);
           made.replaceChildren(h('p', { class: 'cm-set-status' }, A.newPassword), row);
@@ -108,7 +113,15 @@ export function accountView(holder, route, ctx) {
           name.update({ value: '' });
           await load();
         }
-      } catch (err) { made.replaceChildren(h('p', { class: 'cm-login-error', role: 'alert' }, err.message)); }
+      } catch (err) {
+        if (err.twoFactor === 'code' && !code) {
+          code = codeField(codeBox, { UI, S, label: L.code, description: A.appCode });
+          codeBox.hidden = false; made.replaceChildren(); code.input.focus();
+        } else {
+          made.replaceChildren(h('p', { class: 'cm-login-error', role: 'alert' }, err.message));
+          if (code) { code.input.focus(); code.input.select(); }
+        }
+      }
       create.update({ busy: false });
     });
     const clientLabel = () => acc.client;

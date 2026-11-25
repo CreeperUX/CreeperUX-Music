@@ -14,24 +14,33 @@ export async function webJson(base, path, { method = 'GET', body, token } = {}) 
   return { status: res.status, json };
 }
 
+const sent = new Map(); // an authenticator's secret → the last step whose code this process sent
+const nextStep = () => new Promise(done => setTimeout(done, 30_000 - (Date.now() % 30_000) + 250));
+
 /**
- * Signs a user in on the web ({ username, password, totpSecret? }) and returns the session token. Each authenticator
- * code is taken once, and the server accepts the next step's code too, so a code refused as used is retried with it.
+ * Sends a request that takes a verification code of the user ({ totpSecret }): `send(code)` answers { status, json },
+ * and is tried again while the server refuses the code. Each authenticator code is taken once, the server accepts the
+ * next step's too, and a wrong one counts against the account (ten an hour): so no step is sent twice by this process,
+ * and when both are spent it waits for the next (up to 30 s). Another process may have used a step: then one try is
+ * refused, and the following step is sent.
  */
+export async function withCode(user, send) {
+  let r = null;
+  for (let tries = 0; tries < 4; tries++) {
+    let s = Math.max(step(), (sent.get(user.totpSecret) ?? 0) + 1);
+    while (s > step() + 1) await nextStep();
+    sent.set(user.totpSecret, s);
+    r = await send(totp(user.totpSecret, s));
+    if (!(r.status === 401 && r.json?.twoFactor === 'code')) return r;
+  }
+  return r;
+}
+
+/** Signs a user in on the web ({ username, password, totpSecret? }) and returns the session token (see `withCode`). */
 export async function signIn(base, user) {
   const login = otp => webJson(base, '/auth/login', { method: 'POST', body: { username: user.username, password: user.password, ...(otp ? { otp } : {}) } });
   let r = await login();
-  if (r.status === 401 && r.json?.twoFactor === 'code' && user.totpSecret) {
-    // Both codes taken already (signed in twice within a step): wait for the next step.
-    for (let round = 0; round < 3 && r.status !== 200; round++) {
-      if (round) await new Promise(done => setTimeout(done, 30_000 - (Date.now() % 30_000) + 250));
-      const now = step();
-      for (const s of [now, now + 1]) {
-        r = await login(totp(user.totpSecret, s));
-        if (r.status === 200) break;
-      }
-    }
-  }
+  if (r.status === 401 && r.json?.twoFactor === 'code' && user.totpSecret) r = await withCode(user, login);
   if (r.status !== 200 || !r.json?.token) throw new Error(`signing ${user.username} in: HTTP ${r.status} ${JSON.stringify(r.json)}`);
   return r.json.token;
 }

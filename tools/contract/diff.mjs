@@ -268,14 +268,15 @@ export async function startGateway(upstream) {
  * The Rust server as its image runs it: `cargo run` in server/, which starts the frozen Navidrome itself on a fresh
  * copy of the golden database, tells it to believe the gateway alone, and checks sign-ins itself:
  * { url, stop, log, data, manifest }. `env`: settings over the golden ones (both servers read them); `empty`: a new
- * server without users instead of the golden database. The log is the gateway's and Navidrome's together.
+ * server without users instead of the golden database; `navidrome`: another build of the fork than the fixtures'. The
+ * log is the gateway's and Navidrome's together.
  */
-export async function startGatewayOnGolden({ env = {}, empty = false, copy: started = null } = {}) {
+export async function startGatewayOnGolden({ env = {}, empty = false, copy: started = null, navidrome = null } = {}) {
   const { freePort } = await import('../fixtures/lib/navidrome.mjs');
   const { goldenCopy } = await import('../fixtures/serve.mjs');
   // `copy`: the `copy` of a server stopped with stop({ keep: true }): the same data folder again (a restart)
   const copy = started ?? await goldenCopy({ empty });
-  const settings = { ...copy.env, ...env, SONUS_NAVIDROME_BIN: copy.manifest.server.navidrome, SONUS_NAVIDROME_PORT: String(await freePort()) };
+  const settings = { ...copy.env, ...env, SONUS_NAVIDROME_BIN: navidrome ?? copy.manifest.server.navidrome, SONUS_NAVIDROME_PORT: String(await freePort()) };
   // up when Navidrome answers behind it and the gateway has checked the database (503 until then)
   const ready = async url => (await fetch(`${url}/rest/ping?f=json`)).status === 200;
   let gw;

@@ -89,9 +89,21 @@ test('a new server: the first admin is made once, and both servers read what the
 
 test('a new server with two-step verification required: the first admin sets it up before any session', { timeout: 600_000 }, async t => {
   const servers = await both(t, {}, { empty: true });
-  await same(servers, async base => {
+  await same(servers, async (base, who) => {
     const made = await post(base, '/createAdmin', { username: 'admin', password: 'pw' });
     assert.deepEqual([made.status, made.json.twoFactor], [401, 'setup']);
+    // The Rust server asks for an enrolment code at a first set-up, where the frozen Navidrome asks for none (the
+    // security review of 2026-11-24); the first admin has nobody to get one from, and its answer says none is needed
+    // (enrolmentCodeRequired: false), which is the one key Navidrome's answer does not have. Signing in again with
+    // the password gives a token that does need one: only the token of the account's making sets up without.
+    if (who === 'Rust') {
+      assert.equal(made.json.enrolmentCodeRequired, false);
+      const later = await post(base, '/login', { username: 'admin', password: 'pw' });
+      assert.deepEqual([later.status, later.json.twoFactor, later.json.enrolmentCodeRequired], [401, 'setup', true]);
+      const refused = await post(base, '/2fa/setup', { token: later.json.setupToken });
+      assert.deepEqual([refused.status, refused.json.twoFactor], [401, 'enrolment']);
+      delete made.json.enrolmentCodeRequired;
+    }
     const begin = await post(base, '/2fa/setup', { token: made.json.setupToken });
     const done = await post(base, '/2fa/confirm', { token: made.json.setupToken, code: totp(begin.json.secret) });
     return [shape(made), shape(begin), shape(done), (await get(base, '/2fa', done.json.token)).json.enabled];

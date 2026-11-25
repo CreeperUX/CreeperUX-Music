@@ -184,18 +184,19 @@ client name. Nothing else is written to the database.
 ## The `/auth` routes
 
 Everything under `/auth` is answered here (`src/auth/`), as Navidrome's `server/auth.go` and the fork's
-`sonus_twofactor.go` and `sonus_device.go` answer it: the same JSON, status codes and messages.
+`sonus_twofactor.go` and `sonus_device.go` answer it: the same JSON, status codes and messages, except where this
+server asks for more on purpose ("Codes a session alone does not replace", below).
 
 | Route | |
 |---|---|
-| `POST /auth/login` | the password, then per `Sonus.TwoFactor`: a code (`otp`: from the authenticator, each once, or a recovery code), or for a user who has not set it up while it is required, a setup token instead of a session (`"twoFactor": "setup"`) |
+| `POST /auth/login` | the password, then per `Sonus.TwoFactor`: a code (`otp`: from the authenticator, each once, or a recovery code), or for a user who has not set it up while it is required, a setup token instead of a session (`"twoFactor": "setup"`, with `enrolmentCodeRequired`). With `appPassword` (a name), a sign-in that succeeds also makes an app password and answers it as `newAppPassword` |
 | `POST /auth/createAdmin` | the first user, an admin, only while there is none (the count and the insert are one transaction) |
-| `POST /auth/2fa/setup`, `/2fa/confirm` | a new authenticator secret with its `otpauth://` link and QR code (a PNG), then a code from it: recovery codes, and a session |
+| `POST /auth/2fa/setup`, `/2fa/confirm` | a new authenticator secret with its `otpauth://` link and QR code (a PNG), then a code from it: recovery codes, and a session. A first set-up while two-step verification is required takes `enrolmentCode` in both |
 | `GET /auth/2fa`, `POST /2fa/recovery-codes`, `/2fa/disable` | the user's own: status, new recovery codes (takes a code), turning it off (takes a code; refused while required) |
-| `GET`, `POST /auth/app-passwords`, `DELETE /app-passwords/{id}` | app passwords: listed, made (shown once), revoked |
-| `GET /auth/2fa/users/{id}`, `POST /2fa/users/{id}/reset` | admins: someone's status, and a reset for a lost phone |
+| `GET`, `POST /auth/app-passwords`, `DELETE /app-passwords/{id}` | app passwords: listed, made (shown once; takes `code`), revoked |
+| `GET /auth/2fa/users/{id}`, `POST /2fa/users/{id}/reset`, `/enrolment-code` | admins: someone's status (and when an enrolment code that waits for them runs out), a reset for a lost phone, a new enrolment code (both take the admin's `code` and answer `{enrolmentCode, expiresAt}`) |
 | `POST /auth/device/start`, `/device/poll`, `/device/revoke` | the browser sign-in, the app's side: ask, poll (the API key is handed over once), give the key back |
-| `GET /auth/device/{code}`, `POST /device/{code}/approve`, `/deny` | the approval page's side, signed in |
+| `GET /auth/device/{code}`, `POST /device/{code}/approve`, `/deny` | the approval page's side, signed in: what asks (`client`, `device`, the `address` it came from, `codeRequired`), then allow (takes `code`) or refuse |
 | anything else under `/auth` | 404, or 405 with `Allow`, as Navidrome's router; a CORS preflight alone goes to Navidrome (its CORS middleware answers it) |
 
 - **Sessions** are the JWTs Navidrome makes and checks (`src/jwt.rs`): HS256 with the secret from the `property`
@@ -215,10 +216,75 @@ Everything under `/auth` is answered here (`src/auth/`), as Navidrome's `server/
   API (`/api`) and the Jellyfin API (`/jellyfin`) are bounded at 4 MiB here as Navidrome bounds them (413 for a longer
   declared body, read and thrown away within reason so the client gets the answer; a body without a length is cut off
   at the limit), uploads (`multipart/form-data`, `image/*`) apart.
-- **Sign-ins waiting for approval** live in this process's memory (200 at most, ten minutes each): a restart drops
-  them and the app asks again.
+- **Sign-ins waiting for approval** live in this process's memory (ten minutes each; five per address and 2000 in
+  all, the oldest unapproved giving way): a restart drops them and the app asks again.
 - **What is written**: a user's `last_login_at`; the first admin (as Navidrome's user repository writes a new user,
-  with every library); the two-step verification rows and app passwords, in the fork's tables and formats.
+  with every library); the two-step verification rows and app passwords, in the fork's tables and formats; and
+  enrolment codes, in a table of this server's own (`sonus_enrolment_code`, versioned in `sonus_server_schema` as
+  Sonus Connect's: Navidrome's tables are not altered).
+
+### Codes a session alone does not replace
+
+Decided after the security review of 2026-11-24 (`docs/security-review-2026-11-24.md`, "Weaknesses by design").
+These are this server's own rules: the frozen Navidrome has none of them, and its routes read past the extra fields.
+
+**An enrolment code for a first set-up.** With `Sonus.TwoFactor=required`, the password of an account that has no
+two-step verification yet gets a setup token, as before, but the token sets nothing up by itself: `POST
+/auth/2fa/setup` and `/2fa/confirm` also take the account's `enrolmentCode` (401 with `"twoFactor": "enrolment"`
+without it). So whoever learns a new user's password first cannot enrol their own authenticator and lock the owner out.
+
+- An admin makes the code and hands it over with the password: `POST /auth/2fa/users/{id}/enrolment-code`, or the
+  answer of a reset. Both answer `{"enrolmentCode": "abcd-efgh-jkmn", "expiresAt": …}` once; the server keeps only
+  a hash. In the old web UI it is on the user's page ("Make an enrolment code").
+- It works **once, for seven days**: long enough to reach a family member by hand. A new code for the same user
+  replaces the earlier one; the confirmation of the set-up uses it up (in the same transaction as the set-up, so one
+  code enrols one authenticator).
+- **Ten wrong enrolment codes for an account in an hour**, from anywhere, and none is looked at for the rest of the
+  hour (429), the right one neither: the code has 12 characters of 31 (about 59 bits) and cannot be guessed at that
+  rate. As with verification codes, someone who has the password can keep the owner's set-up refused this way.
+- **Users made through Navidrome's own API** (`/api/user`, the old web UI's "new user") get none automatically:
+  Navidrome knows nothing of these codes. The admin makes one on the user's page afterwards.
+- **Users who were there before** and never set two-step verification up need one too: their password gets them the
+  setup token and no further until an admin makes them a code. Users who are set up notice nothing.
+- **The first admin** has nobody to get a code from. The setup token that `createAdmin` answers (15 minutes, for
+  the account just made, `enrolmentCodeRequired: false`) sets up without one. After those minutes, or signing in
+  again with the password, a code is needed like for anyone else: see the command line, next.
+- **When no admin can make one** (the first admin missed those minutes; the only admin lost the authenticator and
+  the recovery codes): whoever runs the server makes it on its command line, with the server's own settings (the
+  same environment, config file and flags), beside the running server:
+
+  ```sh
+  sonus-server enrolment-code <user name>            # prints a code for a user without two-step verification
+  sonus-server enrolment-code <user name> --reset    # removes the user's two-step verification first
+  docker exec <container> /app/sonus-server enrolment-code <user name>     # in the image
+  ```
+
+  It asks for no credentials: whoever can run it can read and write the database file anyway.
+- **`optional` and `off`**: no enrolment codes. With `optional`, whoever is signed in turns two-step verification
+  on for themselves, as before; the admin routes answer 409 and a reset answers 204 as it did.
+
+**A verification code for what outlives the session.** For an account that has two-step verification, a session is
+not enough for these three; each takes `code` (from the authenticator, or a recovery code) and answers 401 with
+`"twoFactor": "code"` without a right one:
+
+- `POST /auth/device/{code}/approve`: allowing an app hands it a permanent key. `GET /auth/device/{code}` tells
+  the page `codeRequired`, and the `address` the request came from, to show beside the app's and device's names
+  (which are whatever the asker sent). Refusing takes no code.
+- `POST /auth/app-passwords`: an app password is a permanent key that skips two-step verification.
+- `POST /auth/2fa/users/{id}/reset` and `/enrolment-code`: the admin's own code, so that an admin's session is not
+  worth every account's second step.
+
+Wrong codes on these routes count against the account with the sign-in's (ten in an hour, then 429 for all of
+them). An account without two-step verification (`off`, or `optional` and not set up) does all three as before.
+
+A client that signs in with the password and a code and then keeps an app password of its own (the web client)
+would need two codes thirty seconds apart: so a sign-in can ask for the app password in the same request
+(`"appPassword": "<name>"` on `POST /auth/login` and `/2fa/confirm`; answered as `newAppPassword`, in the shape `POST
+/auth/app-passwords` answers). Password and code were both checked by that very request.
+
+**For the owner at every new device**: allowing the app in the browser now also asks for the six digits from the
+authenticator. **Deployment order**: the old web UI learns to ask in `ghcr.io/creeperux/navidrome` 0.64.2-sonus.11;
+an older UI behind this server cannot allow apps for accounts with two-step verification (it sends no code).
 
 Where it differs from Navidrome, knowingly: passwords are compared in constant time, and a stored password that
 cannot be decrypted matches nothing; two first admins asked for at once make one (Navidrome counts, then inserts);
@@ -447,7 +513,11 @@ pushes linux/amd64 and linux/arm64, tagged `latest`, the Cargo version and `sha-
   first admin, the setup at the first sign-in, a code at every sign-in and each once, recovery codes, app passwords,
   an admin's reset, optional and off, the browser sign-in from start to revoke), who is signed in (a token's user,
   epoch and audience; header, cookie, query; a trusted proxy's user; the development auto-login), 404 and 405 for
-  everything else under `/auth`, the rate limit, eight first admins at once making one;
+  everything else under `/auth`, the rate limit, eight first admins at once making one; and this server's own rules:
+  the password alone setting nothing up (no code, a wrong one, another user's, an expired, a used one), ten wrong
+  enrolment codes, the first admin's token, an admin making codes, a session alone not allowing an app, making an
+  app password or resetting a user, the wrong-code limit across all of them, an app password made with a sign-in,
+  and the command line;
 - unit tests of what they stand on: session tokens against ones Navidrome's own JWT stack signed (`tests/golden/`),
   authenticator codes against RFC 6238's vectors, the QR code, ids, the rate limiter's window arithmetic, JSON bodies
   decoded as Go decodes them;

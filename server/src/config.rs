@@ -132,6 +132,8 @@ pub struct LibraryOptions {
     pub transcode_max_concurrent: i64,
     pub transcode_max_per_user: i64,
     pub transcode_enable_cancellation: bool,
+    /// `MaxImageSize` (default `20MB`): the most of a picture read to resize it.
+    pub max_image_size: String,
 }
 
 impl Default for LibraryOptions {
@@ -165,6 +167,7 @@ impl Default for LibraryOptions {
             transcode_max_concurrent: 0,
             transcode_max_per_user: 0,
             transcode_enable_cancellation: false,
+            max_image_size: "20MB".into(),
         }
     }
 }
@@ -401,6 +404,7 @@ impl Config {
                         Some(v) => v,
                         None => nd.get_bool("enabletranscodingcancellation")?.unwrap_or(false),
                     },
+                    max_image_size: nd.get("maximagesize")?.unwrap_or(d.max_image_size),
                 }
             },
         };

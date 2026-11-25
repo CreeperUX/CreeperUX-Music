@@ -2,7 +2,7 @@
 // that. Usage: node --test tools/contract/diff.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compare, expand, matches, mustBeAnsweredByRust, EXPECTED } from './diff.mjs';
+import { compare, expand, matches, mustBeAnsweredByRust, pictureSize, EXPECTED } from './diff.mjs';
 
 test('paths: * is one key or index, ** any number', () => {
   assert.ok(matches(['a', 'b', 0, 'c'], 'a.b.*.c'));
@@ -74,4 +74,17 @@ test('who must answer: the Rust server for the methods it has taken over, in JSO
   assert.ok(!mustBeAnsweredByRust({ method: 'ping' }, failed(44, 'Invalid API key')));
   assert.ok(!mustBeAnsweredByRust({ method: 'getAlbumList2', navidrome: 'musicFolderId' }, ok));
   assert.ok(!mustBeAnsweredByRust({ path: '/auth/login' }, { status: 401 }));
+});
+
+test('a picture is known by its format and size, read from its header', () => {
+  const png = Buffer.concat([Buffer.from('\x89PNG\r\n\x1a\n\0\0\0\rIHDR', 'latin1'), Buffer.from([0, 0, 1, 44, 0, 0, 0, 225, 8, 6, 0, 0, 0])]);
+  assert.deepEqual(pictureSize(png), { format: 'png', width: 300, height: 225 });
+  // a JPEG: APP0, then the frame header (SOF0) with height before width
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 17, 8, 0, 225, 1, 44, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  assert.deepEqual(pictureSize(jpeg), { format: 'jpeg', width: 300, height: 225 });
+  const gif = Buffer.from('GIF89a\x10\x00\x20\x00\x00\x00\x00', 'latin1');
+  assert.deepEqual(pictureSize(gif), { format: 'gif', width: 16, height: 32 });
+  const vp8x = Buffer.concat([Buffer.from('RIFF\0\0\0\0WEBPVP8X\x0a\0\0\0\0\0\0\0', 'latin1'), Buffer.from([0x2b, 1, 0, 0xe0, 0, 0]), Buffer.alloc(8)]);
+  assert.deepEqual(pictureSize(vp8x), { format: 'webp', width: 300, height: 225 });
+  assert.equal(pictureSize(Buffer.from('<svg/>')), null);
 });

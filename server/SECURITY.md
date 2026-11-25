@@ -473,6 +473,34 @@ reflected except the numbers of a range.
 **Left to Navidrome, as before:** downloads (`download`, not used by Sonus clients), and every error Navidrome words
 with a path in it (a file that cannot be opened).
 
+## Media: resizing covers
+
+`src/library/resize.rs`, the resize path of `src/library/media.rs`. The picture comes only from where Navidrome's
+artwork state says (its folder file, with the modification time Navidrome noted, or its image store), as for the full
+size (above): no path from the client, which names an item by kind and id.
+
+**Decompression bombs.** At most `MaxImageSize` bytes (Navidrome's setting, default 20 MB) are taken to resize; a
+larger picture is Navidrome's. Before anything is decoded the picture's declared width and height are read, and a
+canvas over 64 Mi pixels (Navidrome's `maxImagePixels`) is not decoded at all: the original is served as it is, as
+Navidrome does. The decoder is also told the declared size as its limit and a cap on what it may allocate, so a file
+whose frames claim more than its header cannot make it allocate more. Only JPEG, PNG, GIF and WebP are decoded (the
+`image` crate, pure Rust); anything else is served as it is. An animated GIF (which Navidrome turns into an animated
+WebP with ffmpeg) is Navidrome's; animated WebP and PNG are served as they are.
+
+**CPU and memory.** At most two resizes at once, on blocking threads; a request waits at most 10 s for its turn
+(Navidrome gives `getCoverArt` 10 s), then goes to Navidrome. The output is never larger than the size asked for nor
+than the picture (never enlarged), so it is at most the original's pixel count.
+
+**The cache.** Resized covers are kept in a folder of this server's own (`<CacheFolder>/sonus-images`), bounded by
+`ImageCacheSize` (Navidrome's; `0`: none), the same file cache as the transcoding cache (named by the SHA-256 of the
+representation's key, written whole then renamed, least recently used out first). Navidrome's own cache of resized
+covers is still read first and never written.
+
+**Placeholders.** Navidrome's two placeholder pictures are compiled in and served as they are, with
+`Cache-Control: no-store` and no validators, exactly where Navidrome serves them: no id, an item settled without a
+picture, an item the user does not see or that is gone. They say nothing about the item beyond "no picture for you",
+as Navidrome's do.
+
 ## Media: transcoding
 
 `src/library/transcode.rs` (the decision, ffmpeg's arguments), `src/library/transcoder.rs` (the processes, the caps,

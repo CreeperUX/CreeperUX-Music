@@ -895,7 +895,9 @@ async fn a_cover_navidrome_has_settled_is_served_from_where_it_is() {
     assert_eq!(headers["last-modified"], "Tue, 24 Nov 2026 22:42:38 GMT");
     assert_eq!(headers["cache-control"], "public, no-cache");
     assert_eq!(headers[library::ANSWERED_HEADER], "rust");
-    assert!(headers.get("content-length").is_none() && headers.get("set-cookie").is_none() && headers.get("content-encoding").is_none());
+    // within Go's 2048-byte buffer a picture goes out with its length, as Go's server sends it; no cookie
+    assert_eq!(headers["content-length"], JPEG.len().to_string().as_str());
+    assert!(headers.get("set-cookie").is_none() && headers.get("content-encoding").is_none());
     assert_eq!(headers["x-content-type-options"], "nosniff");
     assert!(w.reached().is_empty(), "Navidrome saw nothing, not even a registration");
     // asked for by its hash: the client may keep it for good; by another hash, or an old id's time stamp: it revalidates
@@ -923,32 +925,60 @@ async fn a_cover_navidrome_has_settled_is_served_from_where_it_is() {
     assert!(last_access.is_some());
 }
 
+/// A real 800 × 600 JPEG as album Blue's cover.
+fn real_cover(music: &Path, w: &World) {
+    let picture = image::RgbImage::from_fn(800, 600, |x, y| image::Rgb([(x % 251) as u8, (y % 241) as u8, 120]));
+    let cover = music.join("a").join("cover.jpg");
+    picture.save_with_format(&cover, image::ImageFormat::Jpeg).unwrap();
+    w.db().execute("UPDATE item_artwork SET ref_mtime = ?1 WHERE item_id = 'al-b'", [mtime_nanos(&cover)]).unwrap();
+}
+
+fn dimensions(bytes: &[u8]) -> (u32, u32) {
+    image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().unwrap().into_dimensions().unwrap()
+}
+
 #[tokio::test]
-async fn a_resized_cover_is_served_once_navidrome_has_made_it() {
-    let (w, _music, data) = world_with_pictures().await;
-    // not resized yet: Navidrome's to make (and to cache)
-    w.navidromes(&format!("/rest/getCoverArt?{ALICE}&id=al-al-b&size=300")).await;
-    // an entry Navidrome is still writing (no marker yet) is not served
-    cache_resized(&data, &format!("h-{FOLDER_HASH}.300.false.q75"), PNG, false);
-    w.navidromes(&format!("/rest/getCoverArt?{ALICE}&id=al-al-b&size=300")).await;
-    cache_resized(&data, &format!("h-{FOLDER_HASH}.300.false.q75"), PNG, true);
+async fn a_cover_is_resized_here_unless_navidrome_has_made_it() {
+    let (w, music, data) = world_with_pictures().await;
+    real_cover(&music, &w);
+    // not resized yet: resized here, under Navidrome's validator, as Navidrome would answer it
     let (status, headers, body) = w.cover("id=al-al-b&size=300", None).await;
-    assert_eq!((status, body.as_slice()), (StatusCode::OK, PNG));
-    assert_eq!(headers["content-type"], "image/png", "named by its bytes, as Go names it");
-    assert_eq!(headers["etag"], format!("\"{FOLDER_HASH}.300.false.q75\""), "a resized picture has a validator of its own");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[library::ANSWERED_HEADER], "rust");
+    assert_eq!(headers["content-type"], "image/jpeg");
+    assert_eq!(dimensions(&body), (300, 225), "fitted, the aspect kept");
+    assert_eq!(headers["etag"], format!("\"{FOLDER_HASH}.300.false.q75\""));
     assert_eq!(headers["cache-control"], "public, no-cache");
-    assert_eq!(w.cover(&format!("id=al-al-b_{FOLDER_HASH}&size=300"), None).await.1["cache-control"], "public, max-age=31536000, immutable");
-    assert_eq!(w.cover("id=al-al-b&size=300", Some(&format!("\"{FOLDER_HASH}.300.false.q75\""))).await.0, StatusCode::NOT_MODIFIED);
-    assert_eq!(w.cover("id=al-al-b&size=300", Some(&format!("\"{FOLDER_HASH}\""))).await.0, StatusCode::OK, "the full picture's validator is another");
-    // every size and shape is an entry of its own
-    w.navidromes(&format!("/rest/getCoverArt?{ALICE}&id=al-al-b&size=301")).await;
-    w.navidromes(&format!("/rest/getCoverArt?{ALICE}&id=al-al-b&size=300&square=true")).await;
-    cache_resized(&data, &format!("h-{FOLDER_HASH}.300.true.q75"), JPEG, true);
-    assert_eq!(w.cover("id=al-al-b&size=300&square=1", None).await.2, JPEG);
-    // a resized picture is served whatever became of its source since: Navidrome does not look either
-    std::fs::remove_file(_music.join("a").join("cover.jpg")).unwrap();
-    assert_eq!(w.cover("id=al-al-b&size=300", None).await.0, StatusCode::OK);
-    w.navidromes(&format!("/rest/getCoverArt?{ALICE}&id=al-al-b")).await;
+    assert_eq!(headers["last-modified"], "Tue, 24 Nov 2026 22:42:38 GMT");
+    assert!(w.reached().is_empty(), "Navidrome saw nothing");
+    // square: a PNG with the picture centered
+    let (_, headers, body) = w.cover("id=al-al-b&size=300&square=true", None).await;
+    assert_eq!((headers["content-type"].to_str().unwrap(), dimensions(&body)), ("image/png", (300, 300)));
+    // never enlarged
+    let (_, headers, body) = w.cover("id=al-al-b&size=2000", None).await;
+    assert_eq!((dimensions(&body), headers["etag"].to_str().unwrap()), ((800, 600), format!("\"{FOLDER_HASH}.2000.false.q75\"").as_str()));
+    // what the client has: 304, before anything is resized
+    assert_eq!(w.cover("id=al-al-b&size=301", Some(&format!("\"{FOLDER_HASH}.301.false.q75\""))).await.0, StatusCode::NOT_MODIFIED);
+    // kept in this server's cache: served even once the source is gone
+    let first = w.cover("id=al-al-b&size=300", None).await.2;
+    std::fs::remove_file(music.join("a").join("cover.jpg")).unwrap();
+    assert_eq!(w.cover("id=al-al-b&size=300", None).await.2, first);
+    // Navidrome's own cache comes first: an entry it finished is served as it is
+    cache_resized(&data, &format!("h-{FOLDER_HASH}.64.false.q75"), PNG, false);
+    w.navidromes(&format!("/rest/getCoverArt?{ALICE}&id=al-al-b&size=64")).await;
+    cache_resized(&data, &format!("h-{FOLDER_HASH}.64.false.q75"), PNG, true);
+    let (_, headers, body) = w.cover("id=al-al-b&size=64", None).await;
+    assert_eq!((body.as_slice(), headers["content-type"].to_str().unwrap()), (PNG, "image/png"));
+    assert_eq!(w.cover(&format!("id=al-al-b_{FOLDER_HASH}&size=64"), None).await.1["cache-control"], "public, max-age=31536000, immutable");
+}
+
+#[tokio::test]
+async fn pictures_that_cannot_be_read_are_served_as_they_are() {
+    let (w, _music, _data) = world_with_pictures().await;
+    // the folder's cover is no picture a decoder reads: Navidrome serves the original under the resized validator
+    let (status, headers, body) = w.cover("id=al-al-b&size=300", None).await;
+    assert_eq!((status, body.as_slice()), (StatusCode::OK, JPEG));
+    assert_eq!(headers["etag"], format!("\"{FOLDER_HASH}.300.false.q75\""));
 }
 
 #[tokio::test]
@@ -968,12 +998,16 @@ async fn other_settings_other_cache_entries() {
         w.db()
             .execute("UPDATE item_artwork SET hash = ?1, source = 'embedded', updated_at = '2026-11-24 23:42:38+01:00' WHERE item_id = 'al-b'", [FOLDER_HASH])
             .unwrap();
+        // the original in Navidrome's image store
+        let stored = data.join("artwork").join("hashed").join("90").join("46");
+        std::fs::create_dir_all(&stored).unwrap();
+        std::fs::write(stored.join(format!("{FOLDER_HASH}.jpg")), JPEG).unwrap();
         cache_resized(&data, &format!("h-{FOLDER_HASH}.64.false.q75"), JPEG, true);
         cache_resized(&data, &format!("h-{FOLDER_HASH}.64.false.{key}"), PNG, true);
         let (_, headers, body) = w.cover("id=al-al-b&size=64", None).await;
         match served {
             true => assert_eq!((body.as_slice(), headers["etag"].to_str().unwrap()), (PNG, format!("\"{FOLDER_HASH}.64.false.{key}\"").as_str())),
-            false => assert_eq!(body, b"from navidrome"),
+            false => assert_eq!(body, JPEG, "nothing read from Navidrome's cache: resized here (the stand-in, as it is)"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -991,11 +1025,8 @@ async fn covers_that_stay_navidromes() {
     navidromes("id=al-b").await;
     navidromes("id=s-1").await;
     navidromes("id=ra-1").await;
-    navidromes("").await;
-    navidromes("id=").await;
-    // no state yet (Navidrome looks, and notes what it finds), no picture (its placeholder), an unknown item
+    // no state yet (Navidrome looks, and notes what it finds), an unknown item
     navidromes("id=al-al-10").await;
-    navidromes("id=al-al-c").await;
     navidromes("id=al-nope").await;
     // state for an item that is gone, or that is not this user's to see
     w.db()
@@ -1004,8 +1035,6 @@ async fn covers_that_stay_navidromes() {
             [STORE_HASH],
         )
         .unwrap();
-    navidromes("id=al-al-gone").await;
-    w.navidromes(&format!("/rest/getCoverArt?{BOB}&id=al-al-b")).await;
     // a picture Navidrome has no row for, state without its time, a hash that is none
     w.db().execute("UPDATE item_artwork SET hash = 'ffffffffffffffff' WHERE item_id = 'al-gone'", []).unwrap();
     navidromes("id=al-al-gone").await;
@@ -1622,4 +1651,37 @@ async fn transcodes_over_navidromes_cap_are_refused_as_navidrome_refuses_them() 
     assert_eq!(headers[header::RETRY_AFTER], "5");
     assert_eq!(String::from_utf8(refusal).unwrap(), failed(0, "too many concurrent transcodes, please retry shortly"));
     let _ = std::fs::remove_dir_all(&tools);
+}
+
+#[tokio::test]
+async fn placeholders_as_navidrome_sends_them() {
+    let (w, _music, _data) = world_with_pictures().await;
+    let album = include_bytes!("../src/assets/album-placeholder.webp");
+    let artist = include_bytes!("../src/assets/artist-placeholder.webp");
+    // no id, a settled absence (album Cyan), a picture of an item this user does not see (bob), or that is gone
+    w.db()
+        .execute(
+            "INSERT INTO item_artwork (item_kind, item_id, hash, source, updated_at) VALUES ('al', 'al-gone', ?1, 'embedded', '2026-11-24 23:42:38+01:00')",
+            [STORE_HASH],
+        )
+        .unwrap();
+    w.db().execute("INSERT INTO item_artwork (item_kind, item_id, hash, updated_at) VALUES ('ar', 'ar-Zed', '', '2026-11-24 23:42:38+01:00')", []).unwrap();
+    for request in [
+        format!("/rest/getCoverArt?{ALICE}"),
+        format!("/rest/getCoverArt?{ALICE}&id="),
+        format!("/rest/getCoverArt?{ALICE}&id=al-al-c&size=300"),
+        format!("/rest/getCoverArt?{BOB}&id=al-al-b"),
+        format!("/rest/getCoverArt?{ALICE}&id=al-al-gone"),
+    ] {
+        let (status, headers, body) = w.request(Request::get(&request).body(empty()).unwrap()).await;
+        assert_eq!((status, body.as_slice()), (StatusCode::OK, &album[..]), "{request}");
+        assert_eq!(headers[library::ANSWERED_HEADER], "rust");
+        assert_eq!((headers["content-type"].to_str().unwrap(), headers["cache-control"].to_str().unwrap()), ("image/webp", "no-store"));
+        assert!(headers.get("etag").is_none() && headers.get("last-modified").is_none(), "no validators");
+    }
+    // an artist's: small enough to go out with its length, as Go's server sends it
+    let (_, headers, body) = w.cover("id=ar-ar-Zed", None).await;
+    assert_eq!(body.as_slice(), &artist[..]);
+    assert_eq!(headers["content-length"], artist.len().to_string().as_str());
+    assert!(w.reached().is_empty(), "Navidrome saw nothing");
 }

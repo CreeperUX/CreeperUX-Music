@@ -37,6 +37,7 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process"
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 
 [dev-dependencies]
 # the tests' WebSocket client (the server itself needs neither the client nor the handshake)

@@ -237,6 +237,8 @@ struct State {
     ref_mtime: i64,
     updated_at: String,
     mime: String,
+    /// Settled absent (Navidrome's empty hash): a placeholder; a hash Navidrome does not know is not this.
+    absent: bool,
 }
 
 /// `formatQualityTag`.
@@ -400,12 +402,14 @@ fn state_of(scope: &Scope, id: &CoverId) -> Result<Option<State>, QueryError> {
                 ref_mtime: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
                 updated_at: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 mime: String::new(),
+                absent: false,
             })
         })
         .optional()?;
     let Some(mut state) = row else { return Ok(None) };
     if !is_image_hash(&state.hash) {
         // no picture (an empty hash), or not a hash Navidrome makes
+        state.absent = state.hash.is_empty();
         state.hash.clear();
         return Ok(Some(state));
     }
@@ -417,10 +421,36 @@ fn state_of(scope: &Scope, id: &CoverId) -> Result<Option<State>, QueryError> {
     Ok(Some(state))
 }
 
-/// `getCoverArt`, for a picture Navidrome has settled: as it is, or resized when Navidrome has resized it before.
+/// Navidrome's placeholder covers (`resources/`), served as they are.
+const ALBUM_PLACEHOLDER: &[u8] = include_bytes!("../assets/album-placeholder.webp");
+const ARTIST_PLACEHOLDER: &[u8] = include_bytes!("../assets/artist-placeholder.webp");
+
+/// `placeholderImage`: never cached, no validators (`imghttp.WriteImageHeaders`).
+fn placeholder(kind: &str) -> Reply {
+    let body = if kind == "ar" { ARTIST_PLACEHOLDER } else { ALBUM_PLACEHOLDER };
+    Reply::Bytes { content_type: "image/webp", body: body.to_vec(), headers: vec![(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))] }
+}
+
+/// A cover to resize once the database is let go (mod.rs): the original's bytes and what the answer carries.
+pub struct PendingResize {
+    pub original: Vec<u8>,
+    pub size: u32,
+    pub square: bool,
+    pub quality: u8,
+    /// The cache key (`h-` and the representation tag).
+    pub key: String,
+    pub headers: Vec<(HeaderName, HeaderValue)>,
+}
+
+/// `getCoverArt`: a picture Navidrome has settled, as it is or resized; a placeholder where Navidrome gives one.
 pub fn get_cover_art(scope: &Scope) -> Result<Reply, QueryError> {
     let (params, options) = (scope.params, scope.options);
-    let Ok(Some(text)) = string(params, "id") else { return Ok(Reply::Navidrome("no cover id, or one that is not text")) };
+    let text = match string(params, "id") {
+        Ok(Some(text)) => text,
+        // no id: the album placeholder (an empty id resolves to nothing to serve)
+        Ok(None) => return Ok(placeholder("al")),
+        Err(_) => return Ok(Reply::Navidrome("an id that is not text")),
+    };
     let Some(id) = parse_cover_id(text) else {
         return Ok(Reply::Navidrome("a disc's cover, a radio's, or an id without its kind: Navidrome finds those"));
     };
@@ -432,11 +462,16 @@ pub fn get_cover_art(scope: &Scope) -> Result<Reply, QueryError> {
     let Some(state) = state_of(scope, &id)? else {
         return Ok(Reply::Navidrome("no artwork state yet: Navidrome looks for the picture and notes what it finds"));
     };
+    if state.absent {
+        // settled absent: the kind's placeholder; a song's falls back to its disc's and album's cover
+        return Ok(if id.kind == "mf" { Reply::Navidrome("a song without its own picture: its disc's or album's") } else { placeholder(id.kind) });
+    }
     if state.hash.is_empty() {
-        return Ok(Reply::Navidrome("no picture, or one whose state is incomplete: Navidrome answers with its placeholder or looks again"));
+        return Ok(Reply::Navidrome("a picture Navidrome cannot find: it looks again (a write)"));
     }
     if !item_exists(scope, &id)? {
-        return Ok(Reply::Navidrome("an item that is not there for this user: Navidrome's placeholder"));
+        // serveHash: the picture of an item this user does not see is never served
+        return Ok(placeholder(id.kind));
     }
     let file_backed = state.source == "folder" || state.source == "upload";
     let is_image_file =
@@ -444,19 +479,9 @@ pub fn get_cover_art(scope: &Scope) -> Result<Reply, QueryError> {
     if file_backed && !is_image_file {
         return Ok(Reply::Navidrome("a stored source that is not a picture: Navidrome looks again"));
     }
-    // serveSource: the picture as it is, or a resized one under its own validator
-    let (bytes, etag) = if size == 0 && !square {
-        (original(options, &state), state.hash.clone())
-    } else {
-        let tag = representation_tag(&state.hash, size, square, options);
-        (resized(options, &tag), tag)
-    };
-    let Some(bytes) = bytes else {
-        return Ok(Reply::Navidrome("the picture's bytes are not where Navidrome's state says, or not resized yet: Navidrome's work"));
-    };
-    let Some(content_type) = sniff(&bytes) else { return Ok(Reply::Navidrome("a picture of a kind Go would name")) };
     // imghttp.WriteImageHeaders
     let header = |value: String| HeaderValue::from_str(&value).ok();
+    let etag = if size == 0 && !square { state.hash.clone() } else { representation_tag(&state.hash, size, square, options) };
     let mut headers: Vec<(HeaderName, HeaderValue)> = Vec::new();
     let Some(etag_value) = header(format!("\"{etag}\"")) else { return Ok(Reply::Navidrome("a validator no header carries")) };
     headers.push((header::ETAG, etag_value));
@@ -469,10 +494,51 @@ pub fn get_cover_art(scope: &Scope) -> Result<Reply, QueryError> {
     // immutable only for the client that asked for this very picture; anyone else revalidates
     let caching = if !id.hash.is_empty() && id.hash == state.hash { "public, max-age=31536000, immutable" } else { "public, no-cache" };
     headers.push((header::CACHE_CONTROL, HeaderValue::from_static(caching)));
+    // serveSource: the picture as it is, or a resized one under its own validator
+    let bytes = if size == 0 && !square {
+        match original(options, &state) {
+            Some(bytes) => bytes,
+            None => return Ok(Reply::Navidrome("the picture's bytes are not where Navidrome's state says: Navidrome looks again")),
+        }
+    } else {
+        let key = format!("h-{etag}");
+        // made before, by Navidrome or here
+        match resized(options, &etag).or_else(|| scope.images.and_then(|cache| cache.get(&key)).and_then(|path| read_picture(&path))) {
+            Some(bytes) => bytes,
+            None => {
+                if options.enable_webp_encoding {
+                    return Ok(Reply::Navidrome("WebP encoding is on: Navidrome's encoder"));
+                }
+                let Some(original) = original(options, &state) else {
+                    return Ok(Reply::Navidrome("the picture's bytes are not where Navidrome's state says: Navidrome looks again"));
+                };
+                if original.len() as u64 > max_image_bytes(options) {
+                    return Ok(Reply::Navidrome("a picture over MaxImageSize: Navidrome's error"));
+                }
+                if scope.if_none_match.is_some_and(|sent| if_none_match(sent, &etag)) {
+                    return Ok(Reply::NotModified { headers });
+                }
+                let quality = u8::try_from(options.cover_art_quality.clamp(1, 100)).unwrap_or(75);
+                let size = u32::try_from(size).unwrap_or(u32::MAX);
+                return Ok(Reply::Resize(Box::new(PendingResize { original, size, square, quality, key, headers })));
+            }
+        }
+    };
+    let Some(content_type) = sniff(&bytes) else { return Ok(Reply::Navidrome("a picture of a kind Go would name")) };
     if scope.if_none_match.is_some_and(|sent| if_none_match(sent, &etag)) {
         return Ok(Reply::NotModified { headers });
     }
     Ok(Reply::Bytes { content_type, body: bytes, headers })
+}
+
+/// `maxImageBytes`: `MaxImageSize` (default 20 MB; unreadable: the default).
+fn max_image_bytes(options: &LibraryOptions) -> u64 {
+    super::transcoder::parse_bytes(&options.max_image_size).filter(|size| *size > 0).unwrap_or(20_000_000)
+}
+
+/// The content type Go's server sniffs for a picture's first bytes (pub for the resized answers).
+pub fn sniff_picture(bytes: &[u8]) -> Option<&'static str> {
+    sniff(bytes)
 }
 
 #[cfg(test)]

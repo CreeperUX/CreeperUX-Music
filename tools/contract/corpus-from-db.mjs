@@ -197,7 +197,8 @@ export function buildCorpus(db, { seed = 1, covers = false, streams = false } = 
     ];
     for (const id of ids) {
       requests.push({ name: `getCoverArt ${id}`, method: 'getCoverArt', params: { id }, auth: { user: keys[0] } });
-      requests.push({ name: `getCoverArt ${id} size=300`, method: 'getCoverArt', params: { id, size: '300' }, auth: { user: keys[0] } });
+      // resized by each side's own encoder: compared by status, headers, format and dimensions
+      requests.push({ name: `getCoverArt ${id} size=300`, method: 'getCoverArt', params: { id, size: '300' }, auth: { user: keys[0] }, volatile: ['@sha256', '@length', '@headers.content-length', '@headers.transfer-encoding'] });
     }
   }
 

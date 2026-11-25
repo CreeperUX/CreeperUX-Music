@@ -17,6 +17,7 @@
 pub mod browse;
 pub mod catalog;
 pub mod entities;
+pub mod filecache;
 pub mod json;
 pub mod lists;
 pub mod media;
@@ -24,6 +25,7 @@ pub mod natural;
 pub mod player;
 pub mod playing;
 pub mod query;
+pub mod resize;
 pub mod search;
 pub mod stream;
 pub mod transcode;
@@ -120,6 +122,9 @@ pub struct Library {
     /// its memory.
     now_playing: Arc<playing::NowPlaying>,
     transcoder: Arc<transcoder::Transcoder>,
+    /// Covers resized here, and how many are resized at once.
+    images: Option<Arc<filecache::Cache>>,
+    resizing: Arc<tokio::sync::Semaphore>,
     /// How many requests were answered here, and how many went on to Navidrome.
     answered: AtomicU64,
     passed: AtomicU64,
@@ -171,6 +176,8 @@ pub enum Reply {
     Media(stream::Media),
     /// A transcode to run (stream.rs, transcoder.rs).
     Transcode(Box<stream::Pending>),
+    /// A cover to resize (media.rs, resize.rs).
+    Resize(Box<media::PendingResize>),
     Navidrome(&'static str),
 }
 
@@ -208,6 +215,8 @@ pub struct Scope<'a> {
     pub headers: &'a HeaderMap,
     /// ffmpeg, its caps and the transcoding cache.
     pub transcoder: &'a transcoder::Transcoder,
+    /// The cache of covers resized here (none: `ImageCacheSize` is 0).
+    pub images: Option<&'a filecache::Cache>,
 }
 
 impl Scope<'_> {
@@ -238,6 +247,7 @@ pub fn seeded_order(seed: u64, id: &str) -> u64 {
 impl Library {
     pub fn new(setup: Setup) -> Library {
         let transcoder = Arc::new(transcoder::Transcoder::new(transcoder_settings(&setup.options)));
+        let images = images_cache(&setup.options);
         Library {
             players: Players::new(setup.db.clone(), setup.upstream, &setup.base_path, setup.user_header),
             db: setup.db,
@@ -247,6 +257,8 @@ impl Library {
             seeds: Arc::new(Mutex::new(HashMap::new())),
             now_playing: Arc::new(playing::NowPlaying::default()),
             transcoder,
+            images,
+            resizing: Arc::new(tokio::sync::Semaphore::new(RESIZES)),
             answered: AtomicU64::new(0),
             passed: AtomicU64::new(0),
         }
@@ -316,8 +328,8 @@ impl Library {
             .or_else(|| player.as_ref().map(|player| player.id.clone()))
             .unwrap_or_default();
         let player_id = player.as_ref().map(|player| player.id.clone()).unwrap_or_default();
-        let (db, options, seeds, now_playing, transcoder) =
-            (self.db.clone(), self.options.clone(), self.seeds.clone(), self.now_playing.clone(), self.transcoder.clone());
+        let (db, options, seeds, now_playing, transcoder, images) =
+            (self.db.clone(), self.options.clone(), self.seeds.clone(), self.now_playing.clone(), self.transcoder.clone(), self.images.clone());
         let (user_id, client, params) = (user.user_id.clone(), client.to_string(), params.clone());
         let (http_method_owned, request_headers, player_owned) = (http_method.to_string(), headers.clone(), player.clone());
         let reply = tokio::task::spawn_blocking(move || {
@@ -338,6 +350,7 @@ impl Library {
                     http_method: &http_method_owned,
                     headers: &request_headers,
                     transcoder: &transcoder,
+                    images: images.as_deref(),
                 };
                 Ok(browse::answer(method, &scope))
             };
@@ -373,6 +386,7 @@ impl Library {
             Reply::Error { .. } if !json => Err("an error answer in a format other than JSON"),
             Reply::Media(media) => Ok(self.media(media, headers, player.as_ref())),
             Reply::Transcode(pending) => self.transcode(*pending, headers, player.as_ref(), json).await,
+            Reply::Resize(pending) => self.resize(*pending, headers).await,
             Reply::Error { code, message } => {
                 let (content_type, body) = respond::render(&self.envelope, &Format::Json, &Payload::Error { code, message: &message });
                 Ok(self.response(content_type, body, headers, player.as_ref(), Vec::new()))
@@ -457,6 +471,18 @@ fn transcoder_settings(options: &LibraryOptions) -> transcoder::Settings {
     }
 }
 
+/// How many covers are resized at once: each decode may take up to `resize::MAX_PIXELS` × 4 bytes.
+const RESIZES: usize = 2;
+
+/// How long a resize waits for its turn (Navidrome gives `getCoverArt` 10 s) before it is left to Navidrome.
+const RESIZE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The cache of covers resized here: `<CacheFolder>/sonus-images`, `ImageCacheSize` (Navidrome's; `0`: none).
+fn images_cache(options: &LibraryOptions) -> Option<Arc<filecache::Cache>> {
+    let caches = if options.cache_folder.is_empty() { std::path::Path::new(&options.data_folder).join("cache") } else { options.cache_folder.clone().into() };
+    transcoder::cache_size(&options.image_cache_size).map(|size| Arc::new(filecache::Cache::new(caches.join("sonus-images"), size)))
+}
+
 /// A running transcode's output, as it comes.
 fn transcode_body(held: Vec<u8>, output: tokio::sync::mpsc::Receiver<transcoder::Chunk>) -> Body {
     use futures_util::StreamExt;
@@ -490,6 +516,34 @@ fn file_body(file: std::fs::File, length: u64) -> Body {
 }
 
 impl Library {
+    /// A cover resized here (`resizedItem.Reader`): the new bytes, or the original's where Navidrome keeps it as it
+    /// is, kept in the cache under the representation's key either way, sent with the picture's headers.
+    async fn resize(&self, pending: media::PendingResize, request: &HeaderMap) -> Result<Response<Body>, &'static str> {
+        let Ok(Ok(permit)) = tokio::time::timeout(RESIZE_WAIT, self.resizing.clone().acquire_owned()).await else {
+            return Err("every resize is busy for too long: Navidrome's");
+        };
+        let media::PendingResize { original, size, square, quality, key, headers } = pending;
+        let made = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            match resize::resize(&original, size, square, quality) {
+                resize::Resized::Bytes(bytes) => Ok(bytes),
+                resize::Resized::Original => Ok(original),
+                resize::Resized::Navidromes(why) => Err(why),
+            }
+        })
+        .await
+        .map_err(|_| "the resize did not finish")??;
+        let Some(content_type) = media::sniff_picture(&made) else { return Err("a picture of a kind Go would name") };
+        if let Some(cache) = &self.images {
+            if let Some(mut entry) = cache.clone().begin(&key) {
+                if entry.write(&made).await {
+                    entry.finish().await;
+                }
+            }
+        }
+        Ok(self.picture(StatusCode::OK, Some(content_type), made, request, headers))
+    }
+
     /// A transcode as Navidrome sends one it has not cached (`Stream.Serve`, not seekable): as it comes, without
     /// ranges; over a cap, Navidrome's 429; ffmpeg failing before its first byte, Navidrome's to answer.
     async fn transcode(&self, pending: stream::Pending, request: &HeaderMap, player: Option<&Player>, json: bool) -> Result<Response<Body>, &'static str> {
@@ -582,6 +636,9 @@ impl Library {
     ) -> Response<Body> {
         let body: Body = if status == StatusCode::NOT_MODIFIED {
             Full::new(Bytes::new()).map_err(|never| match never {}).boxed()
+        } else if body.len() <= GO_UNCHUNKED {
+            // a picture within Go's 2048-byte buffer goes out with its length, as Go's server sends it
+            Full::new(Bytes::from(body)).map_err(|never| match never {}).boxed()
         } else {
             // a stream of one piece has no length to declare
             let piece = futures_util::stream::once(async move { Ok::<_, crate::gateway::BoxError>(hyper::body::Frame::data(Bytes::from(body))) });

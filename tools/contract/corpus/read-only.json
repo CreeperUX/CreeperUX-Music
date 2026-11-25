@@ -4,7 +4,8 @@
     "subsonic-response.serverVersion"
   ],
   "unordered": [
-    "subsonic-response.**.artist.*.roles"
+    "subsonic-response.**.artist.*.roles",
+    "subsonic-response.**.contributors"
   ],
   "requests": [
     { "name": "ping", "method": "ping" },

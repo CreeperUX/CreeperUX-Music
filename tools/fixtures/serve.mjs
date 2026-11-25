@@ -38,6 +38,25 @@ export async function goldenCopy({ data, empty = false } = {}) {
   return { folder, manifest, env, remove };
 }
 
+/**
+ * A copy of any Navidrome database (with its -wal file, so a consistent backup taken while Navidrome ran is whole) in a
+ * folder of its own under .work/runs, never opened where it is: { folder, db, env, remove }. `env`: the settings to
+ * serve it with (the data folder, cache folder and an empty music folder are set here, and no scan at start-up).
+ */
+export async function databaseCopy(file, { env = {} } = {}) {
+  const folder = join(WORK, 'runs', `${process.pid}-${Date.now()}-${runs++}`);
+  await rm(folder, { recursive: true, force: true });
+  await mkdir(join(folder, 'music'), { recursive: true });
+  await copyFile(file, join(folder, 'navidrome.db'));
+  if (existsSync(`${file}-wal`)) await copyFile(`${file}-wal`, join(folder, 'navidrome.db-wal'));
+  const all = {
+    ND_MUSICFOLDER: join(folder, 'music'), ...env,
+    ND_DATAFOLDER: folder, ND_CACHEFOLDER: join(folder, 'cache'), ND_SCANNER_SCANONSTARTUP: 'false',
+  };
+  const remove = () => rm(folder, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  return { folder, db: join(folder, 'navidrome.db'), env: all, remove };
+}
+
 /** Starts Navidrome on a copy of the golden database: { url, stop, data, manifest }. `env`: settings over the golden ones. */
 export async function serveGolden({ port, data, navidrome, env = {}, empty = false } = {}) {
   const copy = await goldenCopy({ data, empty });

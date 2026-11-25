@@ -324,10 +324,7 @@ fn direct_play_fits(src: &Details, profile: &DirectPlayProfile) -> bool {
     let bridge = src.codec.eq_ignore_ascii_case("pcm")
         && src.container.eq_ignore_ascii_case("wav")
         && profile.audio_codecs.iter().any(|c| c.eq_ignore_ascii_case("wav"));
-    if !profile.audio_codecs.is_empty() && !matches_with_aliases(&src.codec, &profile.audio_codecs, &CODEC_ALIASES) && !bridge {
-        return false;
-    }
-    true
+    profile.audio_codecs.is_empty() || matches_with_aliases(&src.codec, &profile.audio_codecs, &CODEC_ALIASES) || bridge
 }
 
 /// `LookupTranscodeCommand`: the stored command, else the built-in one; empty for an unknown format.

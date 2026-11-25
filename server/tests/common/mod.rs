@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 pub mod database;
+pub mod fake_s3;
 
 use std::convert::Infallible;
 use std::future::Future;

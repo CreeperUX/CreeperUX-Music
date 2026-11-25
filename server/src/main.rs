@@ -93,6 +93,7 @@ async fn main() -> ExitCode {
     let (failed_tx, mut failed_rx) = tokio::sync::mpsc::channel::<String>(1);
     if navidrome.is_some() {
         let (gateway, upstream, base_path, shared) = (gateway.clone(), config.upstream.clone(), config.base_path.clone(), config.shared.clone());
+        let mirror = config.mirror;
         tokio::spawn(async move {
             watch_until_ready(upstream.clone(), ready).await;
             match startup::local(&shared, &upstream, &base_path).await {
@@ -102,6 +103,12 @@ async fn main() -> ExitCode {
                     gateway.set_subsonic(local.subsonic);
                     gateway.set_auth(local.auth);
                     info!("Subsonic sign-ins are checked here; /auth, Sonus Connect version 2 and the library reads are answered here");
+                    // off without the owner's bucket and keys (SONUS_R2_*): then nothing of it runs
+                    if let Some(settings) = mirror {
+                        if let Err(e) = sonus_server::mirror::start(settings, local.db, std::path::PathBuf::from(&shared.data_folder)) {
+                            error!("R2 mirror: {e}; the server runs without it");
+                        }
+                    }
                 }
                 Err(e) => {
                     let _ = failed_tx.send(e).await;

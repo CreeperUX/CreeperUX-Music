@@ -30,6 +30,8 @@ pub struct Local {
     pub auth: Auth,
     pub connect: Connect,
     pub library: Library,
+    /// Navidrome's database, for the parts that run beside the answers (the R2 mirror).
+    pub db: Arc<Db>,
 }
 
 /// Navidrome's `consts.JWTSecretKey`: where the `property` table keeps the session secret, sealed.
@@ -105,7 +107,7 @@ pub async fn local(shared: &Shared, upstream: &Uri, base_path: &str) -> Result<L
         public_signer,
     });
     let auth = Auth::new(auth::Setup {
-        db: opened,
+        db: opened.clone(),
         keys,
         two_factor: shared.two_factor,
         signer,
@@ -117,7 +119,7 @@ pub async fn local(shared: &Shared, upstream: &Uri, base_path: &str) -> Result<L
         enable_gravatar: shared.enable_gravatar,
         auto_login: shared.dev_auto_login_username.clone(),
     });
-    Ok(Local { subsonic, auth, connect, library })
+    Ok(Local { subsonic, auth, connect, library, db: opened })
 }
 
 /// The user name of the sign-in the server tries at Navidrome when it starts: nobody's.

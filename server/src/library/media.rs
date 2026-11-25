@@ -270,6 +270,11 @@ fn cache_enabled(options: &LibraryOptions) -> bool {
 
 /// Where Navidrome's image store keeps a picture (`ImageStore.path`, `extForMime`).
 fn store_path(options: &LibraryOptions, hash: &str, mime: &str) -> PathBuf {
+    artwork_file(Path::new(&options.data_folder), hash, mime)
+}
+
+/// `ImageStore.path` in the data folder; `hash` has at least 4 characters.
+pub fn artwork_file(data_folder: &Path, hash: &str, mime: &str) -> PathBuf {
     let extension = match mime {
         "image/jpeg" => ".jpg",
         "image/png" => ".png",
@@ -277,7 +282,7 @@ fn store_path(options: &LibraryOptions, hash: &str, mime: &str) -> PathBuf {
         "image/webp" => ".webp",
         _ => ".img",
     };
-    Path::new(&options.data_folder).join("artwork").join("hashed").join(&hash[0..2]).join(&hash[2..4]).join(format!("{hash}{extension}"))
+    data_folder.join("artwork").join("hashed").join(&hash[0..2]).join(&hash[2..4]).join(format!("{hash}{extension}"))
 }
 
 /// A file's change time in nanoseconds since 1970, as Go's `ModTime().UnixNano()`.

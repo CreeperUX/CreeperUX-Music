@@ -137,7 +137,20 @@ control that the UI still works there.
 ```sh
 node --test tools/contract/security/findings.test.mjs     # F1 to F6: what the review proved, fixed since
 node --test tools/contract/security/hardening.test.mjs    # D1 to D3: what was decided after it
+node --test tools/contract/security/required.test.mjs     # required: no account password on the API
 ```
+
+`required.test.mjs`: with two-step verification required, the password of a user without two-step verification
+signs no API call (three forms, GET and form post, a media route, Sonus Connect), answered as a wrong password; it
+still gets the set-up token, and with an enrolment code the set-up and an app password that signs; an app password
+from before keeps working; `optional` and `off` are as they were.
+
+**Who the suites sign in as.** The fixtures' listener has no two-step verification, and the tests sign its API
+calls with its app password (`apiSecret` in `lib/subsonic.mjs`: the suite's `api`, `as()`, the differential
+corpora's `listener` entries, `gateway.test.mjs`): the frozen Navidrome would take its account password, the Rust
+server does not, and an app password is what Sonus clients hold anyway. The account password on the API is still
+checked where it is meant to sign: the suite's `auth` file (required: refused by the Rust server, taken by the
+fork), `auth-routes.test.mjs` and `required.test.mjs` (`optional`, `off`), and the server's own tests.
 
 Each test runs the Rust server with the real Navidrome on a fresh copy of the golden database (or on none).
 `hardening.test.mjs`:

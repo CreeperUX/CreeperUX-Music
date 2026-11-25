@@ -96,8 +96,11 @@ test('the first sign-in gives a setup token that opens nothing else', { skip }, 
   assert.equal((await get('/2fa', temp.setupToken)).status, 401, '/auth');
   assert.equal((await webJson(BASE, '/api/user', { token: temp.setupToken })).status, 401, 'the native API');
   assert.equal((await subsonic({ u: temp.username, jwt: temp.setupToken })).body.error?.code, 40, 'the Subsonic API');
-  // until it is set up, the account password still signs the Subsonic API
-  assert.equal((await subsonic({ u: temp.username, p: temp.password })).body.status, 'ok');
+  // until it is set up, the account password still signs the Subsonic API on the fork; the Rust server takes no
+  // account password there where two-step verification is required, set up or not
+  const byPassword = (await subsonic({ u: temp.username, p: temp.password })).body;
+  if (first.json.enrolmentCodeRequired === true) assert.equal(byPassword.error?.code, 40);
+  else assert.equal(byPassword.status, 'ok');
 
   temp.hardened = first.json.enrolmentCodeRequired === true;
   if (temp.hardened) {

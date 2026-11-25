@@ -3,9 +3,14 @@
 //! two-step verification store (`core/twofactor/store.go`) read straight from the database.
 //!
 //! The rule: a user signs with the account password (`p`, plain or `enc:` + hex, or the token `t` = md5(password ‖
-//! `s`)) unless two-step verification is set up for them and the policy is not `off`; then only an app password
-//! signs, in the same three forms. Everyone may use an app password, as shown or without its dashes. An API key is an
-//! app password sent alone as `apiKey`, found by its hash.
+//! `s`)) only where the password alone is meant to be enough: the policy is `off`, or it is `optional` and the user
+//! has not set two-step verification up. Otherwise only an app password signs, in the same three forms. Everyone may
+//! use an app password, as shown or without its dashes. An API key is an app password sent alone as `apiKey`, found
+//! by its hash.
+//!
+//! With the policy `required` this is stricter than the fork on purpose: there, the account password of a user who
+//! had not set two-step verification up yet still signed the API. Here it signs nothing, whether or not the user has
+//! set it up, and is answered as a wrong password is.
 //!
 //! Where Navidrome compares secrets with `==`, this compares in constant time.
 //!
@@ -23,7 +28,7 @@ use crate::secrets::{self, Keys};
 /// What a user's stored secrets say about the credentials sent.
 #[derive(Debug, PartialEq)]
 pub enum Verdict {
-    /// The account password signed (no two-step verification in the way).
+    /// The account password signed (the policy lets it: see `password_alone`).
     Account,
     /// The app password at this index signed.
     AppPassword(usize),
@@ -34,9 +39,20 @@ pub enum Verdict {
 pub struct Account<'a> {
     /// The account password; None when it cannot be read (it then matches nothing).
     pub password: Option<&'a [u8]>,
-    /// Two-step verification is set up and the policy is not `off`.
+    /// The account password signs nothing: only app passwords do (see `password_alone`).
     pub two_factor: bool,
     pub app_passwords: &'a [Vec<u8>],
+}
+
+/// Whether the account password alone signs the Subsonic API for a user: always with the policy `off`; with
+/// `optional`, until the user sets two-step verification up; with `required`, never (the web sign-in gives such a
+/// user a set-up token and nothing else, and the API gives the password no more than that).
+pub fn password_alone(policy: TwoFactor, confirmed: bool) -> bool {
+    match policy {
+        TwoFactor::Off => true,
+        TwoFactor::Optional => !confirmed,
+        TwoFactor::Required => false,
+    }
 }
 
 /// `p` as sent: `enc:` + hex is decoded when it is hex, and taken as it is when not (as Navidrome does).
@@ -116,7 +132,7 @@ pub fn user_with_password(db: &Db, keys: &Keys, policy: TwoFactor, username: &st
             })
             .optional()?;
         let Some((id, user_name, sealed_password)) = user else { return Ok(None) };
-        let two_factor = policy != TwoFactor::Off && two_factor_confirmed(conn, &id)?;
+        let two_factor = !password_alone(policy, two_factor_confirmed(conn, &id)?);
         let app_passwords = app_passwords_of(conn, &id)?;
         Ok(Some((id, user_name, sealed_password, two_factor, app_passwords)))
     })?;
@@ -279,6 +295,14 @@ mod tests {
         assert_eq!(check(&a, &enc(b"sesame"), b"", b""), Verdict::Invalid);
         assert_eq!(check(&a, b"", &token(b"sesame", b"s"), b"s"), Verdict::Invalid);
         assert_eq!(check(&account(true, &[]), b"sesame", b"", b""), Verdict::Invalid, "nor without any app password");
+    }
+
+    #[test]
+    fn the_password_alone_signs_only_where_the_policy_means_it_to() {
+        assert!(password_alone(TwoFactor::Off, false) && password_alone(TwoFactor::Off, true));
+        assert!(password_alone(TwoFactor::Optional, false) && !password_alone(TwoFactor::Optional, true));
+        assert!(!password_alone(TwoFactor::Required, true));
+        assert!(!password_alone(TwoFactor::Required, false), "required: not before the user has set it up either");
     }
 
     #[test]

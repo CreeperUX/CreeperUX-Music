@@ -41,7 +41,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { appendParams, authParams, API_VERSION } from './lib/subsonic.mjs';
+import { apiSecret, appendParams, authParams, API_VERSION } from './lib/subsonic.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
@@ -87,7 +87,7 @@ function signIn(auth, manifest) {
   switch (spec.as ?? 'token') {
     case 'apiKey': return { apiKey: u.apiKey };
     case 'appPassword': return authParams({ u: u.username, password: u.appPassword, as: 'token', salt: SALT });
-    default: return authParams({ u: u.username, password: u.password, as: spec.as ?? 'token', salt: SALT });
+    default: return authParams({ u: u.username, password: apiSecret(u), as: spec.as ?? 'token', salt: SALT });
   }
 }
 

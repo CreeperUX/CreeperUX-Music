@@ -132,7 +132,7 @@ async fn world_on(dir: &Path, file: &Path, options: Options) -> World {
     let subsonic = Subsonic::new(Setup {
         db: db.clone(),
         keys: Keys::new(KEY),
-        two_factor: TwoFactor::Required,
+        two_factor: TwoFactor::Optional,
         limit: options.limit,
         window: Duration::from_secs(20),
         envelope: Envelope::from_json(ENVELOPE.as_bytes()).unwrap(),

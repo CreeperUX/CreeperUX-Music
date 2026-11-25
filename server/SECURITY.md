@@ -122,6 +122,17 @@ still reaches Navidrome with credentials in it:
 - a correct sign-in for a user whose name no header can carry: only after the gateway's own check succeeded;
 - a trusted proxy's requests: Navidrome ignores their credentials.
 
+**What an account password is worth on the API** follows the policy, not only the account
+(`subsonic/credentials.rs`, `password_alone`): with `required`, nothing, for every user; with `optional`, the API
+until its user sets two-step verification up; with `off`, the API. Under `required` the fork still took the password
+of a user who had not set two-step verification up, which left the enrolment code guarding only the web: the password
+alone could not enrol an authenticator, yet it signed every API call. Now a password alone reaches the set-up token
+and, with the enrolment code, the set-up; the refusal is the wrong-password answer and a counted failure, so it does
+not tell whether the password was right or whether the user has set anything up. What still signs for a user who
+has not set it up: an app password or API key the account was given earlier (by a trusted proxy's user, or while the
+policy was `optional`), as for anyone. A session token from such an earlier time is Navidrome's to check (`jwt=`),
+as before.
+
 The web sign-in is the other place that compares passwords, and it is here too: everything under `/auth` is answered
 by the gateway, unknown paths and methods included (404, 405), so no spelling of a path reaches Navidrome's own
 `/auth` handlers; only CORS preflights go there, which its CORS middleware answers before any route. What remains
@@ -473,8 +484,8 @@ matches nothing; both keys tried for passwords; a user name that is not UTF-8 re
 filled at start; one first admin when several are asked for at once; the QR code's pixels; a simpler title-casing of
 the first admin's display name; 413 for a body cut off at the limit; and, since the security review, the rules that
 ask for more than Navidrome did: no header signs anyone in unless one is named, sessions end when two-step
-verification is turned on, an enrolment code for a first set-up, and a verification code to allow an app, make an
-app password or reset a user. None widens what signs in: each either refuses more or changes nothing about who is
+verification is turned on, an enrolment code for a first set-up, a verification code to allow an app, make an
+app password or reset a user, and no account password on the API where two-step verification is required. None widens what signs in: each either refuses more or changes nothing about who is
 accepted, except the second key, which only opens what was sealed with the public default key, and the app password
 a sign-in may ask for, which that sign-in's own password and code would have got in a second request.
 

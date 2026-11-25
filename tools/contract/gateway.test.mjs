@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
-import { Subsonic } from './lib/subsonic.mjs';
+import { Subsonic, apiSecret } from './lib/subsonic.mjs';
 import { serveGolden } from '../fixtures/serve.mjs';
 import { ANSWERED_BY_RUST, ANSWERED_HEADER, startGatewayOnGolden } from './diff.mjs';
 import { device } from './lib/connect.mjs';
@@ -36,7 +36,7 @@ test('failed sign-ins are limited the same way by Navidrome and by the Rust serv
   const WINDOW = 5000;
   const { go, rust, users } = await both(t, { ND_AUTHREQUESTLIMIT: '3', ND_AUTHWINDOWLENGTH: `${WINDOW}ms` });
   const { listener, secure } = users;
-  const right = { u: listener.username, p: listener.password };
+  const right = { u: listener.username, p: apiSecret(listener) };
   const key = { apiKey: secure.apiKey };
 
   async function scenario(base) {
@@ -50,7 +50,7 @@ test('failed sign-ins are limited the same way by Navidrome and by the Rust serv
     const head = await fetch(new Subsonic(base, {}, { client: CLIENT }).url('ping', { u: listener.username, p: 'wrong-3' }), { method: 'HEAD' });
     log.push(`wrong password 3: HTTP ${head.status}`);
     await step('the right password, limited', right);
-    await step('the name in capitals, limited', { u: listener.username.toUpperCase(), p: listener.password });
+    await step('the name in capitals, limited', { u: listener.username.toUpperCase(), p: apiSecret(listener) });
     await step('another user is not limited', { u: secure.username, p: secure.appPassword });
     await step('an API key is not limited', key);
     for (let i = 1; i <= 3; i++) await step(`unknown key ${i}`, { apiKey: `no-such-key-${i}` });
@@ -93,10 +93,10 @@ test('Navidrome never sees what the Rust server refused, nor the credentials of 
     { u: secure.username, p: secure.password, mark: 'refused-two-step-account-password' },
     { apiKey: 'no-such-key', mark: 'refused-unknown-key' },
     { apiKey: secure.apiKey, u: secure.username, mark: 'refused-mixed' },
-    { p: listener.password, mark: 'refused-no-user' },
+    { p: apiSecret(listener), mark: 'refused-no-user' },
   ];
   const accepted = [
-    { u: listener.username, p: listener.password, mark: 'accepted-password' },
+    { u: listener.username, p: apiSecret(listener), mark: 'accepted-password' },
     { u: secure.username, p: secure.appPassword, mark: 'accepted-app-password' },
     { apiKey: secure.apiKey, mark: 'accepted-key' },
   ];
@@ -105,11 +105,11 @@ test('Navidrome never sees what the Rust server refused, nor the credentials of 
     // (a method Navidrome still answers: the Rust server answers a signed-in ping itself)
     for (const params of accepted) assert.equal(await ping(server.url, params, 'getLicense'), 0, params.mark);
     // as a form post too
-    const posted = await new Subsonic(server.url, {}, { client: CLIENT }).call('getLicense', { u: listener.username, p: listener.password, mark: 'accepted-form' }, { post: true });
+    const posted = await new Subsonic(server.url, {}, { client: CLIENT }).call('getLicense', { u: listener.username, p: apiSecret(listener), mark: 'accepted-form' }, { post: true });
     assert.equal(posted.body.status, 'ok');
   }
   await sleep(300);
-  const secrets = [listener.password, secure.password, secure.appPassword, secure.apiKey];
+  const secrets = [apiSecret(listener), secure.password, secure.appPassword, secure.apiKey];
   const count = (log, text) => log.split(text).length - 1;
 
   // The control: Navidrome alone saw them all, and decided itself.
@@ -139,7 +139,7 @@ test('signed in by the gateway, a request is to Navidrome what it was with crede
   const { go, rust, users } = await both(t, {});
   const { listener } = users;
   const cookie = async (base, u) => {
-    const res = await new Subsonic(base, { u, password: listener.password, as: 'password' }, { client: CLIENT }).fetch('ping');
+    const res = await new Subsonic(base, { u, password: apiSecret(listener), as: 'password' }, { client: CLIENT }).fetch('ping');
     await res.arrayBuffer();
     // nd-player-<hex of the name as typed>=<player id>; Max-Age=…; HttpOnly; SameSite=Strict; Path=/
     const [pair, ...attributes] = (res.headers.get('set-cookie') ?? '').split('; ');
@@ -153,7 +153,7 @@ test('signed in by the gateway, a request is to Navidrome what it was with crede
 
   // the player is registered under the client's name, and now playing lists it
   for (const server of [go, rust]) {
-    const api = new Subsonic(server.url, { u: listener.username, password: listener.password }, { client: 'sonus-player-test' });
+    const api = new Subsonic(server.url, { u: listener.username, password: apiSecret(listener) }, { client: 'sonus-player-test' });
     const song = (await api.ok('search3', { query: '', songCount: 1, albumCount: 0, artistCount: 0 })).searchResult3.song[0];
     await api.ok('scrobble', { id: song.id, submission: false });
     const playing = (await api.ok('getNowPlaying')).nowPlaying.entry ?? [];
@@ -219,7 +219,7 @@ test('the library’s reads are answered by the Rust server: Navidrome sees a pl
   for (const [method] of taken) assert.ok(ANSWERED_BY_RUST.includes(method), method);
   const answers = {};
   for (const server of [go, rust]) {
-    const api = new Subsonic(server.url, { u: listener.username, password: listener.password }, { client });
+    const api = new Subsonic(server.url, { u: listener.username, password: apiSecret(listener) }, { client });
     const got = [];
     for (const [method, params] of [...taken, ...left]) {
       const res = await api.fetch(method, params);
@@ -284,7 +284,7 @@ test('a player’s settings count for the answers the Rust server gives', { time
   const id = go.manifest.ids['track.flac'];
   const client = 'sonus-real-path-test';
   const song = async server => {
-    const api = new Subsonic(server.url, { u: listener.username, password: listener.password }, { client });
+    const api = new Subsonic(server.url, { u: listener.username, password: apiSecret(listener) }, { client });
     const res = await api.call('getSong', { id });
     return { path: res.body.song.path, by: res.headers.get(ANSWERED_HEADER) };
   };
@@ -323,7 +323,7 @@ test('a client cannot name itself a user', { timeout: 600_000 }, async t => {
     assert.equal(await claim({}, { [header]: admin.username }), 10, `${header} with no credentials`);
     assert.equal(await claim({ u: admin.username, p: 'wrong' }, { [header]: admin.username }), 40, `${header} with a wrong password`);
     // signed in as the listener, a claim to be the admin does not make one: getUser of someone else is refused (50)
-    assert.equal(await claim({ u: listener.username, p: listener.password }, { [header]: admin.username }), 50, `${header} beside the listener's own sign-in`);
+    assert.equal(await claim({ u: listener.username, p: apiSecret(listener) }, { [header]: admin.username }), 50, `${header} beside the listener's own sign-in`);
   }
   // the web UI is not signed in by a header either: its page carries no session
   const page = await fetch(`${rust.url}/app/`, { headers: { 'Remote-User': admin.username } });
@@ -388,7 +388,7 @@ test('Sonus Connect version 2: the session is kept across a restart, in tables o
   const log = rust.log();
   assert.ok(!/level=(error|fatal)/i.test(log), `Navidrome and the Rust server start without errors:\n${log.slice(-2000)}`);
   assert.equal((await signed(listener).ok('ping')).status, 'ok');
-  assert.equal((await signed(listener).allSongs()).length, (await new Subsonic(go.url, { u: listener.username, password: listener.password }, { client: CLIENT }).allSongs()).length);
+  assert.equal((await signed(listener).allSongs()).length, (await new Subsonic(go.url, { u: listener.username, password: apiSecret(listener) }, { client: CLIENT }).allSongs()).length);
   assert.deepEqual(tables().length, 6);
 
   const laptop = await device(rust.url, signed(listener).query().toString(), 'restart-laptop-1', '笔记本');

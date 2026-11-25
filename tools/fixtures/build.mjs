@@ -89,8 +89,10 @@ async function makeGolden({ exe, music }) {
       await sleep(500);
     }
 
-    // ---- a plain user (never signed in on the web, so no two-step verification yet: the password opens the API) and a
-    // user with two-step verification, an app password and an API key from the browser sign-in
+    // ---- a plain user (never signed in on the web, so no two-step verification yet: to this Navidrome its password
+    // opens the API; to the Rust server, where two-step verification is required, only its app password does, which
+    // listenerAppPassword makes afterwards) and a user with two-step verification, an app password and an API key
+    // from the browser sign-in
     const listener = { username: 'listener', password: secret() };
     const secure = { username: 'secure', password: secret() };
     for (const u of [listener, secure]) {
@@ -234,12 +236,35 @@ async function makeGolden({ exe, music }) {
   }
 }
 
+/**
+ * An app password for the listener, who has no two-step verification: what the tests sign the listener's API calls
+ * with. Where two-step verification is required nobody gets a session before setting it up, so Navidrome runs once
+ * more on the database, with the policy `optional`: the listener signs in with the password, makes the app password,
+ * and stays without two-step verification (as an account that got one before the server required it).
+ */
+async function listenerAppPassword({ exe, build, manifest }) {
+  const env = { ...manifest.server.env, ND_DATAFOLDER: build, ND_CACHEFOLDER: join(build, 'cache'), ND_PORT: String(await freePort()),
+    ND_SCANNER_SCANONSTARTUP: 'false', ND_SONUS_TWOFACTOR: 'optional' };
+  const nd = await startNavidrome(exe, env);
+  try {
+    const { username, password } = manifest.users.listener;
+    const login = await webJson(nd.url, '/auth/login', { method: 'POST', body: { username, password } });
+    check(login.status === 200 && login.json?.token, `the listener's sign-in: HTTP ${login.status}`);
+    manifest.users.listener.appPassword = await appPassword(nd.url, login.json.token, 'Contract tests');
+    const status = await webJson(nd.url, '/auth/2fa', { token: login.json.token });
+    check(status.json?.enabled === false, 'the listener has two-step verification');
+  } finally {
+    await nd.stop();
+  }
+}
+
 export async function buildAll({ navidrome, rebuildNavidrome = false, keepBuild = false } = {}) {
   const t0 = Date.now();
   const lib = await generate(DEFAULT_MUSIC);
   console.log(`Library: ${lib.tracks} tracks (${lib.files} files) in ${lib.out}`);
   const exe = navidromeExe({ exe: navidrome, rebuild: rebuildNavidrome });
   const { manifest, build } = await makeGolden({ exe, music: lib.out });
+  await listenerAppPassword({ exe, build, manifest });
   await checkpoint(join(build, 'navidrome.db'));
   await rm(GOLDEN, { recursive: true, force: true });
   await mkdir(GOLDEN, { recursive: true });

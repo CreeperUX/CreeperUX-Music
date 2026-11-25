@@ -63,7 +63,7 @@ struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { limit: 0, window: Duration::from_secs(20), two_factor: TwoFactor::Required, trusted: "", base_path: "", started: true }
+        Options { limit: 0, window: Duration::from_secs(20), two_factor: TwoFactor::Optional, trusted: "", base_path: "", started: true }
     }
 }
 
@@ -320,6 +320,32 @@ async fn with_the_policy_off_the_account_password_signs_again() {
     let optional = world(Options { two_factor: TwoFactor::Optional, ..Options::default() }).await;
     let (_, _, body) = optional.get(&format!("/rest/ping?u=bob&p=hunter2&{COMMON}")).await;
     assert_eq!(body, error_json(40, WRONG), "optional: set up is set up");
+}
+
+#[tokio::test]
+async fn where_two_step_verification_is_required_no_account_password_signs_set_up_or_not() {
+    let mut w = world(Options { two_factor: TwoFactor::Required, ..Options::default() }).await;
+    let wrong = error_json(40, WRONG);
+    // alice never set it up, carol began and never confirmed, bob has it: the password of none of them signs, in any
+    // of its forms, and each is answered as a wrong password is
+    for (user, password) in [("alice", "sesame"), ("carol", "not-yet"), ("bob", "hunter2")] {
+        for credentials in [format!("p={password}"), format!("p=enc:{}", hex(password)), format!("t={}&s=abc", token(password, "abc"))] {
+            assert_eq!(w.refused(&format!("/rest/ping?u={user}&{credentials}&{COMMON}")).await, wrong, "{user} {credentials}");
+        }
+        assert_eq!(w.refused(&format!("/rest/ping?u={user}&p=not-the-password&{COMMON}")).await, wrong, "the same answer as for a wrong one");
+    }
+    let (status, _, body) = w.post("/rest/ping.view", &format!("u=alice&p=sesame&{COMMON}")).await;
+    assert_eq!((status, body), (StatusCode::OK, wrong.clone()), "a form post neither");
+    // an app password still signs, for a user who has not set it up too (one made before the server required it),
+    // and so does an API key
+    let seen = w.signed_in(&format!("/rest/ping?u=alice&p={ALICE_APP}&{COMMON}")).await;
+    assert_eq!(user_of(&seen), Some(&b"alice"[..]));
+    let seen = w.signed_in(&format!("/rest/ping?u=alice&t={}&s=abc&{COMMON}", token(ALICE_APP, "abc"))).await;
+    assert_eq!(user_of(&seen), Some(&b"alice"[..]));
+    let seen = w.signed_in(&format!("/rest/ping?u=bob&p={BOB_APP}&{COMMON}")).await;
+    assert_eq!(user_of(&seen), Some(&b"bob"[..]));
+    let seen = w.signed_in(&format!("/rest/ping?apiKey={BOB_KEY}&{COMMON}")).await;
+    assert_eq!(user_of(&seen), Some(&b"bob"[..]));
 }
 
 // ---------------------------------------------------------------- form posts

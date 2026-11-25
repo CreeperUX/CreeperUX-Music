@@ -239,7 +239,10 @@ fn sign_ins_are_checked_before_navidrome_and_the_user_named_in_the_gateways_head
     if as_fake_navidrome() {
         return;
     }
-    let mut run = Run::start("sign-ins", None, &[("ND_ADDRESS", "127.0.0.1"), ("ND_PORT", "{port}"), ("ND_PASSWORDENCRYPTIONKEY", "a key of the test's")]);
+    // optional: alice has no two-step verification, and where it is required her password alone would sign nothing
+    let settings =
+        [("ND_ADDRESS", "127.0.0.1"), ("ND_PORT", "{port}"), ("ND_PASSWORDENCRYPTIONKEY", "a key of the test's"), ("ND_SONUS_TWOFACTOR", "optional")];
+    let mut run = Run::start("sign-ins", None, &settings);
     let secret = run.navidrome_env()["ND_EXTAUTH_USERHEADER"].clone();
 
     // the right password: Navidrome gets the request without it, and with the user in the header only it is told

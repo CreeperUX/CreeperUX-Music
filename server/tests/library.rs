@@ -174,7 +174,7 @@ async fn world_with(options: LibraryOptions, registers: bool) -> World {
     let subsonic = Subsonic::new(Setup {
         db: db.clone(),
         keys: Keys::new(KEY),
-        two_factor: TwoFactor::Required,
+        two_factor: TwoFactor::Optional,
         limit: 0,
         window: Duration::from_secs(20),
         envelope: envelope.clone(),

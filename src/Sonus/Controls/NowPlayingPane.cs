@@ -7,14 +7,18 @@ using Microsoft.UI.Xaml.Media;
 
 namespace Sonus.Controls;
 
-/// <summary>The right-hand panel: Now playing (cover, title, a lyrics card, audio facts, the artist, what comes next) or the
-/// Queue (hand-queued songs, then the rest of what is playing).</summary>
+/// <summary>The right-hand panel: Now playing (cover, title, a lyrics card, audio facts, the artist, what comes next), the
+/// Queue (hand-queued songs, then the rest of what is playing), or the devices (Sonus Connect, as Spotify's Connect
+/// panel: DevicesView).</summary>
 public sealed class NowPlayingPane : UserControl
 {
     private readonly MusicService _music;
     private readonly IShell _shell;
+    private readonly ConnectService _connect;
+    private readonly SessionService? _session;
+    private DevicesView? _devices;
     private readonly TextBlock _heading = Ui.Text("正在播放", size: 15, foreground: Ui.Brush("TextPrimaryBrush"), bold: true);
-    // Sonus Connect version 2: where the session plays, when not on this device
+    // Sonus Connect version 2: where the session played last, when no device plays it
     private readonly TextBlock _whereLine = Ui.Text("", size: 12, foreground: Ui.Brush("AccentTextBrush"));
     private readonly ContentControl _body = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch, IsTabStop = false };
     private string _mode = "now";
@@ -24,9 +28,9 @@ public sealed class NowPlayingPane : UserControl
     private ScrollViewer? _lyricScroll;
     private int _lyricAt = -2, _lyricLoad;
 
-    public NowPlayingPane(MusicService music, IShell shell)
+    public NowPlayingPane(MusicService music, IShell shell, ConnectService connect, SessionService? session)
     {
-        _music = music; _shell = shell;
+        _music = music; _shell = shell; _connect = connect; _session = session;
         // the same head as the library's: a 36 px line 12 px down (so both titles sit on one line), the button 16 px in
         var head = new Grid { Padding = new Thickness(16, 12, 16, 8), MinHeight = 56 };
         var titles = Ui.Column(0, _heading, _whereLine);
@@ -51,20 +55,27 @@ public sealed class NowPlayingPane : UserControl
     }
 
     public event Action? CloseRequested;
+    /// <summary>It shows something else now (now, queue, devices).</summary>
+    public event Action? ModeChanged;
     public string Mode => _mode;
 
     public void Show(string mode)
     {
         _mode = mode;
-        if (mode == "queue") RenderQueue(); else RenderNow(force: true);
+        if (mode == "queue") RenderQueue();
+        else if (mode == "devices") { _body.Content = _devices ??= new DevicesView(_music, _connect, _session); _devices.Refresh(force: true); }
+        else RenderNow(force: true);
         UpdateHeading();
+        ModeChanged?.Invoke();
     }
 
     private void UpdateHeading()
     {
-        _heading.Text = _mode == "queue" ? "播放队列" : _music.Queue.Context?.Label is { Length: > 0 } l ? l : "正在播放";
-        _whereLine.Text = _music.Where ?? "";
-        _whereLine.Visibility = _music.Where is null ? Visibility.Collapsed : Visibility.Visible;
+        _heading.Text = _mode switch { "queue" => "播放队列", "devices" => "连接到设备", _ => _music.Queue.Context?.Label is { Length: > 0 } l ? l : "正在播放" };
+        // where it played last (where it plays now is the strip under the bar; the devices say it themselves)
+        string? last = _mode != "devices" && _session?.ActiveElsewhere is null ? _music.Where : null;
+        _whereLine.Text = last ?? "";
+        _whereLine.Visibility = last is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     // ---------------------------------------------------------------- Now playing

@@ -246,15 +246,17 @@ public sealed partial class MainWindow : Window, IShell
         };
         LibraryHost.Child = _library;
         if (!_settings.LibraryOpen) _library.SetRail(true, byUser: false);
-        _panel = new NowPlayingPane(music, this);
-        _panel.CloseRequested += () => SetPanel(false);
-        PanelHost.Child = _panel;
         _connect?.Dispose();
         _connect = new ConnectService(music, DispatcherQueue, DeviceName); // version 1, where the server offers only that
         _session?.Dispose();
         _session = Core.Connect.SessionClient.Supported(music.Client) ? new SessionService(music, DispatcherQueue, _settings, DeviceName) : null;
+        _panel = new NowPlayingPane(music, this, _connect, _session);
+        _panel.CloseRequested += () => SetPanel(false);
+        _panel.ModeChanged += () => SyncBarPanel();
+        PanelHost.Child = _panel;
         _bar = new PlaybackBar(music, _connect, _session, this);
         _bar.QueueToggled += open => { SetPanel(true); _panel.Show(open ? "queue" : "now"); };
+        _bar.DevicesToggled += open => { SetPanel(true); _panel.Show(open ? "devices" : "now"); };
         BarHost.Child = _bar;
         BarHost.Visibility = Visibility.Visible;
         SetPanel(_settings.PanelOpen);
@@ -345,7 +347,7 @@ public sealed partial class MainWindow : Window, IShell
         SyncUpdatePill();
 
         music.Toast += ShowToast;
-        music.PlayerChanged += () => { if (_route == "lyrics") _bar?.SetPanelMode(_panel?.Mode == "queue" && PanelColumn.Width.Value > 0, true); };
+        music.PlayerChanged += () => { if (_route == "lyrics") SyncBarPanel(lyrics: true); };
         Fit();
         DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, FitTopBar); // once the new parts are measured
     }
@@ -421,7 +423,14 @@ public sealed partial class MainWindow : Window, IShell
         PanelHost.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
         if (_panelToggle is not null) _panelToggle.IsChecked = open;
         if (byUser) { _settings.PanelOpen = open; _settings.Save(); }
-        _bar?.SetPanelMode(open && _panel?.Mode == "queue", _route == "lyrics");
+        SyncBarPanel();
+    }
+
+    /// <summary>The bar's queue, lyrics and devices buttons say what the right panel and the page show.</summary>
+    private void SyncBarPanel(bool? lyrics = null)
+    {
+        bool open = PanelColumn.Width.Value > 0;
+        _bar?.SetPanelMode(open && _panel?.Mode == "queue", lyrics ?? _route == "lyrics", open && _panel?.Mode == "devices");
     }
 
     private Button? _home;
@@ -609,7 +618,7 @@ public sealed partial class MainWindow : Window, IShell
         Motion.Enter(view, rise: 6, move: Motion.Push); // the page fades in; its rows and cards rise in after it
         Title = view.Title.Length > 0 ? $"{view.Title} · Sonus" : "Sonus";
         if (_search is not null && kind != "search" && _search.FocusState == FocusState.Unfocused) _search.Text = "";
-        _bar?.SetPanelMode(_panel?.Mode == "queue" && PanelColumn.Width.Value > 0, kind == "lyrics");
+        SyncBarPanel(lyrics: kind == "lyrics");
         Navigated?.Invoke(route);
         if (clock.ElapsedMilliseconds >= 150) Log.Write($"[page] {route} built in {clock.ElapsedMilliseconds} ms");
     }

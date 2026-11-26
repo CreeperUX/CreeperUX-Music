@@ -19,6 +19,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { startGatewayOnGolden } from '../diff.mjs';
+import { cargoRunArgs } from '../lib/cargo.mjs';
 import { withCode } from '../lib/web.mjs';
 import { send, postJson, totp } from './lib.mjs';
 
@@ -109,7 +110,7 @@ test('D1. the first admin sets up with the token of the account’s making; late
   const said = await new Promise((resolve, reject) => {
     const manifest = fileURLToPath(new URL('../../../server/Cargo.toml', import.meta.url));
     const env = { ...process.env, ...gateway.copy.env };
-    execFile('cargo', ['run', '--quiet', '--manifest-path', manifest, '--', 'enrolment-code', owner.username], { cwd: gateway.data, env, windowsHide: true },
+    execFile('cargo', cargoRunArgs(manifest, { extra: ['--', 'enrolment-code', owner.username], env }), { cwd: gateway.data, env, windowsHide: true },
       (error, stdout, stderr) => (error ? reject(new Error(`enrolment-code: ${stderr}`)) : resolve(stdout)));
   });
   const enrolmentCode = /^Enrolment code for owner: (\S+)$/m.exec(said)?.[1];

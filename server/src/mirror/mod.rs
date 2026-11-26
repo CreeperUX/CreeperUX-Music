@@ -137,11 +137,12 @@ impl Settings {
 /// An S3-compatible store's address: `https://…`, or `http://` on this machine's own addresses only (a local test
 /// server), never with a path.
 fn parse_endpoint(url: &str) -> Result<Endpoint, String> {
-    let uri: Uri = url.trim_end_matches('/').parse().map_err(|_| format!("SONUS_R2_ENDPOINT={url} is not a URL"))?;
-    let authority = uri.authority().ok_or_else(|| format!("SONUS_R2_ENDPOINT={url} has no host"))?.clone();
-    if authority.as_str().contains('@') {
+    // before anything echoes the address back: a key written into it is never repeated in a message
+    if url.contains('@') {
         return Err("SONUS_R2_ENDPOINT carries a user name or password: the keys go in their own settings".into());
     }
+    let uri: Uri = url.trim_end_matches('/').parse().map_err(|_| format!("SONUS_R2_ENDPOINT={url} is not a URL"))?;
+    let authority = uri.authority().ok_or_else(|| format!("SONUS_R2_ENDPOINT={url} has no host"))?.clone();
     if !matches!(uri.path(), "" | "/") || uri.query().is_some() {
         return Err(format!("SONUS_R2_ENDPOINT={url}: only the address, without a path (the bucket is SONUS_R2_BUCKET)"));
     }
@@ -308,6 +309,11 @@ mod tests {
     fn endpoints() {
         for bad in ["http://192.168.1.5:9000", "http://example.com", "ftp://127.0.0.1", "https://key:secret@example.com", "https://example.com/bucket"] {
             assert!(parse_endpoint(bad).is_err(), "{bad}");
+        }
+        // a key written into the address, even one that does not parse, is not repeated in the message
+        for with_key in ["https://key:test-secret-value@example.com", "https://key:test-secret-value @ex ample", "test-secret-value@"] {
+            let error = parse_endpoint(with_key).unwrap_err();
+            assert!(!error.contains("test-secret-value"), "{error}");
         }
         assert!(parse_endpoint("http://localhost:9000").is_ok());
         assert!(parse_endpoint("http://[::1]:9000/").is_ok());

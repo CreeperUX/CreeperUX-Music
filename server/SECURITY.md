@@ -601,7 +601,8 @@ of them are set but not all, the server refuses to start.
 - A changed file's old version is never deleted before its new one is up.
 - **The brake:** when more than 10% of the songs and covers (and more than 20) are gone at once, nothing is deleted
   until the owner runs `sonus-server r2-allow-deletions`, which lets go only of what is gone by then. A disk not
-  mounted for weeks does not empty the backup.
+  mounted for weeks does not empty the backup. Only items with no live row count (a replaced version of a song still
+  in the library is not held), and the warning repeats daily while the brake holds.
 - Other names in the bucket are left alone.
 
 **Redirects (presigned links):**

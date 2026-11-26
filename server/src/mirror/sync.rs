@@ -62,7 +62,8 @@ pub struct Wanted {
 #[derive(Default)]
 pub struct Said {
     capped_day: Option<String>,
-    braked: bool,
+    /// The day the brake's warning was last logged.
+    braked_day: Option<String>,
 }
 
 pub struct Worker {
@@ -203,13 +204,21 @@ impl Worker {
     /// Whether the deletions are held: more of the songs and covers gone than the brake allows (a disk not mounted,
     /// a library folder moved). Then only what was gone when the owner let them go is deleted (and resized covers,
     /// which are made again when asked for). Returns the time up to which gone objects may be deleted.
+    ///
+    /// Only what is really gone counts and is held: an object whose song or picture has no other row that is not
+    /// `deleting`. A replaced version (a song retagged, copied, rewritten) is not: its song is still the library's,
+    /// and the old version goes after its grace time once the new one is up, brake or not.
     fn brake(&self) -> Result<Option<i64>, String> {
         let Some(share) = self.delete_brake else { return Ok(None) };
         let (mut gone, mut all) = (0usize, 0usize);
         for kind in [Kind::Song, Kind::Cover] {
-            for row in self.ledger.rows(kind)? {
-                all += 1;
-                if row.state == State::Deleting {
+            let rows = self.ledger.rows(kind)?;
+            let live = live_items(&rows);
+            for row in &rows {
+                if row.state != State::Deleting {
+                    all += 1;
+                } else if !live.contains(row.item.as_str()) {
+                    all += 1;
                     gone += 1;
                 }
             }
@@ -217,18 +226,20 @@ impl Worker {
         let held = gone > BRAKE_MIN_FILES && gone as f64 > share * all as f64;
         let mut said = self.said.lock().expect("the said lock");
         if !held {
-            said.braked = false;
+            said.braked_day = None;
             return Ok(None);
         }
         let released = self.ledger.note(RELEASED_NOTE)?.and_then(|at| at.parse::<i64>().ok()).unwrap_or(i64::MIN);
-        if !said.braked {
+        // once a day while it holds: the owner does not read the log every day
+        let today = (self.clock)().date_naive().to_string();
+        if said.braked_day.as_deref() != Some(today.as_str()) {
             warn!(
                 gone,
                 of = all,
-                "R2 mirror: more of the library is gone at once than the brake allows (SONUS_R2_DELETE_BRAKE): nothing is deleted from the bucket. \
-                 A disk not mounted? When the files are gone for good, run `sonus-server r2-allow-deletions`"
+                "R2 mirror: {gone} of {all} songs and covers are gone from the library at once, more than the brake allows (SONUS_R2_DELETE_BRAKE): \
+                 none of them is deleted from the bucket. A disk not mounted? When they are gone for good, run `sonus-server r2-allow-deletions`"
             );
-            said.braked = true;
+            said.braked_day = Some(today);
         }
         Ok(Some(released))
     }
@@ -247,12 +258,16 @@ impl Worker {
         for kind in Kind::ALL {
             let Ok(rows) = self.ledger.rows(kind) else { return };
             let waiting: std::collections::HashSet<&str> = rows.iter().filter(|r| r.state == State::Pending).map(|r| r.item.as_str()).collect();
+            let live = live_items(&rows);
             for row in rows.iter().filter(|r| r.state == State::Deleting) {
                 if row.gone_since.is_none_or(|since| now - since < GRACE) || waiting.contains(row.item.as_str()) {
                     continue;
                 }
+                // the brake holds what is really gone (not a replaced version, not a resized cover) since the owner's
+                // last word
                 if let Some(released) = released {
-                    if kind != Kind::Resized && row.gone_since.is_none_or(|since| since > released) {
+                    let replaced = live.contains(row.item.as_str());
+                    if kind != Kind::Resized && !replaced && row.gone_since.is_none_or(|since| since > released) {
                         continue;
                     }
                 }
@@ -418,6 +433,12 @@ impl Worker {
         info!(day = %day, "R2 mirror: the day's manifest is up");
         Ok(())
     }
+}
+
+/// The songs or pictures that have a row not `deleting`: still the library's (a `deleting` row of one of them is a
+/// replaced version). A stray's item is empty, never live.
+fn live_items(rows: &[Row]) -> std::collections::HashSet<&str> {
+    rows.iter().filter(|r| r.state != State::Deleting && !r.item.is_empty()).map(|r| r.item.as_str()).collect()
 }
 
 /// Uploads the resized covers clients were sent (`Mirror::offer_resized`), one at a time, within the upload hours

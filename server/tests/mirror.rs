@@ -375,6 +375,7 @@ async fn a_ledger_lost_adopts_what_the_bucket_has_and_uploads_nothing_again() {
 
 #[tokio::test]
 async fn deletions_wait_for_the_owner_when_much_of_the_library_goes_at_once() {
+    common::logs::capture();
     let w = World::new(None, 0).await;
     for n in 0..30 {
         w.song(&format!("s{n}"), &format!("{n}.mp3"), format!("song {n}").as_bytes(), 1_700_000_000);
@@ -398,6 +399,15 @@ async fn deletions_wait_for_the_owner_when_much_of_the_library_goes_at_once() {
     w.later(30 * DAY);
     w.worker.delete_due().await;
     assert_eq!(songs(), 29, "held by the brake");
+    // said once a day while it holds, with the count and the command
+    let said = || common::logs::text().matches("more than the brake allows").count();
+    let before = said();
+    assert!(before >= 1 && common::logs::text().contains("29 of 29") && common::logs::text().contains("r2-allow-deletions"));
+    w.worker.delete_due().await;
+    assert_eq!(said(), before, "not again the same day");
+    w.later(DAY);
+    w.worker.delete_due().await;
+    assert_eq!(said(), before + 1, "again the next day");
 
     // the disk back: everything kept, nothing uploaded again
     let puts = w.puts();
@@ -416,6 +426,34 @@ async fn deletions_wait_for_the_owner_when_much_of_the_library_goes_at_once() {
     w.later(7 * DAY);
     w.worker.delete_due().await;
     assert_eq!(songs(), 1, "the 28 let go are deleted; the one gone after is held");
+}
+
+#[tokio::test]
+async fn a_library_retagged_whole_replaces_its_versions_without_the_brake() {
+    common::logs::capture();
+    let w = World::new(None, 0).await;
+    for n in 0..30 {
+        w.song(&format!("t{n}"), &format!("{n}.flac"), format!("song {n}").as_bytes(), 1_700_000_000);
+    }
+    sync::check_health(&w.worker.s3, &w.worker.health).await;
+    w.worker.reconcile().await.unwrap();
+    assert_eq!(w.upload().await, Round::Done);
+    let old: Vec<String> = (0..30).map(|n| w.key(&format!("t{n}"), &format!("{n}.flac"))).collect();
+
+    // every file retagged: a new size and time, so a new version of each, and nothing gone from the library
+    for n in 0..30 {
+        write(&w.music.join(format!("{n}.flac")), format!("song {n}, retagged").as_bytes(), 1_700_100_000);
+    }
+    assert_eq!(w.worker.reconcile().await.unwrap(), Counts { added: 30, kept: 0, gone: 30 });
+    // the old versions wait for the new ones, then for their grace time
+    w.later(7 * DAY + 1);
+    w.worker.delete_due().await;
+    assert!(old.iter().all(|key| w.fake.object(key).is_some()), "not before the new versions are up");
+    assert_eq!(w.upload().await, Round::Done);
+    w.worker.delete_due().await;
+    assert!(old.iter().all(|key| w.fake.object(key).is_none()), "replaced versions are not held by the brake");
+    assert_eq!(w.fake.keys().iter().filter(|k| k.starts_with("m/")).count(), 30, "one version of each song");
+    assert!(!common::logs::text().contains("30 of"), "no brake warning for a retag");
 }
 
 #[tokio::test]

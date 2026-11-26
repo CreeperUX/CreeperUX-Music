@@ -720,7 +720,15 @@ in step with the library.
   covers (and more than 20) are gone at once (a disk not mounted, a folder renamed), nothing is deleted from the bucket,
   however long it lasts, and a warning says so once. Files that come back are kept, and nothing is uploaded again. When
   they are gone for good, `sonus-server r2-allow-deletions` lets go of what is gone by then: deleted after its grace
-  time. What goes later is held again while the brake holds. Resized covers are not held (they are made again).
+  time. What goes later is held again while the brake holds. The warning is repeated once a day while it holds, with
+  the count and the command. Only what is really gone counts and is held: a replaced version (a song retagged, copied
+  or rewritten, still in the library) goes after its grace time once its new version is up, as before, however many
+  there are. Resized covers are not held either (they are made again).
+- **Behind a reverse proxy**, the proxy must be in `ExtAuth.TrustedSources` (Navidrome's setting, which the gateway
+  reads): otherwise every client has the proxy's private address, counts as at home, and nobody is ever sent to the
+  mirror. That is safe, but the redirects then silently do nothing. Tailscale and other CGNAT addresses
+  (`100.64.0.0/10`) are not home by default: add them to `SONUS_R2_HOME_NETWORKS` if those clients should be served
+  from home.
 - **The daily manifest** `manifest/<day>.json.gz` (after the daily check): each song and cover file the bucket has,
   with its library and its path inside the library's folder (`/` between folders) and its size. Covers are listed
   where they are files in the album folders (`cover.jpg`); a picture Navidrome took out of a song is not (the song
@@ -744,7 +752,8 @@ in step with the library.
     at home); the link followed, whole and by range; a HEAD link refused for a GET; covers as they are and resized,
     the 304 kept, resized covers offered once.
   - `tests/mirror.rs`: adoption after a lost ledger (and not at another size), the brake (a few files deleted as
-    before; a whole disk held past the grace time, kept when it is back, let go by the owner, a later loss held), the
+    before; a whole disk held past the grace time, kept when it is back, let go by the owner, a later loss held; the
+    warning once a day; a whole library retagged, its old versions deleted after the grace time, unbraked), the
     manifest (what is up, where it belongs, 14 kept) and a restore from it (whole, then going on after a file cut
     short, a missing object and a path that would leave the folder refused, nothing left half-written), resized covers
     up and gone with their original.

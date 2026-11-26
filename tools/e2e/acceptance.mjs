@@ -581,13 +581,13 @@ try {
         await b.invoke('播放');
         await until(async () => (await state()).engine === 'Playing', 'A plays again', 8000);
       });
-      await check('第二台的设备列表：两台设备，各有音量条；调第一台的音量，第一台跟着变（规则 8）', async () => {
+      await check('第二台的设备（右栏，像 Spotify）：第一台在上面，各有音量；调第一台的音量，第一台跟着变（规则 8）', async () => {
         await b.invoke('正在「第一台」上播放，选择设备'); // the devices button, named for where it plays
         await b.until(async () => (await b.names()).some(n => n.startsWith('这台电脑 [')), 'the device list', 5000);
         const n = await b.names();
         assert(n.some(x => x.startsWith('第一台 [')) && n.some(x => x.startsWith('「第一台」的音量 [')) && n.some(x => x.startsWith('「这台电脑」的音量 [')), n.filter(x => x.includes('台')).join(' | '));
-        await sleep(700); // the flyout fades in
-        b.printWindow('acc-connect-devices'); // a Flyout is not in the app's own (RenderTargetBitmap) shots
+        await sleep(500); // the panel's content fades in
+        await b.shot('acc-connect-devices');
         const r = await b.send('set 「第一台」的音量=30');
         assert(r.startsWith('set'), r);
         await until(async () => Math.abs((await session(app)).devices.find(d => d.Name === '第一台')?.Volume - 0.3) < 0.011, 'A\'s volume is 0.3', 5000);
@@ -677,7 +677,7 @@ try {
           await b.invoke('在其他设备上播放');
           await b.until(async () => (await b.names()).some(n => n.startsWith('第一台 [')), 'the device list', 5000);
           await sleep(700); // the flyout fades in
-          b.printWindow('acc-connect-devices'); // a Flyout is not in the app's own (RenderTargetBitmap) shots
+          await b.shot('acc-connect-devices-v1');
           await b.invoke('第一台');
           await b.until(async () => (await b.state()).connect.target === '第一台', 'B controls A');
           await b.until(async () => (await b.texts()).includes('正在「第一台」上播放'), 'the line in the bar');
@@ -695,7 +695,8 @@ try {
         });
         await check('选“这台电脑”：播放从第一台转过来，同一首歌、同一位置接着放，第一台停下', async () => {
           await sleep(1500);
-          await b.invoke('正在「第一台」上播放，选择设备'); // the devices button, named for what it controls
+          // the devices button, named for what it controls (the panel may still show the devices: it stays, as Spotify's)
+          if (!(await b.names()).some(n => n.startsWith('这台电脑 ['))) await b.invoke('正在「第一台」上播放，选择设备');
           await b.until(async () => (await b.names()).some(n => n.startsWith('这台电脑 [')), 'the device list', 5000);
           const before = await state();
           await b.invoke('这台电脑');

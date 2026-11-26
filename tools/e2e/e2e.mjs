@@ -96,7 +96,7 @@ export class TestApp {
       catch (e) {
         if (['ENOENT', 'EBUSY'].includes(e.code) && Date.now() - t0 <= Math.min(timeout, 5000) && !this.exit) { await sleep(30); continue; }
         // the pipe broke ("write EOF") or went away because the process ended: say that, with its exit code
-        if (this.proc && !this.stopping) { for (let i = 0; i < 20 && !this.exit; i++) await sleep(50); }
+        if (this.proc && !this.stopping && !['ENOENT', 'EBUSY'].includes(e.code)) { for (let i = 0; i < 20 && !this.exit; i++) await sleep(50); }
         if (this.died) throw new Error(this.diedText());
         throw e;
       }

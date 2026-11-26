@@ -92,7 +92,13 @@ fun SignInScreen(graph: AppGraph, message: String?) {
                 throw e
             } catch (e: Exception) {
                 android.util.Log.w("Sonus", "sign-in failed", e)
-                error = e.message ?: "登录失败。"
+                // with two-step verification on, the account password alone signs nothing in apps (the server answers
+                // as for a wrong password): the browser sign-in, or an app password, does
+                error = if (e is com.creeperux.sonus.core.SubsonicException && e.isAuthentication) {
+                    "${e.message.orEmpty()}如果这个服务器开启了二步验证，请点“在浏览器中登录”，或者在密码栏填应用专用密码。"
+                } else {
+                    e.message ?: "登录失败。"
+                }
             } finally {
                 busy = false
             }

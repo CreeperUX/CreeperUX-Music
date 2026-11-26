@@ -1,6 +1,7 @@
 package com.creeperux.sonus.ui.screens
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,9 +15,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
@@ -26,12 +29,14 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -137,6 +142,35 @@ fun Hero(
     }
 }
 
+/**
+ * The page of what plays (its album or playlist) opens at the song that plays, in the middle of the view, once (the
+ * Windows TrackList's JumpToPlaying). [rowOf] gives the list's item of a song, or null while the songs are not there yet
+ * (a playlist read from the server comes after the page): it is tried again when [rows] changes.
+ */
+@Composable
+fun JumpToPlaying(list: LazyListState, kind: String, id: String, rows: Int, rowOf: (String) -> Int?) {
+    val player = LocalPlayer.current
+    var done by rememberSaveable(kind, id) { mutableStateOf(false) }
+    LaunchedEffect(kind, id, rows) {
+        if (done) return@LaunchedEffect
+        val s = player.state.value
+        val ctx = s.context
+        val current = s.trackId
+        if (ctx == null || current == null || ctx.kind != kind || ctx.id != id) {
+            done = true
+            return@LaunchedEffect
+        }
+        val row = rowOf(current) ?: return@LaunchedEffect
+        done = true
+        list.scrollToItem(row)
+        // then centred, once its row is laid out
+        val info = list.layoutInfo
+        val item = info.visibleItemsInfo.firstOrNull { it.index == row } ?: return@LaunchedEffect
+        val viewport = info.viewportEndOffset - info.viewportStartOffset
+        list.scrollBy((item.offset - (viewport - item.size) / 2).toFloat())
+    }
+}
+
 /** The songs of a page, numbered (an album) or with covers (a playlist, a search). */
 fun LazyListScope.trackItems(tracks: List<Track>, contextKind: String, contextId: String, covers: Boolean, ids: List<String>? = null, playlistId: String? = null) {
     itemsIndexed(tracks, key = { i, t -> "$i:${t.id}" }) { i, t ->
@@ -169,7 +203,22 @@ fun AlbumPage(id: String) {
     val tint = rememberCoverColor(session.coverUrl(id, 64))
     val first = tracks.firstOrNull()
     var addTo by remember { mutableStateOf(false) }
-    LazyColumn(Modifier.fillMaxSize().testTag("album-page"), contentPadding = PaddingValues(bottom = 32.dp)) {
+    val discs = tracks.map { it.disc }.distinct()
+    val list = rememberLazyListState()
+    JumpToPlaying(list, "album", id, tracks.size) { song ->
+        // the hero, then the songs (under a heading per disc when there are several)
+        var row = 1
+        var found: Int? = null
+        for (d in discs) {
+            if (discs.size > 1) row++
+            for (t in tracks.filter { it.disc == d }) {
+                if (t.id == song && found == null) found = row
+                row++
+            }
+        }
+        found
+    }
+    LazyColumn(Modifier.fillMaxSize().testTag("album-page"), state = list, contentPadding = PaddingValues(bottom = 32.dp)) {
         item {
             Hero(
                 Formats.albumType(a.type), a.title,
@@ -185,7 +234,6 @@ fun AlbumPage(id: String) {
                 },
             )
         }
-        val discs = tracks.map { it.disc }.distinct()
         if (discs.size > 1) {
             for (d in discs) {
                 item("disc$d") { Text("碟片 $d", style = Sonus.type.panelHeading, color = c.textMuted, modifier = Modifier.padding(start = 24.dp, top = 16.dp, bottom = 4.dp)) }
@@ -309,7 +357,9 @@ fun PlaylistPage(id: String) {
         PlaylistKind.ReadOnly -> "歌单（只读）"
         else -> "歌单"
     }
-    LazyColumn(Modifier.fillMaxSize().testTag("playlist-page"), contentPadding = PaddingValues(bottom = 32.dp)) {
+    val list = rememberLazyListState()
+    JumpToPlaying(list, "playlist", id, tracks.size) { song -> tracks.indexOfFirst { it.id == song }.takeIf { it >= 0 }?.let { it + 1 } } // after the hero
+    LazyColumn(Modifier.fillMaxSize().testTag("playlist-page"), state = list, contentPadding = PaddingValues(bottom = 32.dp)) {
         item {
             Hero(
                 kind, p.name,

@@ -35,7 +35,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.Assume.assumeTrue
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.junit.Before
@@ -46,11 +48,12 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
- * The app on a device against the demo server (tools/demo-server, account demo/demo), with no one at the screen: it
- * signs in, browses, plays, keeps playing in the background, answers the notification and headset keys, scrobbles,
- * shows lyrics, and signs in through the browser. The server is the PC's, at the address the instrumentation argument
- * sonusServer gives (tools/test-device.ps1 forwards it with adb reverse). Screenshots go to the additional test output,
- * which Gradle copies to app/build/outputs/connected_android_test_additional_output.
+ * The app on a device against the demo server (tools/demo-server, account demo/demo) or a Sonus server (TestServer), with
+ * no one at the screen: it signs in, browses, plays, keeps playing in the background, answers the notification and
+ * headset keys, scrobbles, shows lyrics, and signs in through the browser (also with two-step verification on, where the
+ * password alone does not sign in). The server is the PC's, at the address the instrumentation argument sonusServer
+ * gives (tools/test-device.ps1 forwards it with adb reverse). Screenshots go to the additional test output, which Gradle
+ * copies to app/build/outputs/connected_android_test_additional_output.
  */
 @RunWith(AndroidJUnit4::class)
 class DeviceTest {
@@ -61,12 +64,13 @@ class DeviceTest {
     private val context: Context get() = instrumentation.targetContext
     private val graph: AppGraph get() = (context.applicationContext as SonusApp).graph
     private val device: UiDevice = UiDevice.getInstance(instrumentation)
-    private val server = InstrumentationRegistry.getArguments().getString("sonusServer") ?: "http://127.0.0.1:4633"
+    private val server = TestServer.url
     private val http = OkHttpClient.Builder().readTimeout(10, TimeUnit.SECONDS).build()
 
     /** The account: the tests run on the phone and the tablet at once, and one account is one playback session (Sonus
-     *  Connect v2), so the tablet uses the demo server's other account. */
-    private val user: String get() = account(context)
+     *  Connect v2), so the tablet uses another account. */
+    private val user: String get() = TestServer.user(context)
+    private val password: String get() = TestServer.password(context)
 
     @Before
     fun signedOut() {
@@ -87,8 +91,17 @@ class DeviceTest {
 
     private fun get(path: String): String = http.newCall(Request.Builder().url("$server$path").build()).execute().use { it.body.string() }
 
-    /** The demo server's record of the scrobbles and streams it saw: (song id, submission) pairs, and song ids. */
-    private fun scrobbles(): List<Pair<String, Boolean>> = entries("scrobbles").map { it["id"]!!.jsonPrimitive.content to it["submission"]!!.jsonPrimitive.boolean }
+    /** The scrobbles the server saw: the demo server's record of them, (song id, submission) pairs; on another server
+     *  "now playing" from getNowPlaying, and a counted play from the song's play count having gone up. */
+    private fun scrobbles(): List<Pair<String, Boolean>> = if (TestServer.isDemo) {
+        entries("scrobbles").map { it["id"]!!.jsonPrimitive.content to it["submission"]!!.jsonPrimitive.boolean }
+    } else {
+        val now = TestServer.api(user, password, "getNowPlaying")["nowPlaying"]?.jsonObject?.get("entry")?.jsonArray.orEmpty()
+            .filter { it.jsonObject["username"]?.jsonPrimitive?.content == user }.map { it.jsonObject["id"]!!.jsonPrimitive.content to false }
+        now + counted.filter { (id, before) -> playCount(id) > before }.map { (id, _) -> id to true }
+    }
+    private val counted = mutableMapOf<String, Int>() // song id → its play count before it played (another server)
+    private fun playCount(id: String): Int = TestServer.api(user, password, "getSong", "id" to id)["song"]?.jsonObject?.get("playCount")?.jsonPrimitive?.int ?: 0
     private fun streams(): List<String> = entries("streams").map { it["id"]!!.jsonPrimitive.content }
     private fun entries(key: String) = (Json.parseToJsonElement(get("/__test/log")) as JsonObject)[key]!!.jsonArray.map { it.jsonObject }
 
@@ -116,7 +129,7 @@ class DeviceTest {
         compose.waitForIdle()
     }
 
-    private fun signIn(user: String = this.user, password: String = this.user) {
+    private fun signIn(user: String = this.user, password: String = this.password) {
         compose.onNodeWithTag("server").performTextReplacement(server)
         compose.onNodeWithTag("user").performTextReplacement(user)
         compose.onNodeWithTag("password").performTextReplacement(password)
@@ -141,7 +154,8 @@ class DeviceTest {
         signIn(password = "not-the-password")
         compose.waitUntil(15_000) { exists("signin-error") }
         compose.onNodeWithTag("signin-error").assertExists()
-        assertThat(compose.onAllNodesWithText("用户名或密码不正确。").fetchSemanticsNodes()).isNotEmpty()
+        assertThat(compose.onAllNodesWithText("用户名或密码不正确。", substring = true).fetchSemanticsNodes()).isNotEmpty()
+        assertThat(compose.onAllNodesWithText("在浏览器中登录”", substring = true).fetchSemanticsNodes()).isNotEmpty() // the way with two-step verification
         assertThat(graph.logins.load()).isNull()
     }
 
@@ -154,7 +168,8 @@ class DeviceTest {
 
         // an album, from the home page's quick tiles or shelves
         val session = (graph.state.value as AppState.Ready).session
-        val album = session.lib.albums.first { it.title == "夜行列车" }
+        val album = TestServer.playableAlbum(session.lib)
+        if (!TestServer.isDemo) counted[album.trackIds[0]] = playCount(album.trackIds[0])
         compose.onAllNodesWithText(album.title)[0].performClick()
         compose.waitUntil(10_000) { exists("album-page") }
         shot("02-album")
@@ -171,7 +186,7 @@ class DeviceTest {
         }
         shot("03-playing")
         assertThat(eventually { (first to false) in scrobbles() }).isTrue() // "now playing"
-        assertThat(streams()).contains(first)
+        if (TestServer.isDemo) assertThat(streams()).contains(first)
 
         // past half the song the play counts (Scrobbling.counts), as on Windows
         instrumentation.runOnMainSync { graph.playback.seek(state().duration / 2 + 1) }
@@ -234,8 +249,10 @@ class DeviceTest {
         compose.waitUntil(15_000) { exists("user-code") }
         shot("07-browser-sign-in")
         val code = compose.onAllNodes(hasTestTag("user-code"))[0].fetchSemanticsNode().config[SemanticsProperties.Text].joinToString("") { it.text }
-        // the user allows the app on the server's page (the demo server's test hook stands for it)
-        assertThat(get("/__test/device?code=$code&decide=allow&u=$user")).contains("\"decided\":true")
+        // the user allows the app on the server's page (the demo server's test hook stands for it; on another server the
+        // page's own requests: signing in there, then allowing the code)
+        if (TestServer.isDemo) assertThat(get("/__test/device?code=$code&decide=allow&u=$user")).contains("\"decided\":true")
+        else assertThat(TestServer.approve(code, user, password)).isTrue()
         bringToFront()
         compose.waitUntil(30_000) { exists("home") }
         val login = graph.logins.load()!!
@@ -251,7 +268,34 @@ class DeviceTest {
         val refused = eventually { runCatching { runBlocking { client.connect() } }.exceptionOrNull().let { it is SubsonicException && it.isAuthentication } }
         assertThat(refused).isTrue()
     }
+
+    /**
+     * With two-step verification on, the account password alone signs no app in (the server answers as for a wrong
+     * password): the app says so and points at the browser sign-in, which works (the server's page asks for the
+     * authenticator's code). A Sonus server only, and the phone only (one authenticator code is used once).
+     */
+    @Test
+    fun withTwoStepVerificationTheBrowserSignInIsTheWay() {
+        val (twoStepUser, twoStepPassword, secret) = TestServer.twoStep ?: run { assumeTrue("a server with a two-step user", false); return }
+        assumeTrue("on the phone", context.resources.configuration.smallestScreenWidthDp < 600)
+        signIn(twoStepUser, twoStepPassword)
+        compose.waitUntil(15_000) { exists("signin-error") }
+        assertThat(compose.onAllNodesWithText("二步验证", substring = true).fetchSemanticsNodes()).isNotEmpty()
+        assertThat(graph.logins.load()).isNull()
+        shot("08-two-step-password")
+
+        compose.onNodeWithTag("signin-browser").performClick()
+        Thread.sleep(3_000)
+        bringToFront()
+        compose.waitUntil(15_000) { exists("user-code") }
+        val code = compose.onAllNodes(hasTestTag("user-code"))[0].fetchSemanticsNode().config[SemanticsProperties.Text].joinToString("") { it.text }
+        assertThat(TestServer.approve(code, twoStepUser, twoStepPassword, secret)).isTrue()
+        bringToFront()
+        compose.waitUntil(30_000) { exists("home") }
+        assertThat(graph.logins.load()!!.isApiKey).isTrue()
+        shot("09-two-step-browser-signed-in")
+        instrumentation.runOnMainSync { graph.signOut() }
+        compose.waitUntil(10_000) { exists("signin") }
+    }
 }
 
-/** The demo server's account a device's tests use: demo on a phone, friend on a tablet (both have the same library). */
-fun account(context: Context): String = if (context.resources.configuration.smallestScreenWidthDp >= 600) "friend" else "demo"

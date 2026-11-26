@@ -68,7 +68,6 @@ class ConnectVectorsTest {
         var checked = 0
         for (c in root["cases"]!!.jsonArray) {
             val name = s(c, "name")!!
-            if (c.toString().contains("shuffleAlbums") || c.toString().contains("shuffleFolders")) continue // the sender arranges those
             cases++
             val q = PlayQueue({ library[it] }, SequenceRandom(c.jsonObject["random"]!!.jsonArray.map { it.jsonPrimitive.int }.toIntArray()))
             var before: JsonObject? = null
@@ -90,7 +89,9 @@ class ConnectVectorsTest {
                 checked++
             }
         }
-        assertWithMessage("$cases cases, $checked steps").that(cases >= 10 && checked >= 100).isTrue()
+        println("Connect vectors: $cases cases, $checked steps replayed")
+        assertWithMessage("every case and step replayed").that("$cases cases, $checked steps")
+            .isEqualTo("${root["cases"]!!.jsonArray.size} cases, ${root["cases"]!!.jsonArray.sumOf { it.jsonObject["steps"]!!.jsonArray.size }} steps")
     }
 
     /** What a step does to the queue, as the session logic decides it. */
@@ -108,15 +109,19 @@ class ConnectVectorsTest {
         when (action) {
             "playContext" -> {
                 val ctx = msg["context"] as? JsonObject
-                q.start(PlayContext(s(ctx, "kind").orEmpty(), s(ctx, "id").orEmpty(), s(ctx, "label").orEmpty()), ids(msg, "ids"), s(msg, "startId"), b(msg, "shuffle"))
+                // shuffling by album or folder: the sender arranged the order, and the session takes it as it is
+                val arranged = ids(msg, "order")
+                q.start(PlayContext(s(ctx, "kind").orEmpty(), s(ctx, "id").orEmpty(), s(ctx, "label").orEmpty()), ids(msg, "ids"), s(msg, "startId") ?: arranged.firstOrNull(), b(msg, "shuffle"))
+                if (arranged.isNotEmpty()) q.arrangeAs(arranged)
             }
             "next" -> q.next()
             "play" -> if (before?.get("current") !is JsonObject) q.next() // songs queued by hand, nothing current yet
             "previous" -> {
                 val bf = before!!
-                var position = J.num(bf, "positionMs").toLong() + if (b(bf, "playing")) maxOf(0, at - J.num(bf, "at").toLong()) else 0
+                val reported = J.num(bf, "positionMs").toLong()
+                var position = reported + if (b(bf, "playing")) maxOf(0, at - J.num(bf, "at").toLong()) else 0
                 val duration = J.num(bf, "durationMs").toLong()
-                if (duration > 0) position = minOf(position, duration)
+                if (duration > 0) position = minOf(position, maxOf(duration, reported)) // the session's own rule
                 if (position <= 3000) q.previous() // more than 3 s in: back to the start of the same song
             }
             "jump" -> q.jump(s(msg, "entry")!!)
@@ -124,7 +129,10 @@ class ConnectVectorsTest {
             "move" -> q.move(ids(msg, "order"), ids(msg, "keys"), b(msg, "manual"))
             "remove" -> q.remove(ids(msg, "entries"))
             "clear" -> q.clear(b(msg, "manual"))
-            "mode" -> q.changeOrder(SessionModes.parse(s(msg, "mode")))
+            "mode" -> ids(msg, "order").let { arranged ->
+                if (arranged.isEmpty()) q.changeOrder(SessionModes.parse(s(msg, "mode")))
+                else { q.order = SessionModes.parse(s(msg, "mode")); q.arrangeAs(arranged) }
+            }
             "stopAfterCurrent" -> q.stopAfterCurrent = b(msg, "on")
         }
     }
@@ -253,6 +261,9 @@ class ConnectSessionTest {
         assertThat(s.positionAt(1764001234567 + 2_000)).isEqualTo(85_500)
         assertThat(s.copy(playing = false).positionAt(1764001234567 + 2_000)).isEqualTo(83_500)
         assertThat(s.copy(positionMs = 240_000).positionAt(1764001234567 + 5_000)).isEqualTo(241_000) // not past the end
+        // a position reported past the library's end is taken as it is, and moves on no further
+        assertThat(s.copy(positionMs = 242_500).positionAt(1764001234567 + 5_000)).isEqualTo(242_500)
+        assertThat(s.copy(positionMs = 242_500, playing = false).positionAt(1764001234567 + 5_000)).isEqualTo(242_500)
         assertThat(SessionModes.parse(s.mode)).isEqualTo(PlaybackOrder.ShuffleTracks)
         assertThat(SessionModes.window((1..20_000).map { "t$it" }, "t15000")).hasSize(10_000)
         assertThat(SessionModes.window((1..20_000).map { "t$it" }, "t15000").first()).isEqualTo("t10001")

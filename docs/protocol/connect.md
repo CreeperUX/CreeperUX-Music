@@ -55,7 +55,17 @@ reports what really happens (it started, paused, reached the end, failed). The q
 ```
 
 Whenever the current song changes, the server fills `now` and `durationMs` from its library (so every device can show
-the new song even when no device plays, after a remote's `next`); the active device's `loaded` report corrects them.
+the new song even when no device plays, after a remote's `next`); the active device's `loaded` report replaces `now`.
+The library's `durationMs` stands: a device's figure can be out of date (an engine that has not yet read the new song's
+length after a gapless change reports the previous song's), so the server takes `loaded.durationMs` only when its
+library has none for the song (0).
+
+**Positions and the end of the song.** A position a command asks for (`seek`, `playContext`'s `positionMs`) is kept
+within the song as the library has it (0 to `durationMs`). A position the active device reports (`playing`, `paused`,
+`position`, `resume`) is taken as it is (at least 0): the device plays the real file, which can be a second or two
+longer than the library says (a VBR MP3). Holding it to the library's duration would set the device back each time it
+reported near the end, so the song would never finish. While playing, the position moves on with the clock and stops
+at the song's end: `durationMs`, or the position the device last reported if that is further.
 Without an active device the session is never playing: `activeDevice: null` means `playing: false`.
 
 `now.coverArt` is an id to pass to `getCoverArt` as it is, and nothing more: clients do not parse it or compare it with
@@ -193,7 +203,7 @@ rev is answered `error stale` and does nothing.
 
 | event | when | the server |
 |---|---|---|
-| `loaded` | the current song is ready (after a `session` changed it) | takes `durationMs`, `now` |
+| `loaded` | the current song is ready (after a `session` changed it) | takes `now`; takes `durationMs` only when the library has none for the song (a device's can be out of date: see Session) |
 | `playing` / `paused` | audio started or stopped, by itself or as asked | `playing`, `positionMs`, `at` = now |
 | `position` | a seek done, and at least every 30 s while playing | corrects `positionMs`/`at` |
 | `ended` | the current song reached its end | `PlayQueue.Next(ended: true)`: the next song, or the end of the session (`playing: false`, position 0 of the last song) |

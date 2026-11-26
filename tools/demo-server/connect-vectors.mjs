@@ -34,13 +34,15 @@ const LIBRARY = Object.fromEntries(Array.from({ length: 10 }, (_, i) => {
   const album = i < 4 ? 0 : i < 8 ? 1 : 2;
   return [`t${i}`, { title: `Song ${i}`, artist: ['Orbit', 'Nightline', 'Cedar'][album], album: ['Orbit', 'Night Train', 'Cedar'][album], albumId: `al${album}`, coverArt: `al${album}`, durationMs: 180_000 + i * 1_000 }];
 }));
+// a song whose duration the library does not know (0): the active device's `loaded` gives it
+LIBRARY.u0 = { title: 'Untimed', artist: 'Cedar', album: 'Cedar', albumId: 'al2', coverArt: 'al2', durationMs: 0 };
 
 const PC = 'pc-study-01', PHONE = 'phone-0001', REMOTE = 'remote-only-1';
 const hello = (deviceId, name, extra = {}) => ({ type: 'hello', deviceId, name, kind: deviceId.startsWith('phone') ? 'phone' : 'desktop', canPlay: deviceId !== REMOTE, client: 'vectors', ...extra });
 const cmd = (action, fields = {}, ref = action) => ({ type: 'command', ref, action, ...fields });
 // a report about the current song, with the rev the device has seen (the current one)
 const report = (event, fields = {}) => s => ({ type: 'report', ref: event, event, key: s.current?.key ?? null, positionMs: 0, rev: s.rev, ...fields });
-const all = Object.keys(LIBRARY);
+const all = Object.keys(LIBRARY).filter(id => id.startsWith('t'));
 const album = { kind: 'album', id: 'al0', label: 'Orbit' };
 
 /** The cases: steps as data, or functions of the live session (resolved when the file is made). */
@@ -157,6 +159,27 @@ const CASES = [
     [67_000, PC, report('playing', { positionMs: 0 })],
     [68_000, PC, report('failed')],
     [69_000, PC, report('sideways')],
+  ] },
+  { name: 'the library\'s duration stands: a loaded with another (out of date) changes nothing; reported positions are not held to it; a song without one takes the device\'s', random: [], steps: [
+    [0, PC, hello(PC, '书房电脑')],
+    [10, PHONE, hello(PHONE, '手机')],
+    [1000, PC, cmd('playContext', { context: album, ids: all.slice(0, 4), startId: 't0' })],
+    // the previous song's length, from an engine that has not caught up after a gapless change: ignored
+    [1200, PC, report('loaded', { durationMs: 120_000 })],
+    [1250, PC, report('playing', { positionMs: 0 })],
+    [151_250, PC, report('position', { positionMs: 150_000 })],
+    // a remote's seek stays within the song as the library has it
+    [152_000, PHONE, cmd('seek', { positionMs: 200_000 })],
+    [152_100, PC, report('position', { positionMs: 180_000 })],
+    // the file is longer than the library says (a VBR MP3): the device's position is taken as it is
+    [153_600, PC, report('position', { positionMs: 181_500 })],
+    // lost: the session stops where it was, held at the furthest the device said, not at the library's end
+    [160_000, PC, { drop: PC }],
+    [170_000, PHONE, { tick: true }],
+    [171_000, PHONE, cmd('playContext', { context: { kind: 'album', id: 'al2', label: 'Cedar' }, ids: ['u0'] })],
+    [171_200, PHONE, report('loaded', { durationMs: 95_000 })],
+    [171_300, PHONE, report('loaded', { durationMs: 1_000 })],
+    [171_400, PHONE, report('playing', { positionMs: 0 })],
   ] },
   { name: 'five failed songs in a row stop the session', random: [], steps: [
     [0, PC, hello(PC, '书房电脑')],

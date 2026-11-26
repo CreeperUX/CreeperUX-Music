@@ -84,21 +84,26 @@ test('Connect 2: hello is answered with everything a device shows; playing a con
     const q = a.inbox.find(m => m.type === 'queue' && m.queue.queueRev === s.queueRev);
     assert.deepEqual(q.queue, { queueRev: s.queueRev, order: songs.map(x => x.id), pointer: 1, manual: [] });
 
-    // the active device's report corrects what the server filled in
+    // the active device's report replaces what the server shows of the song, but not the library's duration (a
+    // device's can be out of date: the previous song's, after a gapless change)
     const ack = await a.report('loaded', s, { durationMs: 123_456, now: { title: 'From the file', artist: 'A', album: 'B', albumId: songs[1].albumId, coverArt: 'x' } });
     assert.equal(ack.type, 'ack');
     const loaded = await a.session(x => x.rev === ack.rev);
-    assert.equal(loaded.durationMs, 123_456);
+    assert.equal(loaded.durationMs, s.durationMs, 'the library’s duration stands');
     assert.equal(loaded.now.title, 'From the file');
+    // a position the device reports past the library's end is taken as it is (the file can be longer)
+    const past = await a.report('position', loaded, { positionMs: s.durationMs + 1_500 });
+    const reported = await a.session(x => x.rev === past.rev);
+    assert.equal(reported.positionMs, s.durationMs + 1_500);
 
     // refused messages say why, and change nothing
     const nothing = await a.refused('playContext', { ids: ['not-in-the-library'] });
     assert.equal(nothing.code, 'invalid');
     assert.equal((await a.refused('jump', { entry: 'c99:nope' })).code, 'stale');
-    assert.equal((await a.refused('seek', { positionMs: 5, rev: loaded.rev - 1 })).code, 'stale', 'a command for an older rev');
+    assert.equal((await a.refused('seek', { positionMs: 5, rev: reported.rev - 1 })).code, 'stale', 'a command for an older rev');
     assert.equal((await a.refused('dance')).code, 'invalid');
     const still = await a.command('seek', { positionMs: 1000 });
-    assert.equal(still.rev, loaded.rev + 1, 'the refused ones changed nothing');
+    assert.equal(still.rev, reported.rev + 1, 'the refused ones changed nothing');
   } finally { await a.close(); }
 });
 

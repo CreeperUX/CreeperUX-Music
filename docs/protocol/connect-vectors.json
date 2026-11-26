@@ -97,6 +97,14 @@
    "albumId": "al2",
    "coverArt": "al2",
    "durationMs": 189000
+  },
+  "u0": {
+   "title": "Untimed",
+   "artist": "Cedar",
+   "album": "Cedar",
+   "albumId": "al2",
+   "coverArt": "al2",
+   "durationMs": 0
   }
  },
  "cases": [
@@ -310,7 +318,7 @@
        "playing": true,
        "positionMs": 0,
        "at": 1000,
-       "durationMs": 182500,
+       "durationMs": 182000,
        "now": {
         "title": "Song 2 (from the file)",
         "artist": "Orbit",
@@ -386,7 +394,7 @@
        "playing": true,
        "positionMs": 0,
        "at": 1250,
-       "durationMs": 182500,
+       "durationMs": 182000,
        "now": {
         "title": "Song 2 (from the file)",
         "artist": "Orbit",
@@ -462,7 +470,7 @@
        "playing": true,
        "positionMs": 30010,
        "at": 31250,
-       "durationMs": 182500,
+       "durationMs": 182000,
        "now": {
         "title": "Song 2 (from the file)",
         "artist": "Orbit",
@@ -7151,6 +7159,993 @@
          "ref": "sideways",
          "code": "invalid",
          "message": "未知的报告：sideways"
+        }
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "the library's duration stands: a loaded with another (out of date) changes nothing; reported positions are not held to it; a song without one takes the device's",
+   "random": [],
+   "steps": [
+    {
+     "at": 0,
+     "from": "pc-study-01",
+     "send": {
+      "type": "hello",
+      "deviceId": "pc-study-01",
+      "name": "书房电脑",
+      "kind": "desktop",
+      "canPlay": true,
+      "client": "vectors"
+     },
+     "expect": {
+      "session": {
+       "rev": 0,
+       "activeDevice": null,
+       "lastDevice": null,
+       "current": null,
+       "next": null,
+       "playing": false,
+       "positionMs": 0,
+       "at": 0,
+       "durationMs": 0,
+       "now": null,
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": null,
+       "queueRev": 0
+      },
+      "queue": {
+       "queueRev": 0,
+       "order": [],
+       "pointer": -1,
+       "manual": []
+      },
+      "devices": [
+       "pc-study-01"
+      ],
+      "replies": []
+     }
+    },
+    {
+     "at": 10,
+     "from": "phone-0001",
+     "send": {
+      "type": "hello",
+      "deviceId": "phone-0001",
+      "name": "手机",
+      "kind": "phone",
+      "canPlay": true,
+      "client": "vectors"
+     },
+     "expect": {
+      "session": {
+       "rev": 0,
+       "activeDevice": null,
+       "lastDevice": null,
+       "current": null,
+       "next": null,
+       "playing": false,
+       "positionMs": 0,
+       "at": 0,
+       "durationMs": 0,
+       "now": null,
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": null,
+       "queueRev": 0
+      },
+      "queue": {
+       "queueRev": 0,
+       "order": [],
+       "pointer": -1,
+       "manual": []
+      },
+      "devices": [
+       "pc-study-01",
+       "phone-0001"
+      ],
+      "replies": []
+     }
+    },
+    {
+     "at": 1000,
+     "from": "pc-study-01",
+     "send": {
+      "type": "command",
+      "ref": "playContext",
+      "action": "playContext",
+      "context": {
+       "kind": "album",
+       "id": "al0",
+       "label": "Orbit"
+      },
+      "ids": [
+       "t0",
+       "t1",
+       "t2",
+       "t3"
+      ],
+      "startId": "t0"
+     },
+     "expect": {
+      "session": {
+       "rev": 1,
+       "activeDevice": "pc-study-01",
+       "lastDevice": {
+        "id": "pc-study-01",
+        "name": "书房电脑"
+       },
+       "current": {
+        "key": "c0:t0",
+        "trackId": "t0",
+        "manual": false
+       },
+       "next": "t1",
+       "playing": true,
+       "positionMs": 0,
+       "at": 1000,
+       "durationMs": 180000,
+       "now": {
+        "title": "Song 0",
+        "artist": "Orbit",
+        "album": "Orbit",
+        "albumId": "al0",
+        "coverArt": "al0"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al0",
+        "label": "Orbit"
+       },
+       "queueRev": 1
+      },
+      "queue": {
+       "queueRev": 1,
+       "order": [
+        "t0",
+        "t1",
+        "t2",
+        "t3"
+       ],
+       "pointer": 0,
+       "manual": []
+      },
+      "devices": [
+       "pc-study-01",
+       "phone-0001"
+      ],
+      "replies": [
+       {
+        "to": "pc-study-01",
+        "msg": {
+         "type": "ack",
+         "ref": "playContext",
+         "rev": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "at": 1200,
+     "from": "pc-study-01",
+     "send": {
+      "type": "report",
+      "ref": "loaded",
+      "event": "loaded",
+      "key": "c0:t0",
+      "positionMs": 0,
+      "rev": 1,
+      "durationMs": 120000
+     },
+     "expect": {
+      "session": {
+       "rev": 1,
+       "activeDevice": "pc-study-01",
+       "lastDevice": {
+        "id": "pc-study-01",
+        "name": "书房电脑"
+       },
+       "current": {
+        "key": "c0:t0",
+        "trackId": "t0",
+        "manual": false
+       },
+       "next": "t1",
+       "playing": true,
+       "positionMs": 0,
+       "at": 1000,
+       "durationMs": 180000,
+       "now": {
+        "title": "Song 0",
+        "artist": "Orbit",
+        "album": "Orbit",
+        "albumId": "al0",
+        "coverArt": "al0"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al0",
+        "label": "Orbit"
+       },
+       "queueRev": 1
+      },
+      "queue": {
+       "queueRev": 1,
+       "order": [
+        "t0",
+        "t1",
+        "t2",
+        "t3"
+       ],
+       "pointer": 0,
+       "manual": []
+      },
+      "devices": [
+       "pc-study-01",
+       "phone-0001"
+      ],
+      "replies": [
+       {
+        "to": "pc-study-01",
+        "msg": {
+         "type": "ack",
+         "ref": "loaded",
+         "rev": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "at": 1250,
+     "from": "pc-study-01",
+     "send": {
+      "type": "report",
+      "ref": "playing",
+      "event": "playing",
+      "key": "c0:t0",
+      "positionMs": 0,
+      "rev": 1
+     },
+     "expect": {
+      "session": {
+       "rev": 2,
+       "activeDevice": "pc-study-01",
+       "lastDevice": {
+        "id": "pc-study-01",
+        "name": "书房电脑"
+       },
+       "current": {
+        "key": "c0:t0",
+        "trackId": "t0",
+        "manual": false
+       },
+       "next": "t1",
+       "playing": true,
+       "positionMs": 0,
+       "at": 1250,
+       "durationMs": 180000,
+       "now": {
+        "title": "Song 0",
+        "artist": "Orbit",
+        "album": "Orbit",
+        "albumId": "al0",
+        "coverArt": "al0"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al0",
+        "label": "Orbit"
+       },
+       "queueRev": 1
+      },
+      "queue": {
+       "queueRev": 1,
+       "order": [
+        "t0",
+        "t1",
+        "t2",
+        "t3"
+       ],
+       "pointer": 0,
+       "manual": []
+      },
+      "devices": [
+       "pc-study-01",
+       "phone-0001"
+      ],
+      "replies": [
+       {
+        "to": "pc-study-01",
+        "msg": {
+         "type": "ack",
+         "ref": "playing",
+         "rev": 2
+        }
+       }
+      ]
+     }
+    },
+    {
+     "at": 151250,
+     "from": "pc-study-01",
+     "send": {
+      "type": "report",
+      "ref": "position",
+      "event": "position",
+      "key": "c0:t0",
+      "positionMs": 150000,
+      "rev": 2
+     },
+     "expect": {
+      "session": {
+       "rev": 3,
+       "activeDevice": "pc-study-01",
+       "lastDevice": {
+        "id": "pc-study-01",
+        "name": "书房电脑"
+       },
+       "current": {
+        "key": "c0:t0",
+        "trackId": "t0",
+        "manual": false
+       },
+       "next": "t1",
+       "playing": true,
+       "positionMs": 150000,
+       "at": 151250,
+       "durationMs": 180000,
+       "now": {
+        "title": "Song 0",
+        "artist": "Orbit",
+        "album": "Orbit",
+        "albumId": "al0",
+        "coverArt": "al0"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al0",
+        "label": "Orbit"
+       },
+       "queueRev": 1
+      },
+      "queue": {
+       "queueRev": 1,
+       "order": [
+        "t0",
+        "t1",
+        "t2",
+        "t3"
+       ],
+       "pointer": 0,
+       "manual": []
+      },
+      "devices": [
+       "pc-study-01",
+       "phone-0001"
+      ],
+      "replies": [
+       {
+        "to": "pc-study-01",
+        "msg": {
+         "type": "ack",
+         "ref": "position",
+         "rev": 3
+        }
+       }
+      ]
+     }
+    },
+    {
+     "at": 152000,
+     "from": "phone-0001",
+     "send": {
+      "type": "command",
+      "ref": "seek",
+      "action": "seek",
+      "positionMs": 200000
+     },
+     "expect": {
+      "session": {
+       "rev": 4,
+       "activeDevice": "pc-study-01",
+       "lastDevice": {
+        "id": "pc-study-01",
+        "name": "书房电脑"
+       },
+       "current": {
+        "key": "c0:t0",
+        "trackId": "t0",
+        "manual": false
+       },
+       "next": "t1",
+       "playing": true,
+       "positionMs": 180000,
+       "at": 152000,
+       "durationMs": 180000,
+       "now": {
+        "title": "Song 0",
+        "artist": "Orbit",
+        "album": "Orbit",
+        "albumId": "al0",
+        "coverArt": "al0"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al0",
+        "label": "Orbit"
+       },
+       "queueRev": 1
+      },
+      "queue": {
+       "queueRev": 1,
+       "order": [
+        "t0",
+        "t1",
+        "t2",
+        "t3"
+       ],
+       "pointer": 0,
+       "manual": []
+      },
+      "devices": [
+       "pc-study-01",
+       "phone-0001"
+      ],
+      "replies": [
+       {
+        "to": "phone-0001",
+        "msg": {
+         "type": "ack",
+         "ref": "seek",
+         "rev": 4
+        }
+       }
+      ]
+     }
+    },
+    {
+     "at": 152100,
+     "from": "pc-study-01",
+     "send": {
+      "type": "report",
+      "ref": "position",
+      "event": "position",
+      "key": "c0:t0",
+      "positionMs": 180000,
+      "rev": 4
+     },
+     "expect": {
+      "session": {
+       "rev": 5,
+       "activeDevice": "pc-study-01",
+       "lastDevice": {
+        "id": "pc-study-01",
+        "name": "书房电脑"
+       },
+       "current": {
+        "key": "c0:t0",
+        "trackId": "t0",
+        "manual": false
+       },
+       "next": "t1",
+       "playing": true,
+       "positionMs": 180000,
+       "at": 152100,
+       "durationMs": 180000,
+       "now": {
+        "title": "Song 0",
+        "artist": "Orbit",
+        "album": "Orbit",
+        "albumId": "al0",
+        "coverArt": "al0"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al0",
+        "label": "Orbit"
+       },
+       "queueRev": 1
+      },
+      "queue": {
+       "queueRev": 1,
+       "order": [
+        "t0",
+        "t1",
+        "t2",
+        "t3"
+       ],
+       "pointer": 0,
+       "manual": []
+      },
+      "devices": [
+       "pc-study-01",
+       "phone-0001"
+      ],
+      "replies": [
+       {
+        "to": "pc-study-01",
+        "msg": {
+         "type": "ack",
+         "ref": "position",
+         "rev": 5
+        }
+       }
+      ]
+     }
+    },
+    {
+     "at": 153600,
+     "from": "pc-study-01",
+     "send": {
+      "type": "report",
+      "ref": "position",
+      "event": "position",
+      "key": "c0:t0",
+      "positionMs": 181500,
+      "rev": 5
+     },
+     "expect": {
+      "session": {
+       "rev": 6,
+       "activeDevice": "pc-study-01",
+       "lastDevice": {
+        "id": "pc-study-01",
+        "name": "书房电脑"
+       },
+       "current": {
+        "key": "c0:t0",
+        "trackId": "t0",
+        "manual": false
+       },
+       "next": "t1",
+       "playing": true,
+       "positionMs": 181500,
+       "at": 153600,
+       "durationMs": 180000,
+       "now": {
+        "title": "Song 0",
+        "artist": "Orbit",
+        "album": "Orbit",
+        "albumId": "al0",
+        "coverArt": "al0"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al0",
+        "label": "Orbit"
+       },
+       "queueRev": 1
+      },
+      "queue": {
+       "queueRev": 1,
+       "order": [
+        "t0",
+        "t1",
+        "t2",
+        "t3"
+       ],
+       "pointer": 0,
+       "manual": []
+      },
+      "devices": [
+       "pc-study-01",
+       "phone-0001"
+      ],
+      "replies": [
+       {
+        "to": "pc-study-01",
+        "msg": {
+         "type": "ack",
+         "ref": "position",
+         "rev": 6
+        }
+       }
+      ]
+     }
+    },
+    {
+     "at": 160000,
+     "drop": "pc-study-01",
+     "expect": {
+      "session": {
+       "rev": 6,
+       "activeDevice": "pc-study-01",
+       "lastDevice": {
+        "id": "pc-study-01",
+        "name": "书房电脑"
+       },
+       "current": {
+        "key": "c0:t0",
+        "trackId": "t0",
+        "manual": false
+       },
+       "next": "t1",
+       "playing": true,
+       "positionMs": 181500,
+       "at": 153600,
+       "durationMs": 180000,
+       "now": {
+        "title": "Song 0",
+        "artist": "Orbit",
+        "album": "Orbit",
+        "albumId": "al0",
+        "coverArt": "al0"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al0",
+        "label": "Orbit"
+       },
+       "queueRev": 1
+      },
+      "queue": {
+       "queueRev": 1,
+       "order": [
+        "t0",
+        "t1",
+        "t2",
+        "t3"
+       ],
+       "pointer": 0,
+       "manual": []
+      },
+      "devices": [
+       "pc-study-01",
+       "phone-0001"
+      ],
+      "replies": []
+     }
+    },
+    {
+     "at": 170000,
+     "tick": true,
+     "expect": {
+      "session": {
+       "rev": 7,
+       "activeDevice": null,
+       "lastDevice": {
+        "id": "pc-study-01",
+        "name": "书房电脑"
+       },
+       "current": {
+        "key": "c0:t0",
+        "trackId": "t0",
+        "manual": false
+       },
+       "next": "t1",
+       "playing": false,
+       "positionMs": 181500,
+       "at": 170000,
+       "durationMs": 180000,
+       "now": {
+        "title": "Song 0",
+        "artist": "Orbit",
+        "album": "Orbit",
+        "albumId": "al0",
+        "coverArt": "al0"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al0",
+        "label": "Orbit"
+       },
+       "queueRev": 1
+      },
+      "queue": {
+       "queueRev": 1,
+       "order": [
+        "t0",
+        "t1",
+        "t2",
+        "t3"
+       ],
+       "pointer": 0,
+       "manual": []
+      },
+      "devices": [
+       "phone-0001"
+      ],
+      "replies": []
+     }
+    },
+    {
+     "at": 171000,
+     "from": "phone-0001",
+     "send": {
+      "type": "command",
+      "ref": "playContext",
+      "action": "playContext",
+      "context": {
+       "kind": "album",
+       "id": "al2",
+       "label": "Cedar"
+      },
+      "ids": [
+       "u0"
+      ]
+     },
+     "expect": {
+      "session": {
+       "rev": 8,
+       "activeDevice": "phone-0001",
+       "lastDevice": {
+        "id": "phone-0001",
+        "name": "手机"
+       },
+       "current": {
+        "key": "c0:u0",
+        "trackId": "u0",
+        "manual": false
+       },
+       "next": null,
+       "playing": true,
+       "positionMs": 0,
+       "at": 171000,
+       "durationMs": 0,
+       "now": {
+        "title": "Untimed",
+        "artist": "Cedar",
+        "album": "Cedar",
+        "albumId": "al2",
+        "coverArt": "al2"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al2",
+        "label": "Cedar"
+       },
+       "queueRev": 2
+      },
+      "queue": {
+       "queueRev": 2,
+       "order": [
+        "u0"
+       ],
+       "pointer": 0,
+       "manual": []
+      },
+      "devices": [
+       "phone-0001"
+      ],
+      "replies": [
+       {
+        "to": "phone-0001",
+        "msg": {
+         "type": "ack",
+         "ref": "playContext",
+         "rev": 8
+        }
+       }
+      ]
+     }
+    },
+    {
+     "at": 171200,
+     "from": "phone-0001",
+     "send": {
+      "type": "report",
+      "ref": "loaded",
+      "event": "loaded",
+      "key": "c0:u0",
+      "positionMs": 0,
+      "rev": 8,
+      "durationMs": 95000
+     },
+     "expect": {
+      "session": {
+       "rev": 9,
+       "activeDevice": "phone-0001",
+       "lastDevice": {
+        "id": "phone-0001",
+        "name": "手机"
+       },
+       "current": {
+        "key": "c0:u0",
+        "trackId": "u0",
+        "manual": false
+       },
+       "next": null,
+       "playing": true,
+       "positionMs": 0,
+       "at": 171000,
+       "durationMs": 95000,
+       "now": {
+        "title": "Untimed",
+        "artist": "Cedar",
+        "album": "Cedar",
+        "albumId": "al2",
+        "coverArt": "al2"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al2",
+        "label": "Cedar"
+       },
+       "queueRev": 2
+      },
+      "queue": {
+       "queueRev": 2,
+       "order": [
+        "u0"
+       ],
+       "pointer": 0,
+       "manual": []
+      },
+      "devices": [
+       "phone-0001"
+      ],
+      "replies": [
+       {
+        "to": "phone-0001",
+        "msg": {
+         "type": "ack",
+         "ref": "loaded",
+         "rev": 9
+        }
+       }
+      ]
+     }
+    },
+    {
+     "at": 171300,
+     "from": "phone-0001",
+     "send": {
+      "type": "report",
+      "ref": "loaded",
+      "event": "loaded",
+      "key": "c0:u0",
+      "positionMs": 0,
+      "rev": 9,
+      "durationMs": 1000
+     },
+     "expect": {
+      "session": {
+       "rev": 9,
+       "activeDevice": "phone-0001",
+       "lastDevice": {
+        "id": "phone-0001",
+        "name": "手机"
+       },
+       "current": {
+        "key": "c0:u0",
+        "trackId": "u0",
+        "manual": false
+       },
+       "next": null,
+       "playing": true,
+       "positionMs": 0,
+       "at": 171000,
+       "durationMs": 95000,
+       "now": {
+        "title": "Untimed",
+        "artist": "Cedar",
+        "album": "Cedar",
+        "albumId": "al2",
+        "coverArt": "al2"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al2",
+        "label": "Cedar"
+       },
+       "queueRev": 2
+      },
+      "queue": {
+       "queueRev": 2,
+       "order": [
+        "u0"
+       ],
+       "pointer": 0,
+       "manual": []
+      },
+      "devices": [
+       "phone-0001"
+      ],
+      "replies": [
+       {
+        "to": "phone-0001",
+        "msg": {
+         "type": "ack",
+         "ref": "loaded",
+         "rev": 9
+        }
+       }
+      ]
+     }
+    },
+    {
+     "at": 171400,
+     "from": "phone-0001",
+     "send": {
+      "type": "report",
+      "ref": "playing",
+      "event": "playing",
+      "key": "c0:u0",
+      "positionMs": 0,
+      "rev": 9
+     },
+     "expect": {
+      "session": {
+       "rev": 10,
+       "activeDevice": "phone-0001",
+       "lastDevice": {
+        "id": "phone-0001",
+        "name": "手机"
+       },
+       "current": {
+        "key": "c0:u0",
+        "trackId": "u0",
+        "manual": false
+       },
+       "next": null,
+       "playing": true,
+       "positionMs": 0,
+       "at": 171400,
+       "durationMs": 95000,
+       "now": {
+        "title": "Untimed",
+        "artist": "Cedar",
+        "album": "Cedar",
+        "albumId": "al2",
+        "coverArt": "al2"
+       },
+       "mode": "default",
+       "stopAfterCurrent": false,
+       "context": {
+        "kind": "album",
+        "id": "al2",
+        "label": "Cedar"
+       },
+       "queueRev": 2
+      },
+      "queue": {
+       "queueRev": 2,
+       "order": [
+        "u0"
+       ],
+       "pointer": 0,
+       "manual": []
+      },
+      "devices": [
+       "phone-0001"
+      ],
+      "replies": [
+       {
+        "to": "phone-0001",
+        "msg": {
+         "type": "ack",
+         "ref": "playing",
+         "rev": 10
         }
        }
       ]

@@ -209,6 +209,8 @@ const MESSAGES = {
 };
 const isStr = v => typeof v === 'string';
 const isNum = v => typeof v === 'number' && Number.isFinite(v);
+/** A position the active device says it is at, in the file it plays. */
+const played = ms => Math.max(0, Math.round(ms));
 const strings = v => Array.isArray(v) && v.every(isStr);
 
 /**
@@ -240,8 +242,12 @@ export class ConnectSession {
   /** The position at the server's time t (it moves on while playing). */
   positionAt(t = this.clock()) {
     const p = this.playing ? this.positionMs + Math.max(0, t - this.at) : this.positionMs;
-    return this.durationMs > 0 ? Math.min(p, this.durationMs) : p;
+    return this.#held(p);
   }
+
+  /** A position that moved on by itself, held at the song's end: the library's duration, or the position the active
+   *  device last said if it is beyond that (the file is longer than the library says: a VBR MP3, say). */
+  #held(p) { return this.durationMs > 0 ? Math.min(p, Math.max(this.durationMs, this.positionMs)) : p; }
 
   session() {
     return {
@@ -297,7 +303,8 @@ export class ConnectSession {
         // it kept playing through a short network loss, and nothing changed since: it is the active device again
         this.#activate(id);
         this.playing = Boolean(msg.resume.playing);
-        this.positionMs = this.#clampPosition(isNum(msg.resume.positionMs) ? msg.resume.positionMs : this.positionMs); this.at = t;
+        if (isNum(msg.resume.positionMs)) this.positionMs = played(msg.resume.positionMs);
+        this.at = t;
         this.graceStop = null;
         return { out, welcome: true, command: true };
       }
@@ -348,7 +355,7 @@ export class ConnectSession {
     const out = this.#change(null, {}, () => {
       // stopped where it was when the connection dropped (or where a command put it since)
       const at = Math.max(this.at, droppedAt);
-      this.positionMs = this.#clampPosition(this.playing ? this.positionMs + Math.max(0, at - this.at) : this.positionMs);
+      this.positionMs = this.#held(this.playing ? this.positionMs + Math.max(0, at - this.at) : this.positionMs);
       this.playing = false; this.at = t; this.activeDevice = null;
       if (!this.devices.get(device)?.online) this.devices.delete(device);
       return { devices: true };
@@ -546,12 +553,15 @@ export class ConnectSession {
     if (!this.current || r.key !== this.current.key) fail('stale', '这首歌已经不是当前的歌曲了。'); // about a song no longer current: ignored
     const t = this.clock();
     const keyBefore = this.queue.currentKey;
-    const position = () => (isNum(r.positionMs) ? this.#clampPosition(r.positionMs) : this.positionAt(t));
+    // where the device is in the file it plays: not held to the library's duration (a file can be longer)
+    const position = () => (isNum(r.positionMs) ? played(r.positionMs) : this.positionAt(t));
     // what the device did before it followed the last command (a seek, a pause from another device) is out of date
     const late = () => isNum(r.rev) && r.rev < this.cmdRev;
     switch (r.event) {
       case 'loaded':
-        if (isNum(r.durationMs) && r.durationMs >= 0) this.durationMs = Math.round(r.durationMs);
+        // the library's duration stands: a device's can be out of date (an engine that has not yet read the new song's
+        // after a gapless change). Taken only when the library has none.
+        if (isNum(r.durationMs) && r.durationMs >= 0 && this.durationMs === 0) this.durationMs = Math.round(r.durationMs);
         if (r.now && typeof r.now === 'object') this.now = pickNow(r.now);
         break;
       case 'playing': case 'paused':
@@ -611,6 +621,7 @@ export class ConnectSession {
     this.now = meta ? pickNow(meta) : null;
   }
 
+  /** A position a command asks for (a seek, a context started part-way): within the song as the library has it. */
   #clampPosition(ms) { const p = Math.max(0, Math.round(ms)); return this.durationMs > 0 ? Math.min(p, this.durationMs) : p; }
 
   // ---------------------------------------------------------------- kept across restarts

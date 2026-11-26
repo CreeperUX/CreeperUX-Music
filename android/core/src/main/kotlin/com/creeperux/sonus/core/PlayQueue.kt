@@ -160,6 +160,17 @@ class PlayQueue(private val lookup: (String) -> Track?, private val random: Rand
         changed()
     }
 
+    /** The context in an order its sender arranged (shuffling by album or folder over Sonus Connect v2, where the server
+     *  takes the order it is given), with the current song where it now is. The context's own order is kept, to come
+     *  back to when the shuffling stops. */
+    fun arrangeAs(order: List<String>) {
+        val known = order.filter { it in context || it in source }.distinct()
+        if (known.isEmpty()) return
+        context = known
+        pointerAt = maxOf(0, current?.let { known.indexOf(it) } ?: 0)
+        changed()
+    }
+
     fun add(trackIds: List<String>, next: Boolean = false) {
         val added = trackIds.filter { lookup(it) != null }.map { "q${++nextId}" to it }
         manual = if (next) added + manual else manual + added

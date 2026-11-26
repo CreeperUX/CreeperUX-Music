@@ -40,10 +40,13 @@ data class PlaybackSession(
     val context: SessionContext? = null,
     val queueRev: Long = 0,
 ) {
-    /** The position at the server's time [serverNow] (it moves on while playing). */
+    /** The position at the server's time [serverNow]: while playing it moves on with the clock and stops at the song's
+     *  end, the library's [durationMs] or the position last reported if that is further (the real file can be a second
+     *  or two longer than the library says). A reported position is never held to the duration. */
     fun positionAt(serverNow: Long): Long {
-        val p = if (playing) positionMs + maxOf(0, serverNow - at) else positionMs
-        return if (durationMs > 0) minOf(p, durationMs) else p
+        if (!playing) return positionMs
+        val p = positionMs + maxOf(0, serverNow - at)
+        return if (durationMs > 0) minOf(p, maxOf(durationMs, positionMs)) else p
     }
 
     companion object {

@@ -9,7 +9,7 @@ Sonus 的安卓客户端：连接你自己的 Sonus／Navidrome 服务器，浏�
   - 窄平板（600–860 dp）：音乐库收成一列封面；宽度不到 1100 dp 时不显示右侧面板。规则和 Windows 版的窗口宽度规则一致。
 - **界面语言**：简体中文。代码注释为英文。
 
-## 功能（第一版）
+## 功能
 
 | 部分 | 内容 |
 |---|---|
@@ -27,8 +27,10 @@ Sonus 的安卓客户端：连接你自己的 Sonus／Navidrome 服务器，浏�
 
 - **一个账号只有一个播放会话**，只有一台设备出声（"出声设备"）。所有设备都显示正在哪台设备上放什么，进度实时走。
 - **命令都发给服务器**：在手机上点歌、加队列、切歌、拖进度、换播放顺序，都作用于出声设备。手机自己只在当前是出声设备时才出声，并把实际播放情况报告给服务器。
-- **设备列表**：手机在全屏播放器底部，平板在播放栏右侧。列表里显示每台设备的状态（正在播放 / 已暂停 / 空闲），点一台就把播放切过去，原来的设备停下变成遥控器；每台设备都有音量条。
-- **提示**：别的设备出声时，迷你播放条、全屏播放器、平板播放栏和右侧面板显示"正在「书房电脑」上播放"；都停下时显示"上次在「…」播放"。
+- **连接到设备**（和 Spotify、Windows 版右栏的设备面板一样）：手机在全屏播放器底部，平板在播放栏右侧，也可以点下面说的色条打开。正在出声的设备在最上面的卡片里，带它的音量条；其他设备各占一行，点一行就把播放切过去，原来的设备停下变成遥控器；行尾的喇叭按钮展开那台设备的音量条。
+- **提示**：别的设备出声时，手机迷你播放条下面、平板播放栏下面出现一条强调色的色条"正在「书房电脑」上播放"（点它打开设备列表），全屏播放器和右侧面板也显示这句；都停下时显示"上次在「…」播放"。
+- **放不了的歌**：跳到下一首，并提示"无法播放“歌名”，已跳到下一首。"；连续 5 首都放不了时停下。预先载入的下一首出错，不会算到正在播放的这首头上：这首照常放完，轮到那首时再报它。
+- **打开正在播放的专辑或歌单**时，页面直接定位到正在播放的那首（在视野中间）。
 
 你在设计时选定的三项：
 
@@ -54,7 +56,8 @@ android/
   core/   纯 Kotlin：SubsonicClient、LibraryBuilder、PlayQueue、LyricsParser、DeviceLogin、Formats、HomeShelves
           （Sonus.Core 的移植；测试在电脑的 JVM 上运行，其中一组连接仓库里的演示服务器）
   app/    安卓 App：data（Keystore 加密保存登录、设置）、session（媒体库会话）、playback（Media3）、ui（Compose 界面）
-  tools/  kit-icons.mjs（从 Windows 版生成图标）、test-device.ps1（一键运行设备测试）
+  tools/  kit-icons.mjs（从 Windows 版生成图标）、test-device.ps1（一键运行设备测试）、
+          server-library.mjs（在本机搭一个带长歌测试曲库的 Sonus 服务器，给设备测试用）
 ```
 
 ## 开发环境（这台 Windows 11 ARM64 电脑）
@@ -164,8 +167,17 @@ node tools\demo-server\demo-server.mjs 4633
 - 回到桌面后音乐继续，系统媒体会话显示正确的歌名，通知栏出现媒体控件；
 - 媒体键"下一首"和"暂停/继续"按队列执行；
 - 同步歌词跟着走；
-- 密码错误时给出提示；
-- 浏览器登录拿到专用密钥（加密保存），退出登录后服务器立即拒绝这个密钥。
+- 密码错误时给出提示（并提到二步验证时要用浏览器登录）；
+- 浏览器登录拿到专用密钥（加密保存），退出登录后服务器立即拒绝这个密钥；
+- 账号开启了二步验证时，密码登录被拒并给出提示，浏览器登录（服务器网页上输验证码）可以登录（只在 Sonus 服务器上测，只在手机上测）。
+
+`PlaybackFixesTest` 测 0.2.0 修正的播放问题，同样让测试程序扮演"测试电脑"：
+
+- 一首歌自己放完、无缝接上更长的下一首：播放条和会话里都是新歌自己的长度，两台设备的进度都能走过上一首的长度；
+- 遥控端跟着出声设备走：自然换到更长的歌（那台设备报了过时的长度）、两边各拖一次进度、暂停和继续；
+- 在一首歌 2 分半处把播放转到这台设备：从同一位置接着放（不是两倍的位置，也不跳到下一首）；
+- 正在放的歌后面那首文件丢了：正在放的这首照常放完，不被报成放不了；丢了的那首被跳过，提示里写的是它的名字；
+- 打开正在播放的专辑，页面定位到正在播放的那首。
 
 模拟器有手机（`sonus-phone`）和平板（`sonus-tablet`）两台。同时开着时，测试会在两台上都跑一遍：手机用 `demo` 账号，平板用 `friend` 账号。原因是一个账号只有一个播放会话，两台同时测会互相干扰。
 
@@ -180,6 +192,19 @@ node tools\demo-server\demo-server.mjs 4633
 ```powershell
 $env:SONUS_DEMO_REPO = "<另一个检出的目录>"; .\gradlew.bat :core:test; .\tools\test-device.ps1
 ```
+
+**对着真正的 Sonus 服务器跑设备测试**：用主干 `server/` 编译的 Rust 服务器，放在冻结的 Navidrome 前面，曲库是自己生成的 53 首长歌（2 分半到 9 分钟），用户都是一次性的。在 Windows ARM64 上编译服务器要加 `--no-default-features`（见 `server/README.md`）。
+
+```powershell
+cargo build --release --no-default-features --manifest-path ..\server\Cargo.toml --target-dir <目录>\target
+node tools\server-library.mjs library <目录>
+node tools\server-library.mjs start <目录> <目录>\target\release\sonus-server.exe <navidrome.exe> 4650
+node tools\server-library.mjs users <目录> 4650
+.\tools\test-device.ps1 -Avd sonus-phone,sonus-tablet -Server http://127.0.0.1:4650 -Credentials <目录>\credentials.json
+node tools\server-library.mjs stop <目录>
+```
+
+`users` 建三个一次性用户（手机用、平板用、一个开了二步验证的），密码随机，只写在 `<目录>\credentials.json` 里，不打印；扫描完后删掉一首歌的文件，用来测"放不了的歌"。不要指向正在用的正式服务器：测试会播放、计播放次数、改会话。
 
 ## 在你自己的手机上试用
 
@@ -210,9 +235,9 @@ $env:SONUS_DEMO_REPO = "<另一个检出的目录>"; .\gradlew.bat :core:test; .
 - **字体**：标题字体 Chakra Petch SemiBold 和 Windows 版相同，依 SIL OFL 1.1 授权，许可证文本在 `app/src/main/assets/licenses/`。中文自动用系统字体，按粗体显示。
 - **颜色**：深色取自 Windows 版 `App.xaml`，浅色取自 Web 版和设计套件。外观可以在设置里选：跟随系统、深色或浅色。
 
-## 已知限制（第一版）
+## 已知限制
 
 - 在 Connect v2 的通知栏里，系统输出切换标签仍写"This phone"。这是系统界面，App 改不了。
 - 没有离线下载，没有媒体库本地缓存（每次启动都会从服务器读媒体库）。
-- 正式版没有签名密钥，也没有自动发布或 CI。
+- 正式版没有签名密钥；发出去的测试版是 debug 签名的"Sonus 测试版"（`com.creeperux.sonus.debug`）。CI（`.github/workflows/android.yml`）只编译和跑测试，不发布。
 - 平板在竖屏和横屏下都能用，但只在模拟器上看过横屏截图。

@@ -45,7 +45,7 @@ import java.util.concurrent.TimeUnit
  * Sonus Connect version 2 on a device: the app and a second device of the same account (a SessionClient in this test,
  * standing for a computer) share one playback session. The other device plays; the app shows it ("正在「测试电脑」上播放"),
  * stays silent, and steers it from its buttons and from the system's media controls; the other device sets the app's
- * volume; the device list moves playback to the app. Skipped when the demo server does not speak version 2.
+ * volume; the device list moves playback to the app. Skipped when the server does not speak version 2.
  */
 @RunWith(AndroidJUnit4::class)
 class ConnectDeviceTest {
@@ -56,9 +56,10 @@ class ConnectDeviceTest {
     private val context: Context get() = instrumentation.targetContext
     private val graph: AppGraph get() = (context.applicationContext as SonusApp).graph
     private val device: UiDevice = UiDevice.getInstance(instrumentation)
-    private val server = InstrumentationRegistry.getArguments().getString("sonusServer") ?: "http://127.0.0.1:4633"
+    private val server = TestServer.url
     private val http = OkHttpClient.Builder().readTimeout(10, TimeUnit.SECONDS).build()
-    private val user: String get() = account(context)
+    private val user: String get() = TestServer.user(context)
+    private val password: String get() = TestServer.password(context)
     private var desk: SessionClient? = null
 
     @Before
@@ -67,7 +68,7 @@ class ConnectDeviceTest {
         compose.waitUntil(20_000) { exists("signin") }
         compose.onNodeWithTag("server").performTextReplacement(server)
         compose.onNodeWithTag("user").performTextReplacement(user)
-        compose.onNodeWithTag("password").performTextReplacement(user)
+        compose.onNodeWithTag("password").performTextReplacement(password)
         compose.onNodeWithTag("signin").performClick()
         compose.waitUntil(30_000) { exists("home") }
         assumeTrue("the server speaks Sonus Connect v2", graph.link != null)
@@ -121,14 +122,14 @@ class ConnectDeviceTest {
     @Test
     fun anotherDevicePlaysTheAppShowsAndSteersItThenTakesItOver() {
         // a computer of the same account joins and plays an album (rule 6: with no active device, the sender becomes it)
-        val login = runBlocking { SubsonicClient.signIn(server, user, user, "Sonus (Test)", http) }
+        val login = runBlocking { SubsonicClient.signIn(server, user, password, "Sonus (Test)", http) }
         val client = SubsonicClient(login, "Sonus (Test)", http)
         runBlocking { client.connect() }
         val other = SessionClient(client, "test-desk-0001", "测试电脑", "desktop", clientLabel = "Sonus test", http = http).also { desk = it }
         other.start()
         runBlocking { withTimeout(10_000) { other.connected.first { it } } }
         val session = (graph.state.value as AppState.Ready).session
-        val album = session.lib.albums.first { it.title == "夜行列车" }
+        val album = TestServer.playableAlbum(session.lib)
         val reply = runBlocking {
             other.command(
                 "playContext",
@@ -141,7 +142,8 @@ class ConnectDeviceTest {
         assertThat(reply.ok).isTrue()
         val key = runBlocking { withTimeout(10_000) { other.session.first { it.activeDevice == "test-desk-0001" && it.current != null } } }.current!!.key
         runBlocking {
-            other.report("loaded", key, 0, other.session.value.rev, durationMs = 180_000)
+            // a length the library does not have (an engine's, out of date): the library's stands
+            other.report("loaded", key, 0, other.session.value.rev, durationMs = 61_000)
             other.report("playing", key, 0, other.session.value.rev)
         }
 
@@ -152,7 +154,8 @@ class ConnectDeviceTest {
         var silent = false
         instrumentation.runOnMainSync { silent = !graph.playback.exo.isPlaying } // the player lives on the main thread
         assertThat(silent).isTrue()
-        compose.waitUntil(10_000) { shows("正在「测试电脑」上播放") }
+        compose.waitUntil(10_000) { shows("正在「测试电脑」上播放") && exists("elsewhere") } // the strip under the player
+        assertThat(graph.playback.state.value.duration).isWithin(1.0).of(session.lib.track(album.trackIds[0])!!.duration)
         shot("connect-01-elsewhere")
 
         // the system's media controls steer the computer (the user asked for these)
@@ -205,7 +208,7 @@ class ConnectDeviceTest {
         instrumentation.runOnMainSync { graph.playback.resume() }
         waitFor(what = "playing here") { graph.playback.state.value.status == PlayerStatus.Playing && graph.playback.exo.isPlaying }
         runBlocking { withTimeout(10_000) { other.session.first { it.playing && it.activeDevice == graph.link!!.id } } }
-        compose.waitUntil(5_000) { !exists("where") }
+        compose.waitUntil(5_000) { !exists("where") && !exists("elsewhere") }
         shot("connect-04-here")
     }
 }

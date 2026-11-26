@@ -10,10 +10,14 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.ExoPlaybackException
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.UnrecognizedInputFormatException
 import com.creeperux.sonus.core.PlayContext
 import com.creeperux.sonus.core.PlayQueue
 import com.creeperux.sonus.core.PlaybackOrder
@@ -84,6 +88,9 @@ class LocalPlayback(
     private var savedAt = 0L
     private var ticker: Job? = null
     private var saveJob: Job? = null
+    private var failures = 0 // songs in a row that could not play (without a session: skipped, up to five)
+    private val noPreload = mutableSetOf<String>() // songs whose early load failed: loaded only when they come up
+    private var positionHeldUntil = 0L // a seek sent for another device: the session's position is not shown until it says so
 
     // Sonus Connect version 2: the session as last applied, and what the player has of it
     private var remote: PlaybackSession? = null
@@ -182,6 +189,7 @@ class LocalPlayback(
         }
         val start = queue.start(context, ids, startId, shuffle) ?: return
         settings.order = queue.order
+        failures = 0
         load(start, autoplay = true)
     }
 
@@ -226,6 +234,7 @@ class LocalPlayback(
 
     override fun next() {
         if (command("next")) return
+        failures = 0
         val id = queue.next()
         if (id != null) load(id, autoplay = true) else stop()
     }
@@ -236,6 +245,7 @@ class LocalPlayback(
             seek(0.0)
             return
         }
+        failures = 0
         val id = queue.previous()
         if (id != null) load(id, autoplay = true) else seek(0.0)
     }
@@ -252,6 +262,12 @@ class LocalPlayback(
         val at = seconds.coerceIn(0.0, if (d > 0) d else seconds.coerceAtLeast(0.0))
         if (command("seek", buildJsonObject { put("positionMs", (at * 1000).toLong()) }, playerOffline = true)) {
             positionFlow.value = at
+            if (elsewhere) {
+                positionHeldUntil = System.currentTimeMillis() + 2_000 // until the session says where it is now
+            } else if (currentPlayerId() == queue.current) {
+                // the active device seeks at once: the session's answer then matches, and is not applied again
+                exo.seekTo((at * 1000).toLong())
+            }
             return
         }
         positionFlow.value = at
@@ -289,6 +305,7 @@ class LocalPlayback(
 
     override fun queueJump(entryId: String) {
         if (command("jump", buildJsonObject { put("entry", entryId) })) return
+        failures = 0
         queue.jump(entryId)?.let { load(it, autoplay = true) }
     }
 
@@ -305,6 +322,7 @@ class LocalPlayback(
      *  stopped at once otherwise (rule 4). */
     fun applySession(s: PlaybackSession, q: SessionQueue, here: Boolean) {
         remote = s
+        positionHeldUntil = 0
         val ctx = s.context?.let { PlayContext(it.kind, it.id, it.label) }
         queue.mirror(ctx, q.order, q.pointer, q.manual.map { it.key to it.trackId }, s.current?.trackId, SessionModes.parse(s.mode), s.stopAfterCurrent)
         if (here) followHere(s) else showElsewhere(s)
@@ -350,6 +368,10 @@ class LocalPlayback(
                 engineKey = cur.key
                 advancedTo = null
                 loadedSaid = false
+                if (state.value.status == PlayerStatus.Error) {
+                    sayHere("failed") // it failed on arriving there: now the session can be told, for this entry
+                    return
+                }
                 if (exo.isPlaying) sayHere("playing")
             } else {
                 engineKey = cur.key
@@ -402,7 +424,9 @@ class LocalPlayback(
         if (!loadedSaid && event != "failed") {
             loadedSaid = true
             val t = session?.lib?.track(currentPlayerId() ?: queue.current)
-            val d = exo.duration.takeIf { it != C.TIME_UNSET && it > 0 }?.let { it / 1000.0 } ?: t?.duration
+            // the library's length first, as the server takes it (the player's only when the library has none: right
+            // after a gapless change the player can still have the song before's, and a transcoded stream's is a guess)
+            val d = t?.duration?.takeIf { it > 0 } ?: exo.duration.takeIf { it != C.TIME_UNSET && it > 0 }?.let { it / 1000.0 }
             l.report(
                 "loaded", key, p, d,
                 t?.let { SessionNow(it.title, it.artist, it.album, it.albumId, session?.lib?.album(it.albumId)?.coverArt ?: it.coverArt) },
@@ -456,7 +480,7 @@ class LocalPlayback(
     /** What to load after [currentId]: what the queue (or the session) says follows. */
     private fun nextItem(currentId: String?): MediaItem? {
         val next = if (linkFlow.value != null) remote?.next else queue.peek()
-        return next?.takeIf { it != currentId }?.let { session?.lib?.track(it) }?.let(::itemFor)
+        return next?.takeIf { it != currentId && it !in noPreload }?.let { session?.lib?.track(it) }?.let(::itemFor)
     }
 
     private fun load(trackId: String, autoplay: Boolean, at: Double = 0.0) {
@@ -469,6 +493,9 @@ class LocalPlayback(
         nowPlayingSent = false
         startedAt = System.currentTimeMillis()
         positionFlow.value = at
+        noPreload -= trackId // tried again now that it comes up
+        // the start position is given here only, once (the session's position is not applied again unless the player
+        // is more than 1.5 s off it: see followHere)
         val items = listOfNotNull(itemFor(t), nextItem(trackId))
         applyVolume(t)
         // the state first: the player reports what it does (playing …) from within the calls below
@@ -525,6 +552,7 @@ class LocalPlayback(
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             if (elsewhere) return
             if (isPlaying) {
+                failures = 0
                 setStatus(PlayerStatus.Playing)
                 if (!nowPlayingSent) nowPlaying()
                 startTicker()
@@ -555,35 +583,100 @@ class LocalPlayback(
                     if (id != null) load(id, autoplay = true) else stop()
                 }
                 Player.STATE_READY -> {
+                    // the library's length stands (the bar, `loaded`); the player's only when the library has none
                     val d = exo.duration
-                    if (d != C.TIME_UNSET && d > 0) stateFlow.update { it.copy(duration = d / 1000.0) }
+                    val known = session?.lib?.track(currentPlayerId())?.duration ?: 0.0
+                    if (known <= 0 && d != C.TIME_UNSET && d > 0) stateFlow.update { it.copy(duration = d / 1000.0) }
                 }
                 else -> Unit
             }
         }
 
         override fun onPlayerError(error: PlaybackException) {
-            val t = current
+            val failed = failedSong(error)
+            val playing = currentPlayerId()
+            if (failed != null && playing != null && failed != playing) {
+                // the song loaded early to follow the current one failed (ExoPlayer opens it near the current one's end,
+                // and stops on it): not the current song's failure. That one plays on; the other is tried again, not
+                // early, when it comes up, and fails there as itself.
+                Log.w(TAG, "the preloaded $failed failed (${error.errorCodeName}); $playing plays on", error)
+                noPreload += failed
+                for (i in exo.mediaItemCount - 1 downTo 0) {
+                    if (i != exo.currentMediaItemIndex && exo.getMediaItemAt(i).mediaId == failed) exo.removeMediaItem(i)
+                }
+                exo.prepare() // from where it stopped, playing as it was
+                return
+            }
+            val t = session?.lib?.track(failed) ?: current
+            val name = t?.let { "“${it.title}”" } ?: "这首歌"
             val reason = when (error.errorCode) {
                 PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED, PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "连不上服务器"
                 PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS, PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> "服务器上找不到这个文件"
                 PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED, PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED -> "这台设备不支持这个格式"
                 else -> error.errorCodeName
             }
-            val message = "无法播放“${t?.title.orEmpty()}”：$reason"
-            Log.w(TAG, message, error)
+            val message = "无法播放$name：$reason"
+            Log.w(TAG, "$failed failed: $message", error)
             setStatus(PlayerStatus.Error, message)
             if (linkFlow.value != null) {
-                sayHere("failed") // the session skips it and says so to every device
+                // the session skips it and says so to every device (error `unplayable`, naming it). A song the player went
+                // on to by itself is reported once the session is there too (followHere): before, the entry would be the
+                // song before's, and the server would drop the report as stale.
+                if (advancedTo == null) sayHere("failed")
                 return
             }
-            session?.say(Toast(message, isError = true))
-            // a song that cannot be played here is skipped, as the Windows app does; a lost connection is not (every song
-            // would fail the same way)
+            // a song that cannot be played here is skipped with a toast naming it, as the Windows app does; after five
+            // in a row, or at the end, it stops on the error. A lost connection is not skipped (every song would fail).
             val network = error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
                 error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT
-            if (!network && queue.peek() != null) next()
+            if (!network) {
+                if (++failures >= 5) {
+                    session?.say(Toast("无法播放$name；连续 $failures 首都无法播放，已停止播放。", isError = true))
+                    return
+                }
+                val next = queue.next()
+                if (next != null) {
+                    session?.say(Toast("无法播放$name，已跳到下一首。"))
+                    load(next, autoplay = true)
+                    return
+                }
+            }
+            session?.say(Toast(message, isError = true))
         }
+    }
+
+    /** Which song a failure is from: the one whose stream (its address) could not be opened or read, or the one being
+     *  decoded; the current one when the failure does not say. ExoPlayer itself names the current song for any stream's
+     *  failure, also the early-loaded next one's. */
+    private fun failedSong(error: PlaybackException): String? {
+        var cause: Throwable? = error.cause
+        var uri: android.net.Uri? = null
+        while (cause != null && uri == null) {
+            uri = when (cause) {
+                is HttpDataSource.HttpDataSourceException -> cause.dataSpec.uri
+                is UnrecognizedInputFormatException -> cause.uri
+                else -> null
+            }
+            cause = cause.cause
+        }
+        if (uri != null) {
+            for (i in 0 until exo.mediaItemCount) {
+                val item = exo.getMediaItemAt(i)
+                if (item.localConfiguration?.uri == uri) return item.mediaId
+            }
+            uri.getQueryParameter("id")?.let { return it }
+        }
+        // a song that could not be decoded: the one the renderers were reading (the next song's start can be, already)
+        val period = (error as? ExoPlaybackException)?.takeIf { it.type == ExoPlaybackException.TYPE_RENDERER }?.mediaPeriodId
+        if (period != null) {
+            val timeline = exo.currentTimeline
+            val index = timeline.getIndexOfPeriod(period.periodUid)
+            if (index != C.INDEX_UNSET) {
+                val window = timeline.getPeriod(index, Timeline.Period()).windowIndex
+                if (window < exo.mediaItemCount) return exo.getMediaItemAt(window).mediaId
+            }
+        }
+        return currentPlayerId()
     }
 
     private fun setStatus(s: PlayerStatus, error: String? = null) {
@@ -601,7 +694,7 @@ class LocalPlayback(
                 if (l != null && !l.isActiveHere) {
                     val s = remote ?: break
                     if (!s.playing) break
-                    positionFlow.value = s.positionAt(l.serverNow) / 1000.0
+                    if (System.currentTimeMillis() >= positionHeldUntil) positionFlow.value = s.positionAt(l.serverNow) / 1000.0
                     continue
                 }
                 if (l != null && sayPositionAt > 0 && System.currentTimeMillis() >= sayPositionAt) {

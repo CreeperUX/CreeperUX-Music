@@ -82,7 +82,10 @@ public sealed class MusicService : IDisposable
     public PlayerState State { get; private set; } = PlayerState.Stopped;
     public string? Error { get; private set; }
     public double Position { get; private set; }
-    public double Duration => Elsewhere ? (_session is { DurationMs: > 0 } s ? s.DurationMs / 1000.0 : Current?.Duration ?? 0) : Engine.Duration ?? Current?.Duration ?? 0;
+    /// <summary>The current song's length: the library's (the engine's only when the library has none; while another device
+    /// plays, the session's).</summary>
+    public double Duration => Elsewhere ? (_session is { DurationMs: > 0 } s ? s.DurationMs / 1000.0 : Current?.Duration ?? 0)
+        : Current is { Duration: > 0 } t ? t.Duration : Engine.CurrentId == Current?.Id ? Engine.Duration ?? 0 : 0;
     public double Volume { get; private set; }
     public bool Muted => Engine.Muted;
     public ReplayGainMode ReplayGain { get; private set; }
@@ -679,7 +682,8 @@ public sealed class MusicService : IDisposable
         {
             _loadedSaid = true;
             var t = Library.Track(Engine.CurrentId ?? Queue.Current);
-            s.Report("loaded", key, Engine.Position, Engine.Duration ?? t?.Duration,
+            // the library's length first: the engine's can lag behind a gapless change (it would hold every device's position)
+            s.Report("loaded", key, Engine.Position, t is { Duration: > 0 } ? t.Duration : Engine.Duration,
                 t is null ? null : new SessionNow(t.Title, t.Artist, t.Album, t.AlbumId, Library.Album(t.AlbumId)?.CoverArt ?? t.CoverArt));
         }
         s.Report(evt, key, Engine.Position);

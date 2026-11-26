@@ -225,8 +225,9 @@ test('session: reports come from the active device, about the current song, and 
   w.cmd(A, 'playContext', { ids: all, startId: 't0' });
   assert.equal(w.replies(w.report(B, 'position', { positionMs: 1 }), 'error')[0].code, 'notActive');
   assert.equal(w.replies(w.send(A, { type: 'report', event: 'ended', key: 'c9:t9', positionMs: 0, rev: w.s.rev }), 'error')[0].code, 'stale');
+  // the library's duration stands (a device's can be out of date); `now` is the device's
   w.report(A, 'loaded', { durationMs: 123_000, now: { title: 'Real title' } });
-  assert.equal(w.s.durationMs, 123_000);
+  assert.equal(w.s.durationMs, 200_000);
   assert.equal(w.s.now.title, 'Real title');
   const before = w.s.rev;
   w.cmd(B, 'seek', { positionMs: 60_000 });

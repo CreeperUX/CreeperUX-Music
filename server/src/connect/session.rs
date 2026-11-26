@@ -273,6 +273,11 @@ fn round(n: f64) -> i64 {
     (n + 0.5).floor() as i64
 }
 
+/// A position the active device says it is at, in the file it plays.
+fn played(ms: f64) -> i64 {
+    round(ms).max(0)
+}
+
 fn clamp01(n: f64) -> f64 {
     n.clamp(0.0, 1.0)
 }
@@ -352,7 +357,13 @@ impl ConnectSession {
     /// The position at the server's time `t` (it moves on while playing).
     pub fn position_at(&self, t: i64) -> i64 {
         let p = if self.playing { self.position_ms.saturating_add((t - self.at).max(0)) } else { self.position_ms };
-        if self.duration_ms > 0 { p.min(self.duration_ms) } else { p }
+        self.held(p)
+    }
+
+    /// A position that moved on by itself, held at the song's end: the library's duration, or the position the active
+    /// device last said if it is beyond that (the file is longer than the library says: a VBR MP3, say).
+    fn held(&self, p: i64) -> i64 {
+        if self.duration_ms > 0 { p.min(self.duration_ms.max(self.position_ms)) } else { p }
     }
 
     /// The session object (connect.md, Session).
@@ -498,10 +509,9 @@ impl ConnectSession {
                     // it kept playing through a short network loss, and nothing changed since: the active device again
                     s.activate(&id);
                     s.playing = truthy(resume.get("playing"));
-                    s.position_ms = match num(resume.get("positionMs")) {
-                        Some(p) => s.clamp_position(p),
-                        None => s.clamp_position(s.position_ms as f64),
-                    };
+                    if let Some(p) = num(resume.get("positionMs")) {
+                        s.position_ms = played(p);
+                    }
                     s.at = t;
                     s.grace_stop = None;
                     return Ok(Applied { out, welcome: true, command: true, ..Applied::default() });
@@ -564,7 +574,7 @@ impl ConnectSession {
             // stopped where it was when the connection dropped (or where a command put it since)
             let at = s.at.max(grace.dropped_at);
             let position = if s.playing { s.position_ms.saturating_add((at - s.at).max(0)) } else { s.position_ms };
-            s.position_ms = s.clamp_position(position as f64);
+            s.position_ms = s.held(position);
             s.playing = false;
             s.at = t;
             s.active_device = None;
@@ -943,15 +953,18 @@ impl ConnectSession {
         }
         let t = env.now;
         let key_before = self.queue.current_key.clone();
+        // where the device is in the file it plays: not held to the library's duration (a file can be longer)
         let position = |s: &Self| match num(r.get("positionMs")) {
-            Some(p) => s.clamp_position(p),
+            Some(p) => played(p),
             None => s.position_at(t),
         };
         // what the device did before it followed the last command (a seek, a pause from another device) is out of date
         let late = num(r.get("rev")).is_some_and(|rev| rev < self.cmd_rev as f64);
         match text(r.get("event")) {
             Some("loaded") => {
-                if let Some(duration) = num(r.get("durationMs")).filter(|d| *d >= 0.0) {
+                // the library's duration stands: a device's can be out of date (an engine that has not yet read the
+                // new song's after a gapless change). Taken only when the library has none.
+                if let Some(duration) = num(r.get("durationMs")).filter(|d| *d >= 0.0 && self.duration_ms == 0) {
                     self.duration_ms = round(duration);
                 }
                 if let Some(now) = r.get("now").filter(|n| n.is_object() || n.is_array()) {
@@ -1077,6 +1090,7 @@ impl ConnectSession {
         self.now = meta.as_ref().map(Now::of);
     }
 
+    /// A position a command asks for (a seek, a context started part-way): within the song as the library has it.
     fn clamp_position(&self, ms: f64) -> i64 {
         let p = round(ms).max(0);
         if self.duration_ms > 0 { p.min(self.duration_ms) } else { p }

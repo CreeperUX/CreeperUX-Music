@@ -357,7 +357,8 @@ async fn two_devices_share_one_session_a_remote_steers_it_and_a_transfer_moves_i
     let seen = phone.session(&session["rev"]).await;
     assert_eq!(seen, session);
 
-    // the active device says what really happens
+    // the active device says what really happens: `now` is taken, its duration is not (the library's stands: a device's
+    // can be out of date)
     pc.send(json!({ "type": "report", "ref": "r1", "event": "loaded", "key": "c1:s2", "positionMs": 0, "durationMs": 182_000, "rev": session["rev"],
         "now": { "title": "Song 2 (from the file)", "artist": "A", "album": "L", "albumId": "al1", "coverArt": "mf-s2_abc" } }))
         .await;
@@ -366,7 +367,7 @@ async fn two_devices_share_one_session_a_remote_steers_it_and_a_transfer_moves_i
     let loaded = phone.session(&ack["rev"]).await;
     assert_eq!(
         (&loaded["durationMs"], &loaded["now"]["title"], &loaded["now"]["coverArt"]),
-        (&json!(182_000), &json!("Song 2 (from the file)"), &json!("mf-s2_abc"))
+        (&json!(182_401), &json!("Song 2 (from the file)"), &json!("mf-s2_abc"))
     );
 
     // a remote's commands change the one session; the active device stays the PC

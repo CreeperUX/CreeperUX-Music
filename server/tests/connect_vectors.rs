@@ -98,5 +98,52 @@ fn the_vectors_replay_exactly() {
         }
         cases += 1;
     }
-    assert_eq!((cases, steps), (14, 157), "the whole file");
+    assert_eq!((cases, steps), (15, 172), "the whole file");
+}
+
+/// What production showed (Windows 0.6.0, two PCs): after a gapless change the active device's engine reported
+/// `loaded` with the previous song's duration, and every position of the new, longer song was held at it.
+#[test]
+fn a_loaded_with_the_previous_songs_duration_neither_changes_the_duration_nor_holds_the_position() {
+    let song = |ms: i64| Song { title: Some("x".into()), artist: None, album: None, album_id: None, cover_art: None, duration_ms: Some(ms) };
+    let library = Vectors(HashMap::from([("short".to_string(), song(230_000)), ("long".to_string(), song(285_000))]));
+    let mut random = |_: usize| 0;
+    let mut session = ConnectSession::new(10_000, MAX_DEVICES);
+    macro_rules! at {
+        ($now:expr) => {
+            Env { now: $now, random: &mut random, library: &library }
+        };
+    }
+    let hello = json!({ "type": "hello", "deviceId": "pc-study-01", "name": "PC", "kind": "desktop", "canPlay": true, "client": "test" });
+    session.hello(&mut at!(0), &hello);
+    let play = json!({ "type": "command", "action": "playContext", "ids": ["short", "long"], "startId": "short" });
+    session.message(&mut at!(1_000), "pc-study-01", &play);
+    let report = |session: &ConnectSession, event: &str, fields: Value| {
+        let mut r = json!({ "type": "report", "event": event, "key": session.session()["current"]["key"], "rev": session.session()["rev"] });
+        r.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+        r
+    };
+    let r = report(&session, "playing", json!({ "positionMs": 0 }));
+    session.message(&mut at!(1_100), "pc-study-01", &r);
+    // the end of the first song: the device goes on to the second at once, and its engine still says 230 s
+    let r = report(&session, "ended", json!({ "positionMs": 230_000 }));
+    session.message(&mut at!(231_100), "pc-study-01", &r);
+    assert_eq!(session.session()["current"]["trackId"], "long");
+    assert_eq!(session.session()["durationMs"], 285_000);
+    let r = report(&session, "loaded", json!({ "positionMs": 0, "durationMs": 230_000 }));
+    session.message(&mut at!(231_200), "pc-study-01", &r);
+    assert_eq!(session.session()["durationMs"], 285_000, "the library's duration stands");
+    let r = report(&session, "position", json!({ "positionMs": 240_000 }));
+    session.message(&mut at!(471_200), "pc-study-01", &r);
+    assert_eq!(session.session()["positionMs"], 240_000, "not held at the previous song's 230 s");
+    assert_eq!(session.position_at(511_200), 280_000, "and it moves on");
+    // the file is a little longer than the library says: the device's position is taken, and held there at most
+    let r = report(&session, "position", json!({ "positionMs": 286_500 }));
+    session.message(&mut at!(517_700), "pc-study-01", &r);
+    assert_eq!(session.session()["positionMs"], 286_500);
+    assert_eq!(session.position_at(530_000), 286_500);
+    // a remote's seek stays within the library's duration
+    let seek = json!({ "type": "command", "action": "seek", "positionMs": 400_000 });
+    session.message(&mut at!(518_000), "pc-study-01", &seek);
+    assert_eq!(session.session()["positionMs"], 285_000);
 }

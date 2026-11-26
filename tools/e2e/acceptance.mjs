@@ -95,13 +95,15 @@ function quiet(app) {
 }
 // exceptions the app caught and logged (deferred UI work goes through UiThread, which logs "[ui] … failed") or survived
 // (Application.UnhandledException): none may appear. 0.6.2's x64 build once failed fast on such an exception, unlogged.
+// Nor may a wait on the UI thread that lasted a second and then pumped (UiSynchronizationContext: "[ui] waited … without
+// pumping"): the window stood still that long, and a call into the UI thread could again run in the middle of a layout.
 const logRead = new Map(); // data folder → how much of its log the last check read
 function noExceptions(app) {
   let text = '';
   try { text = readFileSync(join(app.data, 'app.log'), 'utf8'); } catch { return; }
   const seen = logRead.get(app.data) ?? 0, from = seen <= text.length ? seen : 0; // a fresh data folder starts a new log
   logRead.set(app.data, text.length);
-  const bad = text.slice(from).split(/\r?\n/).filter(l => /\[ui\] .* failed:|Unhandled:|\[crash\]|\[background\]|\[engine ui\]/.test(l));
+  const bad = text.slice(from).split(/\r?\n/).filter(l => /\[ui\] .* failed:|\[ui\] waited \d+ ms without pumping|Unhandled:|\[crash\]|\[background\]|\[engine ui\]/.test(l));
   const first = bad[0]?.slice(24, 240);
   results.push({ round: current, name: bad.length ? `日志里有 ${bad.length} 个异常：${first}` : '日志里没有异常', ok: bad.length === 0 });
   log(`  ${bad.length ? '✗' : '✓'} 日志里${bad.length ? `有 ${bad.length} 个异常：${first}` : '没有异常'}`);
@@ -873,6 +875,8 @@ try {
       await signIn(app);
       await until(async () => (await app.send('ready')) === 'yes', 'ready', 30000);
       assert((await state()).services === 1, `会话数 ${(await state()).services}`);
+      // the UI thread's waits still do not pump after signing in again (0.6.2's crash came at this point)
+      assert((await state()).syncContext === 'UiSynchronizationContext', `UI 线程的 SynchronizationContext 是 ${(await state()).syncContext}`);
       await app.send(`do play album ${cat.playable.id} 0`);
       await until(async () => (await state()).engine === 'Playing', 'plays');
       await app.send('do pause');

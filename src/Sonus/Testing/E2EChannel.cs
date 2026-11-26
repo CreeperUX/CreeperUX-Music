@@ -111,6 +111,18 @@ internal static class E2EChannel
         return ran < 0 ? "error: the call did not run" : $"{(ran < acquired ? "during" : "after")} the wait (call at {ran} ms, lock at {acquired} ms)";
     }
 
+    private static string LongWait()
+    {
+        var gate = new object();
+        using var held = new ManualResetEventSlim();
+        var holder = new Thread(() => { lock (gate) { held.Set(); Thread.Sleep(1500); } }) { IsBackground = true };
+        holder.Start();
+        held.Wait();
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        lock (gate) { }
+        return $"waited {clock.ElapsedMilliseconds} ms";
+    }
+
     private static readonly Guid IidContextCallback = new("000001da-0000-0000-C000-000000000046");
     // what CsWinRT passes for its calls into a context (Context.CallInContext)
     private static readonly Guid IidCallbackWithNoReentrancyToApplicationSta = new("0A299774-3E4E-FC42-1D9D-72CEE105CA57");
@@ -252,6 +264,9 @@ internal static class E2EChannel
             "insets" => W is { } wi && wi.Content is FrameworkElement ri ? FormattableString.Invariant($"left {wi.AppWindow.TitleBar.LeftInset} right {wi.AppWindow.TitleBar.RightInset} scale {ri.XamlRoot.RasterizationScale} width {ri.ActualWidth}") : "error: no window",
             // where the window buttons begin, the top bar's clickable parts and where its end's buttons are (window pixels)
             "titlebar" => W?.TitleBarState() ?? "error: no window",
+            // by hand only: the UI thread waits 1.5 s for a lock another thread holds, so UiSynchronizationContext logs its
+            // "[ui] waited … without pumping" line and pumps (acceptance fails on that line, by design)
+            "longwait" => LongWait(),
             "close" => W is { } wc && PostMessage(WinRT.Interop.WindowNative.GetWindowHandle(wc), 0x0010, IntPtr.Zero, IntPtr.Zero) ? "closing" : "error: no window",
             _ => "error: unknown command " + command,
         };
@@ -265,6 +280,7 @@ internal static class E2EChannel
         var m = M;
         return JsonSerializer.Serialize(new
         {
+            syncContext = SynchronizationContext.Current?.GetType().Name, // UiSynchronizationContext, also after signing in again
             ready = W?.Ready == true, route = W?.Route, title = W?.Title, view = W?.CurrentView?.GetType().Name,
             track = m?.Queue.Current, trackTitle = m?.Current?.Title, state = m?.State.ToString(), error = m?.Error, position = m?.Position, duration = m?.Duration,
             engine = m?.Engine.State.ToString(), engineTrack = m?.Engine.CurrentId, engineNext = m?.Engine.NextId, enginePosition = m?.Engine.Position, engineDuration = m?.Engine.Duration, volume = m?.Engine.Volume,

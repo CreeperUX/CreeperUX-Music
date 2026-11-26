@@ -52,6 +52,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { apiSecret, appendParams, authParams, API_VERSION } from './lib/subsonic.mjs';
+import { cargoRunArgs } from './lib/cargo.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
@@ -417,7 +418,7 @@ async function runGateway({ env, cwd, port, ready, release = false }) {
   // the caller's own ND_ and SONUS_ variables stay out, as for the Navidrome the tests run
   const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(ND_|SONUS_)/i.test(k)));
   const all = { ...clean, SONUS_LOG: process.env.SONUS_LOG ?? 'warn', ...env, ND_ADDRESS: '127.0.0.1', ND_PORT: String(port) };
-  const proc = spawn('cargo', ['run', '--quiet', ...(release ? ['--release'] : []), '--manifest-path', join(root, 'server', 'Cargo.toml')], { cwd, env: all, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  const proc = spawn('cargo', cargoRunArgs(join(root, 'server', 'Cargo.toml'), { release }), { cwd, env: all, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   let log = '';
   proc.stdout.on('data', d => { log += d; }); proc.stderr.on('data', d => { log += d; });
   const exited = new Promise(done => proc.once('exit', done));

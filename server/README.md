@@ -607,6 +607,79 @@ daily manifest maps the opaque object names to library paths, and a restore comm
 > replaces the good copy. Navidrome's database (users, stars, playlists, plays) is not mirrored. Keep a real backup
 > as well; the mirror is one more way back after a disk fails.
 
+**R2-a: uploads only** (`src/mirror/`). Nobody is sent to the bucket yet (that is R2-b); the server keeps the bucket
+in step with the library.
+
+| Setting | |
+|---|---|
+| `SONUS_R2_ACCOUNT_ID` | The Cloudflare account: the bucket is reached at `https://<id>.r2.cloudflarestorage.com` |
+| `SONUS_R2_ENDPOINT` | Instead of the account: another S3-compatible store, `https://…`, or `http://` on this machine only (a local test server) |
+| `SONUS_R2_BUCKET` | The private bucket |
+| `SONUS_R2_ACCESS_KEY_ID`, `SONUS_R2_SECRET_ACCESS_KEY` | A token for this bucket alone, with object read and write. The secret may come from a file instead, `SONUS_R2_SECRET_ACCESS_KEY_FILE` (for example `/data/r2-secret`, mode 600) |
+| `SONUS_R2_UPLOAD_RATE` | Default `2MB` (a second); `0`: no cap |
+| `SONUS_R2_UPLOAD_HOURS` | Default `00:00-07:00`, the server's time zone; `all`: any time. An upload under way at the end is finished |
+| `SONUS_R2_DAILY_UPLOAD` | Default `20GB`; `0`: no cap. A file larger than the cap still goes, alone, on a day of its own |
+| `SONUS_R2_REGION` | Default `auto` (R2's) |
+
+- **Off by default.** With none of the bucket's four settings, nothing of the mirror runs, and the server does what it
+  did before. With some but not all of them, the server stops at start and names the missing ones. Its errors never
+  show a key.
+- **The ledger** is the server's own database file, `sonus-mirror.db` in Navidrome's data folder (never Navidrome's
+  database). One row for each object: pending, uploaded, or deleting. If the file is lost, everything is uploaded
+  again, and nothing else is lost.
+- **Object names say nothing about the music.**
+  - A song is `m/<song id>/<version>`. The version is the first 16 hex digits of `sha256("<size>|<mtime in ns>")` of
+    the file itself, so a rescan that rewrites Navidrome's rows uploads nothing.
+  - A cover original is `a/<its hash>`.
+- **Reconciliation** runs at start and every 15 minutes.
+  - New files and covers are added.
+  - When a file changes, its new version goes up. The old version is deleted after the grace time, and never before
+    the new one is up.
+  - Files the library loses (missing, deleted, or unreadable, as when the music folder is not mounted) are deleted
+    from the bucket after **7 days**. If one returns within that time, it is kept.
+- **Uploads** go one at a time: covers first, then songs.
+  - Each upload is paced by the rate, starts only within the hours, and stops at the day's cap.
+  - S3 checks each upload against its SHA-256. Files over 100 MB go up in 16 MB parts; an abandoned upload is
+    aborted, and the bucket's lifecycle rule clears what is left.
+  - Each file is checked unchanged before and after its upload. Its size in the bucket is checked afterwards.
+  - Failures wait longer each time. After 5 a file is left for the daily check, which tries it again.
+- **The health check** reads one small object (`health`) every minute, and writes it once if it is not there. While
+  the bucket does not answer, or refuses the keys, nothing is uploaded or deleted. Each change is logged once.
+- **The daily check** lists the whole bucket against the ledger.
+  - Uploaded objects the bucket lacks, or holds at another size, are uploaded again.
+  - Songs and covers the ledger does not know are deleted after the grace time.
+  - Other names (`health`, and later parts' `manifest/` and `r/`) are left alone.
+- **HTTPS** is rustls with ring and Mozilla's roots compiled in: the `tls` feature, on by default.
+  - ring needs clang to build on Windows on ARM. There, build and test with `--no-default-features`: the mirror then
+    reaches `http://` on this machine only, which is all its tests need.
+  - The image and CI build with TLS.
+- **Signing** is SigV4, written here (`mirror/sigv4.rs`). It is tested against AWS's published S3 examples (GET with
+  a range, PUT, `?lifecycle`, a listing, a presigned GET), not against itself. Requests are signed in the
+  `Authorization` header, and nothing logs headers, signatures or keys.
+- **Tested** against a fake S3 on 127.0.0.1 (`tests/common/fake_s3.rs`). Like S3, it checks:
+  - each signature with the test's own made-up keys;
+  - the time (within 15 minutes);
+  - each body against its signed hash.
+
+  Its listing pages are two objects long, and it can fail on demand (403, 503, failing PUTs). `tests/mirror.rs`
+  covers:
+  - uploads, single and in parts;
+  - a rescan that uploads nothing;
+  - changed, lost, returned and stray files, and the grace time;
+  - the hours and the cap;
+  - wrong keys, a refusing or absent bucket, and recovery;
+  - backing off and the daily retry;
+  - a lost ledger.
+
+  `tests/mirror_s3.rs` runs the client against a real S3-compatible server when one is given (`SONUS_MIRROR_S3_*`;
+  skipped otherwise, and in CI). On 2026-11-26 it passed against Versity's S3 gateway (versitygw 1.11.0, Windows on
+  ARM, on 127.0.0.1 with throwaway keys), which took every request:
+  - single and multipart uploads, the listing, HEAD and DELETE;
+  - a presigned GET, served whole, while the same link tampered with, or expired, was refused;
+  - wrong keys, refused with 403.
+
+  MinIO no longer publishes Windows builds. Not yet tried against real R2 (`docs/r2-mirror.md`, section 10).
+
 ## Sonus Connect version 2
 
 One playback session per user, as Spotify Connect has it: the protocol is `docs/protocol/connect.md`, and this server

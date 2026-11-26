@@ -568,6 +568,41 @@ name is the SHA-256 of the stream's key (the song's id and time, the bit rate, s
 and offset): nothing from the client names a file there. A cached entry is served like the song's own file (ranges,
 conditions). One writer per entry; a second request while it is written runs a transcode of its own, uncached.
 
+## The R2 mirror (uploads, part R2-a)
+
+**Off unless configured.** Without the bucket's settings (`SONUS_R2_*`), no code of `src/mirror/` runs. When some
+of them are set but not all, the server refuses to start.
+
+**The keys:**
+- They come from the environment, or the secret from its own file (with a warning on Unix when others can read it).
+- They are kept in memory only. Debug output says "(set)", and the errors never contain them.
+- Requests are signed in the `Authorization` header, and nothing logs headers or signatures.
+- The token the owner makes is scoped to the one bucket (object read and write), so a leaked token reaches that
+  bucket alone.
+
+**The connection:**
+- `https://` only, through rustls with Mozilla's roots.
+- Plain `http://` is refused unless the endpoint is this machine's own loopback address (local tests).
+- An endpoint with a user name, a path or a query is refused.
+
+**What goes out:**
+- The music files and the cover originals, under names that say nothing about them.
+- Nothing from Navidrome's database: no users, no paths, no titles. The R2-b manifest will carry paths, in the
+  private bucket.
+- Files are read only through the library's own rows: paths that leave their library folder (`inside_library`) and
+  song ids other than letters, digits and `-` are skipped.
+- Each body is checked by S3 against its SHA-256, and each file's size and time are checked before and after its
+  upload. A file that changes while it is read is not recorded as uploaded.
+
+**Deletions:**
+- Only the ledger's own songs and covers (`m/`, `a/`) are deleted, and only after 7 days out of the library.
+- A changed file's old version is never deleted before its new one is up.
+- Other names in the bucket are left alone.
+
+**The cost of mistakes:** uploads are capped by the day's bytes (20 GB by default), by the rate and by the hours.
+Failing files back off, and after 5 failures wait for the daily check. A refusal (401/403) stops everything until the
+health check passes again.
+
 
 ## Secrets
 

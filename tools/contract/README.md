@@ -21,6 +21,13 @@ node tools/contract/web-ui.check.mjs          # the old web UI, headless, throug
 node --test tools/contract/security/findings.test.mjs tools/contract/security/hardening.test.mjs   # the security review's findings and decisions
 ```
 
+**Building the Rust server.** The tools start it with `cargo run` (`lib/cargo.mjs`). Its default `tls` feature (the
+R2 mirror's HTTPS client) builds `ring`, which needs clang on Windows on ARM; where there is none, the tools build
+with `--no-default-features` on their own (the mirror then reaches loopback only, and no tool uses it). Nobody edits
+the tools for it: `SONUS_CARGO_NO_TLS=1` always leaves the feature out, `SONUS_CARGO_NO_TLS=0` always keeps it; unset,
+it is left out only on Windows on ARM without `clang` on `PATH`. CI builds and tests the server with the default
+features (`cargo test --locked`).
+
 ## Running the suite
 
 | Command | Against |

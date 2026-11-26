@@ -126,7 +126,15 @@ if (cmd === 'stop') {
   const pidFile = join(dir, 'server.pid');
   if (existsSync(pidFile)) {
     const pid = Number(readFileSync(pidFile, 'utf8'));
-    try { process.kill(pid); console.log(`stopped ${pid}`); } catch (e) { console.log(`${pid}: ${e.code}`); }
+    if (process.platform === 'win32') {
+      // with the Navidrome it started (killing the server alone leaves it running)
+      const { spawnSync } = await import('node:child_process');
+      const r = spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { encoding: 'utf8' });
+      console.log(r.status === 0 ? `stopped ${pid} and what it started` : `${pid}: ${r.stderr.trim()}`);
+    } else {
+      try { process.kill(-pid); } catch { try { process.kill(pid); } catch (e) { console.log(`${pid}: ${e.code}`); } }
+      console.log(`stopped ${pid}`);
+    }
     rmSync(pidFile, { force: true });
   }
 }

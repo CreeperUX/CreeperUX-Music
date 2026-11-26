@@ -11,6 +11,9 @@ public partial class App : Application
         InitializeComponent();
         // Logged and survived: losing the window (and the music playing) is worse than one action that did not finish
         UnhandledException += (_, e) => { Log.Write($"Unhandled: {e.Exception}"); e.Handled = true; };
+        // what gets past it is at least written down before the process ends (deferred UI work: UiThread)
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => Log.Write($"[crash] {e.ExceptionObject}");
+        TaskScheduler.UnobservedTaskException += (_, e) => { Log.Write($"[background] {e.Exception}"); e.SetObserved(); };
         Core.SubsonicClient.Slow = message => Log.Write($"[server] slow: {message}");
     }
 
@@ -26,6 +29,6 @@ public partial class App : Application
 
         // a second start of the app arrives here (Program redirects it): bring this window forward
         var ui = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
-        Microsoft.Windows.AppLifecycle.AppInstance.GetCurrent().Activated += (_, _) => ui.TryEnqueue(() => { if (!Testing.E2EChannel.Enabled) MainWindow?.AppWindow.Show(); MainWindow?.Activate(); });
+        Microsoft.Windows.AppLifecycle.AppInstance.GetCurrent().Activated += (_, _) => UiThread.Post(ui, "a second start", () => { if (!Testing.E2EChannel.Enabled) MainWindow?.AppWindow.Show(); MainWindow?.Activate(); });
     }
 }

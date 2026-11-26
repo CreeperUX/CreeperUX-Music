@@ -26,15 +26,15 @@ public sealed class ConnectService : IDisposable
         _push = ui.CreateTimer();
         _push.Interval = TimeSpan.FromMilliseconds(150); // a burst of changes (a new song: queue, state, position) is said once
         _push.IsRepeating = false;
-        _push.Tick += (_, _) => Push();
+        _push.Tick += (_, _) => UiThread.Run("connect push", Push);
         // version 1 only where the server offers no version 2 (SessionService speaks that)
         if (!ConnectClient.Supported(music.Client) || SessionClient.Supported(music.Client)) return;
 
         _client = new ConnectClient(music.Client, name);
-        _client.DevicesChanged += () => _ui.TryEnqueue(OnDevices);
-        _client.ConnectionChanged += _ => _ui.TryEnqueue(() => { Changed?.Invoke(); if (IsConnected) Schedule(); });
-        _client.CommandReceived += (from, command) => _ui.TryEnqueue(() => Carry(from, command));
-        _client.Failed += (_, message) => _ui.TryEnqueue(() => _music.RaiseToast(new(message, true)));
+        _client.DevicesChanged += () => UiThread.Post(_ui, "connect devices", () => { if (!_disposed) OnDevices(); });
+        _client.ConnectionChanged += _ => UiThread.Post(_ui, "connect connection", () => { if (_disposed) return; Changed?.Invoke(); if (IsConnected) Schedule(); });
+        _client.CommandReceived += (from, command) => UiThread.Post(_ui, "connect command", () => { if (!_disposed) Carry(from, command); });
+        _client.Failed += (_, message) => UiThread.Post(_ui, "connect error", () => { if (!_disposed) _music.RaiseToast(new(message, true)); });
         music.PlayerChanged += Schedule;
         music.QueueChanged += Schedule;
         music.PositionChanged += OnPosition;

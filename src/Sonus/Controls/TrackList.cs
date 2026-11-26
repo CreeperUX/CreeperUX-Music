@@ -182,16 +182,20 @@ public sealed class TrackList : UserControl
     {
         if (_jumped || !_page || !_list.IsLoaded || !_music.IsContext(ContextKind, ContextId) || PlayingRow() is not { } row) return;
         _jumped = true;
-        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        // later (the rows exist after a layout pass), and only while the list is still in the window: a page left (or a
+        // window rebuilt on signing in) meanwhile has nothing to scroll
+        UiThread.Post(DispatcherQueue, "opening the list at the playing song", () =>
         {
+            if (!_list.IsLoaded || _list.XamlRoot is null) return;
             _list.ScrollIntoView(row, ScrollIntoViewAlignment.Leading);
-            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+            UiThread.Post(DispatcherQueue, "centring the playing song", () =>
             {
-                if (Ui.Descendant<ScrollViewer>(_list) is not { } scroller || _list.ContainerFromItem(row) is not FrameworkElement item) return;
+                if (!_list.IsLoaded || _list.XamlRoot is null || Ui.Descendant<ScrollViewer>(_list) is not { } scroller
+                    || _list.ContainerFromItem(row) is not FrameworkElement { IsLoaded: true } item) return;
                 double y = item.TransformToVisual(scroller).TransformPoint(new Windows.Foundation.Point(0, 0)).Y;
                 scroller.ChangeView(null, Math.Max(0, scroller.VerticalOffset + y - (scroller.ViewportHeight - item.ActualHeight) / 2), null, disableAnimation: true);
-            });
-        });
+            }, Microsoft.UI.Dispatching.DispatcherQueuePriority.Low);
+        }, Microsoft.UI.Dispatching.DispatcherQueuePriority.Low);
     }
 
     /// <summary>The row of the song that plays: where the queue is in this context when the song is there (a song can be

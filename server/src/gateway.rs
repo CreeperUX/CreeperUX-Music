@@ -247,6 +247,7 @@ impl Gateway {
                         // the library's reads are answered here (library/mod.rs), unless it leaves one to Navidrome
                         if let Some(library) = self.inner.library.get().filter(|_| library::answers(subsonic_method)) {
                             let request = library::Request {
+                                client,
                                 method: subsonic_method,
                                 http_method: parts.method.as_str(),
                                 params: &params,

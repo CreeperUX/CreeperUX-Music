@@ -172,11 +172,78 @@ impl S3 {
 
     /// Puts a small object from memory.
     pub async fn put_bytes(&self, key: &str, body: Bytes, content_type: &str) -> Result<(), Error> {
+        self.put_bytes_with(key, body, &[("content-type".to_string(), content_type.to_string())]).await
+    }
+
+    /// Puts a small object from memory, with these headers (`content-type`, `cache-control`).
+    pub async fn put_bytes_with(&self, key: &str, body: Bytes, headers: &[(String, String)]) -> Result<(), Error> {
         let hash = sigv4::sha256_hex(&body);
         let length = body.len() as u64;
-        let headers = [("content-type".to_string(), content_type.to_string())];
-        let answer = self.send("PUT", Some(key), &[], &headers, Full::new(body).map_err(|never| match never {}).boxed(), &hash, length).await?;
+        let answer = self.send("PUT", Some(key), &[], headers, Full::new(body).map_err(|never| match never {}).boxed(), &hash, length).await?;
         ok(answer).await.map(|_| ())
+    }
+
+    /// A small object's bytes (a manifest), up to `limit`; none when there is no such object.
+    pub async fn get_bytes(&self, key: &str, limit: usize) -> Result<Option<Bytes>, Error> {
+        let answer = self.send("GET", Some(key), &[], &[], empty(), EMPTY_SHA256, 0).await?;
+        match answer.status() {
+            StatusCode::NOT_FOUND => Ok(None),
+            status if status.is_success() => {
+                let body = Limited::new(answer.into_body(), limit).collect().await.map_err(|e| Error::Transport(format!("the object was cut short: {e}")))?;
+                Ok(Some(body.to_bytes()))
+            }
+            _ => Err(failure(answer).await),
+        }
+    }
+
+    /// Downloads an object of `size` bytes into a new file at `path` (which must not be there), as it comes. Err
+    /// when the object is not that size; the file is then removed.
+    pub async fn get_to_file(&self, key: &str, path: &Path, size: u64) -> Result<(), Error> {
+        use tokio::io::AsyncWriteExt;
+        let answer = self.send("GET", Some(key), &[], &[], empty(), EMPTY_SHA256, 0).await?;
+        if !answer.status().is_success() {
+            return Err(failure(answer).await);
+        }
+        let file = |e: std::io::Error| Error::File(e.to_string());
+        let mut out = tokio::fs::OpenOptions::new().write(true).create_new(true).open(path).await.map_err(file)?;
+        let allowed = REQUEST_TIME + Duration::from_secs(size / SLOWEST_BYTES_PER_SECOND);
+        // the file is closed when this ends, before it may be removed (Windows removes no open file)
+        let copy = async move {
+            let mut body = answer.into_body();
+            let mut written = 0u64;
+            while let Some(frame) = body.frame().await {
+                let frame = frame.map_err(|e| Error::Transport(format!("the object was cut short: {e}")))?;
+                if let Ok(data) = frame.into_data() {
+                    written += data.len() as u64;
+                    if written > size {
+                        return Err(Error::Answer(format!("more than the {size} bytes listed")));
+                    }
+                    out.write_all(&data).await.map_err(file)?;
+                }
+            }
+            out.flush().await.map_err(file)?;
+            out.sync_all().await.map_err(file)?;
+            if written != size {
+                return Err(Error::Answer(format!("{written} bytes of the {size} listed")));
+            }
+            Ok(())
+        };
+        let result = match tokio::time::timeout(allowed, copy).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::Transport(format!("not done in {} s", allowed.as_secs()))),
+        };
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        result
+    }
+
+    /// A presigned link to an object, signed at `time` and good for `expires` seconds: the whole URL. It opens the
+    /// object to whoever holds it until then, so it is given to the one who asked and never logged.
+    pub fn presigned_url(&self, method: &str, key: &str, time: chrono::DateTime<Utc>, expires: u64) -> String {
+        let path = format!("/{}/{}", sigv4::encode_path(&self.bucket), sigv4::encode_path(key));
+        let query = self.signer.presign(method, &self.endpoint.authority, &path, time, expires);
+        format!("{}{path}?{query}", self.endpoint.origin())
     }
 
     /// Uploads the file as it is at `stamp`, at the rate's pace, and checks it went up whole. `Error::Changed` when

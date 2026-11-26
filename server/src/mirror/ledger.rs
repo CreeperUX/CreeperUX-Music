@@ -16,14 +16,21 @@ pub const FILE_NAME: &str = "sonus-mirror.db";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Song,
+    /// A cover's original (`a/<hash>`).
     Cover,
+    /// A cover resized for a client (`r/<…>`), uploaded when a client first asks for that size; its item is the
+    /// original's hash.
+    Resized,
 }
 
 impl Kind {
+    pub const ALL: [Kind; 3] = [Kind::Song, Kind::Cover, Kind::Resized];
+
     fn name(self) -> &'static str {
         match self {
             Kind::Song => "song",
             Kind::Cover => "cover",
+            Kind::Resized => "resized",
         }
     }
 
@@ -31,6 +38,17 @@ impl Kind {
         match name {
             "song" => Some(Kind::Song),
             "cover" => Some(Kind::Cover),
+            "resized" => Some(Kind::Resized),
+            _ => None,
+        }
+    }
+
+    /// The kind an object's key names.
+    pub fn of_key(key: &str) -> Option<Kind> {
+        match key.split_once('/')?.0 {
+            "m" => Some(Kind::Song),
+            "a" => Some(Kind::Cover),
+            "r" => Some(Kind::Resized),
             _ => None,
         }
     }
@@ -186,6 +204,12 @@ impl Ledger {
                     Change::Missing { key } => {
                         tx.execute("UPDATE sonus_r2_object SET state = 'pending', uploaded_at = NULL, failures = 0, next_try = 0 WHERE key = ?1", [key])?;
                     }
+                    Change::Adopt { key, at } => {
+                        tx.execute(
+                            "UPDATE sonus_r2_object SET state = 'uploaded', uploaded_at = ?2, failures = 0, next_try = 0 WHERE key = ?1 AND state = 'pending'",
+                            params![key, at],
+                        )?;
+                    }
                 }
             }
             tx.commit()
@@ -197,6 +221,18 @@ impl Ledger {
             conn.execute(
                 "UPDATE sonus_r2_object SET state = 'uploaded', uploaded_at = ?2, failures = 0, next_try = 0 WHERE key = ?1 AND state = 'pending'",
                 params![key, at],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// An object uploaded outside the reconciliation (a resized cover): `uploaded` from the start.
+    pub fn record_uploaded(&self, key: &str, kind: Kind, item: &str, size: u64, at: i64) -> Result<(), String> {
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO sonus_r2_object (key, kind, item, version, size, state, uploaded_at) VALUES (?1, ?2, ?3, '', ?4, 'uploaded', ?5)
+                 ON CONFLICT(key) DO UPDATE SET state = 'uploaded', size = excluded.size, uploaded_at = excluded.uploaded_at, gone_since = NULL",
+                params![key, kind.name(), item, size as i64, at],
             )
             .map(|_| ())
         })
@@ -253,6 +289,10 @@ pub enum Change {
     Missing { key: String },
     /// An object in the bucket the ledger does not know (the daily check): deleted after the grace time.
     Stray { key: String, kind: Kind, size: u64, since: i64 },
+    /// A `pending` object the bucket has already, at its size (a ledger lost, an upload whose end was not noted):
+    /// `uploaded` without uploading it again. The key names the file's size and time, so the same key and size
+    /// are the same file.
+    Adopt { key: String, at: i64 },
 }
 
 fn read_row(r: &rusqlite::Row) -> rusqlite::Result<Option<Row>> {

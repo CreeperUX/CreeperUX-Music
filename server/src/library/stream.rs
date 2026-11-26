@@ -83,6 +83,11 @@ pub fn stream(scope: &Scope) -> Result<Reply, QueryError> {
     };
     let request = transcode::resolve_request(song, format, max_bit_rate, &cx);
     if request.is_raw() {
+        // the file as it is: from the R2 mirror, for a client that asked and may be sent there, when the mirror has
+        // this very version of it
+        if let Some(link) = scope.mirror.filter(|_| scope.redirect).and_then(|mirror| mirror_link(mirror, song, scope.http_method)) {
+            return Ok(Reply::Redirect(link));
+        }
         return Ok(serve_raw(song, scope.http_method, scope.headers));
     }
     Ok(transcoded(song, &request, offset, scope, &find))
@@ -100,6 +105,16 @@ fn transcoding(conn: &rusqlite::Connection, column: &str, value: &str) -> Result
 /// Whether a song's stored path stays inside its library's folder: relative, without `..`.
 pub fn inside_library(path: &str) -> bool {
     !path.is_empty() && Path::new(path).components().all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
+}
+
+/// A presigned link to the song's file in the mirror: only when the mirror has the file's current version (its size
+/// and time now) uploaded.
+fn mirror_link(mirror: &crate::mirror::Mirror, song: &Song, method: &str) -> Option<String> {
+    if !inside_library(&song.path) || song.id.is_empty() || !song.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return None;
+    }
+    let stamp = crate::mirror::s3::Stamp::of(&file_of(song)).ok()?;
+    mirror.link(&format!("m/{}/{}", song.id, stamp.version()), Some(stamp.size), method)
 }
 
 /// `mf.AbsolutePath()`.

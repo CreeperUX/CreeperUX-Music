@@ -625,8 +625,8 @@ in step with the library.
   did before. With some but not all of them, the server stops at start and names the missing ones. Its errors never
   show a key.
 - **The ledger** is the server's own database file, `sonus-mirror.db` in Navidrome's data folder (never Navidrome's
-  database). One row for each object: pending, uploaded, or deleting. If the file is lost, everything is uploaded
-  again, and nothing else is lost.
+  database). One row for each object: pending, uploaded, or deleting. If the file is lost, the bucket is listed and
+  what is there already is adopted (R2-b, below); nothing else is lost.
 - **Object names say nothing about the music.**
   - A song is `m/<song id>/<version>`. The version is the first 16 hex digits of `sha256("<size>|<mtime in ns>")` of
     the file itself, so a rescan that rewrites Navidrome's rows uploads nothing.
@@ -636,7 +636,8 @@ in step with the library.
   - When a file changes, its new version goes up. The old version is deleted after the grace time, and never before
     the new one is up.
   - Files the library loses (missing, deleted, or unreadable, as when the music folder is not mounted) are deleted
-    from the bucket after **7 days**. If one returns within that time, it is kept.
+    from the bucket after **7 days**. If one returns within that time, it is kept. When much goes at once, the brake
+    holds the deletions (R2-b, below).
 - **Uploads** go one at a time: covers first, then songs.
   - Each upload is paced by the rate, starts only within the hours, and stops at the day's cap.
   - S3 checks each upload against its SHA-256. Files over 100 MB go up in 16 MB parts; an abandoned upload is
@@ -648,7 +649,7 @@ in step with the library.
 - **The daily check** lists the whole bucket against the ledger.
   - Uploaded objects the bucket lacks, or holds at another size, are uploaded again.
   - Songs and covers the ledger does not know are deleted after the grace time.
-  - Other names (`health`, and later parts' `manifest/` and `r/`) are left alone.
+  - Other names (`health`, `manifest/`) are left alone.
 - **HTTPS** is rustls with ring and Mozilla's roots compiled in: the `tls` feature, on by default.
   - ring needs clang to build on Windows on ARM. There, build and test with `--no-default-features`: the mirror then
     reaches `http://` on this machine only, which is all its tests need.
@@ -679,6 +680,87 @@ in step with the library.
   - wrong keys, refused with 403.
 
   MinIO no longer publishes Windows builds. Not yet tried against real R2 (`docs/r2-mirror.md`, section 10).
+
+**R2-b: clients are sent to the bucket; the manifest and the restore** (`src/mirror/links.rs`, `manifest.rs`,
+`cli.rs`; `library/stream.rs`, `library/media.rs`). Still off until the bucket's settings are given.
+
+| Setting | |
+|---|---|
+| `SONUS_R2_REDIRECT` | `away` (default): only clients outside the home networks; `always`; `never` (the mirror only uploads) |
+| `SONUS_R2_HOME_NETWORKS` | Default the LAN's private ranges and this machine: `10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, ::1/128, fc00::/7, fe80::/10`. The client's address is the one the gateway decides (`trust.rs`): behind a trusted proxy, its `X-Forwarded-For` |
+| `SONUS_R2_LINK_LIFETIME` | Default `1h`; `30m`, `2h`, or seconds (1 minute to 6 days) |
+| `SONUS_R2_DELETE_BRAKE` | Default `10%`; `off`. More of the songs and covers than this gone at once (and more than 20): nothing is deleted until the owner says so |
+
+- **Redirects.** `stream` and `getCoverArt` answer `302 Found` to a presigned link (SigV4 query signing, `GET` or
+  `HEAD` as asked) when all of these hold; otherwise they answer as before:
+  - the client asks for it: `sonusMirror=1` (only new Sonus clients send it; anything else is untouched, and a
+    client that fails to follow falls back with `sonusMirror=0`);
+  - the policy allows it from the client's address (away from home by default);
+  - the bucket answered the last health check;
+  - for a song: the file as it is (no transcode; DSF and APE, which are always transcoded, never go), and the ledger
+    has its current version (the file's size and time now) uploaded;
+  - for a cover: a settled picture (not a disc's, looked for at the time), as it is (`a/<hash>`) or at the size asked
+    (`r/<sha256 of its representation tag>`), uploaded; a client whose `If-None-Match` matches still gets the 304
+    from here.
+
+  The answer carries the player's cookie as a stream does, `Cache-Control: no-store` and `Referrer-Policy:
+  no-referrer`. Links are signed on the hour, so one object has one link for the hour (picture caches hit), and hold
+  at least their lifetime (at most an hour more). Sign-in and the user's right to the song or picture are checked
+  first, as for any request: a user who may not see it learns nothing of the mirror.
+- **Resized covers** go up when a client first gets that size (made here, or found in a cache): offered to a queue of
+  64, uploaded one at a time within the upload hours (one offered outside them is offered again when asked for again),
+  and recorded in the ledger as `resized`. They go with their original: when the picture is no longer the library's,
+  they are deleted after the grace time. The daily check forgets one the bucket lost (it is uploaded again when asked
+  for).
+- **A lost ledger costs nothing but a listing.** On a new ledger the first round checks the bucket before it uploads:
+  an object already there under the key the ledger waits for, at its size, is adopted as uploaded. The key names the
+  file's size and time, so the same key and size are the same file. An upload whose end was not noted is adopted the
+  same way.
+- **The deletion brake.** The mirror is the owner's backup too: when more than `SONUS_R2_DELETE_BRAKE` of the songs and
+  covers (and more than 20) are gone at once (a disk not mounted, a folder renamed), nothing is deleted from the bucket,
+  however long it lasts, and a warning says so once. Files that come back are kept, and nothing is uploaded again. When
+  they are gone for good, `sonus-server r2-allow-deletions` lets go of what is gone by then: deleted after its grace
+  time. What goes later is held again while the brake holds. The warning is repeated once a day while it holds, with
+  the count and the command. Only what is really gone counts and is held: a replaced version (a song retagged, copied
+  or rewritten, still in the library) goes after its grace time once its new version is up, as before, however many
+  there are. Resized covers are not held either (they are made again).
+- **Behind a reverse proxy**, the proxy must be in `ExtAuth.TrustedSources` (Navidrome's setting, which the gateway
+  reads): otherwise every client has the proxy's private address, counts as at home, and nobody is ever sent to the
+  mirror. That is safe, but the redirects then silently do nothing. Tailscale and other CGNAT addresses
+  (`100.64.0.0/10`) are not home by default: add them to `SONUS_R2_HOME_NETWORKS` if those clients should be served
+  from home.
+- **The daily manifest** `manifest/<day>.json.gz` (after the daily check): each song and cover file the bucket has,
+  with its library and its path inside the library's folder (`/` between folders) and its size. Covers are listed
+  where they are files in the album folders (`cover.jpg`); a picture Navidrome took out of a song is not (the song
+  brings it back). The last 14 are kept. It names artists and titles, so it is in the private bucket only, never in a
+  log.
+- **Restore**: `sonus-server r2-restore --to <folder> [--manifest <YYYY-MM-DD>] [--library <id>]`, with the server's
+  own settings (environment, config file, flags), beside it or on another machine.
+  - It takes the latest manifest (or the day's), and downloads each file to its path inside `<folder>`. With several
+    libraries in the manifest, `--library` names one.
+  - A file there already at its size is skipped, so a restore cut short goes on where it stopped. A download goes to
+    `<name>.sonus-restore` first, its size is checked, then it is renamed into place.
+  - Each path is checked: plain names only (no `..`, no root, no drive, and no folder that leads out of `<folder>`
+    through a link).
+  - It prints counts, and the keys of the files it could not restore (it exits 1 then: run it again to retry them).
+  - Afterwards, let Navidrome rescan. Users, stars, playlists and plays are in Navidrome's database, which is not in
+    the bucket.
+- **Tested** against the fake S3, which now also serves objects, and presigned links as S3 checks them (the query as
+  signed, the method, the expiry; ranges):
+  - `tests/library.rs`: the redirects through the gateway (each condition, and each case that stays home: not asked,
+    `sonusMirror=0`, a transcode, a user without the right, the bucket down, a file changed since its upload, a client
+    at home); the link followed, whole and by range; a HEAD link refused for a GET; covers as they are and resized,
+    the 304 kept, resized covers offered once.
+  - `tests/mirror.rs`: adoption after a lost ledger (and not at another size), the brake (a few files deleted as
+    before; a whole disk held past the grace time, kept when it is back, let go by the owner, a later loss held; the
+    warning once a day; a whole library retagged, its old versions deleted after the grace time, unbraked), the
+    manifest (what is up, where it belongs, 14 kept) and a restore from it (whole, then going on after a file cut
+    short, a missing object and a path that would leave the folder refused, nothing left half-written), resized covers
+    up and gone with their original.
+  - Every log line of those runs, at every level, is searched for the keys, the signatures and the links: none is
+    there (`tests/common/logs.rs`).
+  - `tests/mirror_s3.rs` against versitygw again on 2026-11-26: links on the hour, a range, a HEAD link (refused for a
+    GET), object downloads whole, a download of the wrong size refused and removed. Not yet tried against real R2.
 
 ## Sonus Connect version 2
 

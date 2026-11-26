@@ -47,12 +47,12 @@ public sealed class MusicService : IDisposable
         client.ConnectionChanged += OnConnection;
         _tick = ui.CreateTimer();
         _tick.Interval = TimeSpan.FromMilliseconds(250);
-        _tick.Tick += (_, _) => OnTick();
+        _tick.Tick += (_, _) => UiThread.Run("the player's tick", OnTick);
         _tick.Start();
         ReplayGain = settings.ReplayGain;
     }
 
-    private void OnConnection(object? sender, bool online) => _ui.TryEnqueue(() => { if (_disposed) return; IsOnline = online; ConnectionChanged?.Invoke(); });
+    private void OnConnection(object? sender, bool online) => UiThread.Post(_ui, "server reachable", () => { if (_disposed) return; IsOnline = online; ConnectionChanged?.Invoke(); });
 
     /// <summary>Stops everything this session runs (the player, its thread, the timers) and lets go of the window's handlers:
     /// a signed-out or failed session must not keep playing or saving the queue.</summary>
@@ -530,14 +530,14 @@ public sealed class MusicService : IDisposable
         _saveTimer.Start();
     }
 
-    private void SaveNow(DispatcherQueueTimer sender, object args)
+    private void SaveNow(DispatcherQueueTimer sender, object args) => UiThread.Run("saving the queue", () =>
     {
         if (_disposed || Queue.Current is not { } current) return;
         _savedAt = DateTimeOffset.Now;
         var ids = Queue.ForServer();
         double at = Engine.CurrentId == current ? Engine.Position : Position;
         _ = Quietly(() => Client.SavePlayQueueAsync(ids, current, at));
-    }
+    });
 
     /// <summary>Saves the queue now (the window is closing).</summary>
     public async Task SaveQueueNowAsync()

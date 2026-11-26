@@ -84,7 +84,7 @@ public sealed partial class MainWindow : Window, IShell
             if (!e.DidSizeChange && !e.DidPresenterChange) return;
             FitTopBar();
             // the window buttons' room (RightInset) can settle after the change itself (maximizing): fit again then
-            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, FitTopBar);
+            UiThread.Post(DispatcherQueue, "fitting the top bar", FitTopBar, Microsoft.UI.Dispatching.DispatcherQueuePriority.Low);
         };
         RootGrid.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(OnPointerPressed), true);
         RootGrid.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(OnKeyDown), true);
@@ -349,7 +349,7 @@ public sealed partial class MainWindow : Window, IShell
         music.Toast += ShowToast;
         music.PlayerChanged += () => { if (_route == "lyrics") SyncBarPanel(lyrics: true); };
         Fit();
-        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, FitTopBar); // once the new parts are measured
+        UiThread.Post(DispatcherQueue, "fitting the top bar", FitTopBar, Microsoft.UI.Dispatching.DispatcherQueuePriority.Low); // once the new parts are measured
     }
 
     private void SearchTick(object? sender, object e)

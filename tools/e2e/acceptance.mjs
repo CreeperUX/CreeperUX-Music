@@ -46,6 +46,20 @@ function quiet(app) {
   const q = app.quiet();
   results.push({ round: current, name: `静默：${q}`, ok: q.startsWith('QUIET') });
   log(`  ${q.startsWith('QUIET') ? '✓' : '✗'} 静默检查：${q}`);
+  noExceptions(app);
+}
+// exceptions the app caught and logged (deferred UI work goes through UiThread, which logs "[ui] … failed") or survived
+// (Application.UnhandledException): none may appear. 0.6.2's x64 build once failed fast on such an exception, unlogged.
+const logRead = new Map(); // data folder → how much of its log the last check read
+function noExceptions(app) {
+  let text = '';
+  try { text = readFileSync(join(app.data, 'app.log'), 'utf8'); } catch { return; }
+  const seen = logRead.get(app.data) ?? 0, from = seen <= text.length ? seen : 0; // a fresh data folder starts a new log
+  logRead.set(app.data, text.length);
+  const bad = text.slice(from).split(/\r?\n/).filter(l => /\[ui\] .* failed:|Unhandled:|\[crash\]|\[background\]|\[engine ui\]/.test(l));
+  const first = bad[0]?.slice(24, 240);
+  results.push({ round: current, name: bad.length ? `日志里有 ${bad.length} 个异常：${first}` : '日志里没有异常', ok: bad.length === 0 });
+  log(`  ${bad.length ? '✗' : '✓'} 日志里${bad.length ? `有 ${bad.length} 个异常：${first}` : '没有异常'}`);
 }
 
 // ---------------------------------------------------------------- build, the server, the first instance

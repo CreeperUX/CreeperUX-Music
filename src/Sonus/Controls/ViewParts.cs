@@ -94,7 +94,7 @@ public abstract class View : UserControl
         var over = new Border { Background = Ui.Tint(c), Opacity = Motion.Enabled ? 0 : 1 };
         Motion.OpacityFade(over, Motion.Tint);
         layer.Child = over;
-        over.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => over.Opacity = 1);
+        UiThread.Post(over.DispatcherQueue, "the page tint", () => over.Opacity = 1, Microsoft.UI.Dispatching.DispatcherQueuePriority.Low);
     }
 }
 

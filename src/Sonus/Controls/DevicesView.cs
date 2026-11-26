@@ -38,10 +38,20 @@ public sealed class DevicesView : UserControl
         Grid.SetRow(footer, 1); root.Children.Add(footer);
         AutomationProperties.SetName(root, "连接到设备");
         Content = root;
-        if (session is not null) session.Changed += Refresh;
-        connect.Changed += Refresh;
-        music.PlayerChanged += Refresh;
-        Loaded += (_, _) => Refresh(force: true);
+        // subscribed while it is in the window: the services it shows go away on signing out
+        Loaded += (_, _) =>
+        {
+            if (session is not null) { session.Changed -= Refresh; session.Changed += Refresh; }
+            connect.Changed -= Refresh; connect.Changed += Refresh;
+            music.PlayerChanged -= Refresh; music.PlayerChanged += Refresh;
+            Refresh(force: true);
+        };
+        Unloaded += (_, _) =>
+        {
+            if (session is not null) session.Changed -= Refresh;
+            connect.Changed -= Refresh;
+            music.PlayerChanged -= Refresh;
+        };
     }
 
     private void Refresh() => Refresh(force: false);

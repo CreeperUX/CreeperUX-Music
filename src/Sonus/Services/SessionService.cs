@@ -32,17 +32,17 @@ public sealed class SessionService : IDisposable
             Resume = ResumeState,
             VolumeNow = () => (_music.Volume, _music.Muted),
         };
-        _client.ConnectionChanged += on => _ui.TryEnqueue(() => OnConnection(on));
-        _client.SessionChanged += () => _ui.TryEnqueue(Apply);
-        _client.QueueChanged += () => _ui.TryEnqueue(Apply);
-        _client.DevicesChanged += () => _ui.TryEnqueue(() => { if (!_disposed) Changed?.Invoke(); });
-        _client.VolumeAsked += (volume, muted, _) => _ui.TryEnqueue(() =>
+        _client.ConnectionChanged += on => UiThread.Post(_ui, "session connection", () => OnConnection(on));
+        _client.SessionChanged += () => UiThread.Post(_ui, "session", Apply);
+        _client.QueueChanged += () => UiThread.Post(_ui, "session queue", Apply);
+        _client.DevicesChanged += () => UiThread.Post(_ui, "session devices", () => { if (!_disposed) Changed?.Invoke(); });
+        _client.VolumeAsked += (volume, muted, _) => UiThread.Post(_ui, "session volume", () =>
         {
             if (_disposed) return;
             if (muted is { } m) _music.SetMuted(m);
             if (volume is { } v) _music.SetVolume(v);
         });
-        _client.Failed += (code, message) => _ui.TryEnqueue(() => OnError(code, message));
+        _client.Failed += (code, message) => UiThread.Post(_ui, "session error", () => OnError(code, message));
         music.AttachSession(this);
         music.PlayerChanged += SayVolume;
         music.ConnectionChanged += OnServerReachable;

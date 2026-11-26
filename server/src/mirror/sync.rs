@@ -34,6 +34,14 @@ const HEALTH_BODY: &[u8] = b"Sonus mirror health check\n";
 const CACHE_CONTROL: &str = "private, max-age=31536000, immutable";
 /// The ledger's note of the day the whole bucket was last checked.
 const CHECKED_NOTE: &str = "full_check_day";
+/// The ledger's note of the day the last manifest went up.
+const MANIFEST_NOTE: &str = "manifest_day";
+/// The ledger's note of when the owner let the deletions held by the brake go (seconds since 1970): what was gone
+/// by then may be deleted.
+pub const RELEASED_NOTE: &str = "deletions_released_at";
+/// The brake holds only when more than this many files are gone at once (a handful in a small library is no sign
+/// of a disk gone missing).
+pub const BRAKE_MIN_FILES: usize = 20;
 
 /// An object the library has now: where its file is, and what it is.
 #[derive(Clone, Debug)]
@@ -44,12 +52,17 @@ pub struct Wanted {
     pub version: String,
     pub path: PathBuf,
     pub content_type: String,
+    /// Where it belongs in the library, for a restore: the library's id and the path inside its folder, `/`
+    /// between the folders (a song's own; a cover's pictures in the album folders; none for a picture Navidrome
+    /// took out of a song).
+    pub restore: Vec<(i64, String)>,
 }
 
 /// What has been logged already, to say a lasting condition once.
 #[derive(Default)]
 pub struct Said {
     capped_day: Option<String>,
+    braked: bool,
 }
 
 pub struct Worker {
@@ -60,6 +73,8 @@ pub struct Worker {
     pub rate: Arc<Rate>,
     pub hours: Option<Hours>,
     pub daily_upload: u64,
+    /// The share of the songs and covers that may be gone at once before deletions wait for the owner.
+    pub delete_brake: Option<f64>,
     pub health: Arc<Health>,
     /// The time, in the server's time zone.
     pub clock: Arc<dyn Fn() -> DateTime<FixedOffset> + Send + Sync>,
@@ -106,12 +121,22 @@ impl Worker {
             }
             if self.health.ok() {
                 let today = (self.clock)().date_naive().to_string();
+                // (a new ledger has no note: the first round checks the bucket, and adopts what is there already,
+                // before anything is uploaded)
                 if self.ledger.note(CHECKED_NOTE).ok().flatten().as_deref() != Some(today.as_str()) {
                     match self.check_bucket().await {
                         Ok(()) => {
                             let _ = self.ledger.set_note(CHECKED_NOTE, &today);
                         }
                         Err(e) => warn!("R2 mirror: cannot check the bucket: {e}"),
+                    }
+                }
+                if self.ledger.note(MANIFEST_NOTE).ok().flatten().as_deref() != Some(today.as_str()) {
+                    match self.put_manifest().await {
+                        Ok(()) => {
+                            let _ = self.ledger.set_note(MANIFEST_NOTE, &today);
+                        }
+                        Err(e) => warn!("R2 mirror: cannot put the day's manifest up: {e}"),
                     }
                 }
                 self.delete_due().await;
@@ -164,21 +189,72 @@ impl Worker {
                 }
             }
         }
+        // a resized cover goes with its original
+        for row in self.ledger.rows(Kind::Resized)? {
+            if row.state != State::Deleting && !wanted.contains_key(&format!("a/{}", row.item)) {
+                changes.push(Change::Gone { key: row.key, since: now });
+            }
+        }
         self.ledger.apply(&changes)?;
         *self.known.lock().expect("the known objects' lock") = wanted;
         Ok(counts)
     }
 
+    /// Whether the deletions are held: more of the songs and covers gone than the brake allows (a disk not mounted,
+    /// a library folder moved). Then only what was gone when the owner let them go is deleted (and resized covers,
+    /// which are made again when asked for). Returns the time up to which gone objects may be deleted.
+    fn brake(&self) -> Result<Option<i64>, String> {
+        let Some(share) = self.delete_brake else { return Ok(None) };
+        let (mut gone, mut all) = (0usize, 0usize);
+        for kind in [Kind::Song, Kind::Cover] {
+            for row in self.ledger.rows(kind)? {
+                all += 1;
+                if row.state == State::Deleting {
+                    gone += 1;
+                }
+            }
+        }
+        let held = gone > BRAKE_MIN_FILES && gone as f64 > share * all as f64;
+        let mut said = self.said.lock().expect("the said lock");
+        if !held {
+            said.braked = false;
+            return Ok(None);
+        }
+        let released = self.ledger.note(RELEASED_NOTE)?.and_then(|at| at.parse::<i64>().ok()).unwrap_or(i64::MIN);
+        if !said.braked {
+            warn!(
+                gone,
+                of = all,
+                "R2 mirror: more of the library is gone at once than the brake allows (SONUS_R2_DELETE_BRAKE): nothing is deleted from the bucket. \
+                 A disk not mounted? When the files are gone for good, run `sonus-server r2-allow-deletions`"
+            );
+            said.braked = true;
+        }
+        Ok(Some(released))
+    }
+
     /// Deletes from the bucket what the library has not had for the grace time. An old version waits while its
-    /// song's new one is not up yet.
+    /// song's new one is not up yet; everything waits while the brake holds (`brake`).
     pub async fn delete_due(&self) {
         let now = (self.clock)().timestamp();
-        for kind in [Kind::Song, Kind::Cover] {
+        let released = match self.brake() {
+            Ok(released) => released,
+            Err(e) => {
+                warn!("R2 mirror: {e}");
+                return;
+            }
+        };
+        for kind in Kind::ALL {
             let Ok(rows) = self.ledger.rows(kind) else { return };
             let waiting: std::collections::HashSet<&str> = rows.iter().filter(|r| r.state == State::Pending).map(|r| r.item.as_str()).collect();
             for row in rows.iter().filter(|r| r.state == State::Deleting) {
                 if row.gone_since.is_none_or(|since| now - since < GRACE) || waiting.contains(row.item.as_str()) {
                     continue;
+                }
+                if let Some(released) = released {
+                    if kind != Kind::Resized && row.gone_since.is_none_or(|since| since > released) {
+                        continue;
+                    }
                 }
                 match self.s3.delete(&row.key).await {
                     Ok(()) => {
@@ -277,18 +353,30 @@ impl Worker {
         None
     }
 
-    /// The whole bucket against the ledger: what it lacks is uploaded again, what it has that the ledger does not
-    /// know is deleted after the grace time, and files that failed too often are tried again.
+    /// The whole bucket against the ledger: what it lacks is uploaded again, what it has already at the size the
+    /// ledger waits for is adopted (nothing goes up twice after a ledger is lost), what it has that the ledger does
+    /// not know is deleted after the grace time, and files that failed too often are tried again.
     pub async fn check_bucket(&self) -> Result<(), String> {
         let now = (self.clock)().timestamp();
         let listed: HashMap<String, u64> = self.s3.list_all("").await.map_err(|e| e.to_string())?.into_iter().map(|o| (o.key, o.size)).collect();
         let mut changes = Vec::new();
         let mut known_keys = std::collections::HashSet::new();
-        for kind in [Kind::Song, Kind::Cover] {
+        let (mut adopted, mut missing) = (0, 0);
+        for kind in Kind::ALL {
             for row in self.ledger.rows(kind)? {
                 known_keys.insert(row.key.clone());
+                let there = listed.get(&row.key) == Some(&row.size);
                 match row.state {
-                    State::Uploaded if listed.get(&row.key) != Some(&row.size) => changes.push(Change::Missing { key: row.key }),
+                    State::Pending if there => {
+                        changes.push(Change::Adopt { key: row.key, at: now });
+                        adopted += 1;
+                    }
+                    // a resized cover is uploaded again when a client asks for it
+                    State::Uploaded if !there && kind == Kind::Resized => changes.push(Change::Forget { key: row.key }),
+                    State::Uploaded if !there => {
+                        changes.push(Change::Missing { key: row.key });
+                        missing += 1;
+                    }
                     State::Pending if row.failures > 0 => changes.push(Change::Missing { key: row.key }),
                     _ => {}
                 }
@@ -296,23 +384,70 @@ impl Worker {
         }
         let mut strays = 0;
         for (key, size) in &listed {
-            let kind = if key.starts_with("m/") {
-                Kind::Song
-            } else if key.starts_with("a/") {
-                Kind::Cover
-            } else {
-                // the health object, and what later parts keep (manifests, resized covers)
-                continue;
-            };
+            // the health object and the manifests are not the ledger's
+            let Some(kind) = Kind::of_key(key) else { continue };
             if !known_keys.contains(key) {
                 changes.push(Change::Stray { key: key.clone(), kind, size: *size, since: now });
                 strays += 1;
             }
         }
-        let missing = changes.iter().filter(|c| matches!(c, Change::Missing { .. })).count();
         self.ledger.apply(&changes)?;
-        info!(objects = listed.len(), missing, unknown = strays, "R2 mirror: the bucket checked against the ledger");
+        info!(objects = listed.len(), adopted, missing, unknown = strays, "R2 mirror: the bucket checked against the ledger");
         Ok(())
+    }
+
+    /// The day's manifest (`manifest.rs`): every song and cover in the bucket, with where it belongs; the oldest go
+    /// past `manifest::KEEP`.
+    pub async fn put_manifest(&self) -> Result<(), String> {
+        let day = (self.clock)().date_naive();
+        let made = (self.clock)().to_rfc3339();
+        let (db, ledger) = (self.db.clone(), self.ledger.clone());
+        let known = self.known.lock().expect("the known objects' lock").clone();
+        let body = tokio::task::spawn_blocking(move || super::manifest::make(&db, &ledger, &known, &made))
+            .await
+            .map_err(|_| "the manifest was not made".to_string())??;
+        let headers = [("content-type".to_string(), "application/gzip".to_string()), ("cache-control".to_string(), "private, no-cache".to_string())];
+        self.s3.put_bytes_with(&super::manifest::key(day), body.into(), &headers).await.map_err(|e| e.to_string())?;
+        let mut kept: Vec<String> = self.s3.list_all(super::manifest::PREFIX).await.map_err(|e| e.to_string())?.into_iter().map(|o| o.key).collect();
+        // the dates sort as the names do
+        kept.sort();
+        let surplus = kept.len().saturating_sub(super::manifest::KEEP);
+        for old in &kept[..surplus] {
+            self.s3.delete(old).await.map_err(|e| e.to_string())?;
+        }
+        info!(day = %day, "R2 mirror: the day's manifest is up");
+        Ok(())
+    }
+}
+
+/// Uploads the resized covers clients were sent (`Mirror::offer_resized`), one at a time, within the upload hours
+/// (one offered outside them is dropped: it is offered again when asked for again).
+pub async fn resized_uploads(
+    mut offered: tokio::sync::mpsc::Receiver<super::Resized>,
+    s3: Arc<S3>,
+    ledger: Arc<Ledger>,
+    health: Arc<Health>,
+    hours: Option<Hours>,
+    clock: Arc<dyn Fn() -> DateTime<FixedOffset> + Send + Sync>,
+) {
+    while let Some(resized) = offered.recv().await {
+        let now = clock();
+        if !health.ok() || hours.is_some_and(|hours| !hours.contains(now.time())) || !matches!(ledger.get(&resized.key), Ok(None)) {
+            continue;
+        }
+        let size = resized.bytes.len() as u64;
+        let headers = [("content-type".to_string(), resized.content_type.to_string()), ("cache-control".to_string(), CACHE_CONTROL.to_string())];
+        match s3.put_bytes_with(&resized.key, resized.bytes.into(), &headers).await {
+            Ok(()) => {
+                let day = now.date_naive().to_string();
+                let recorded = ledger.record_uploaded(&resized.key, Kind::Resized, &resized.cover, size, clock().timestamp());
+                if let Err(e) = recorded.and_then(|()| ledger.add_day_bytes(&day, size)) {
+                    warn!("R2 mirror: {e}");
+                }
+            }
+            Err(e) if e.is_refusal() => health.down(&e),
+            Err(e) => debug!("R2 mirror: a resized cover's upload failed ({e}): offered again when asked for"),
+        }
     }
 }
 
@@ -338,11 +473,11 @@ pub async fn check_health(s3: &S3, health: &Health) {
 
 /// The library's files and covers, as they are on disk now. Blocking.
 pub fn wanted(db: &Db, data_folder: &Path) -> Result<HashMap<String, Wanted>, String> {
-    let songs: Vec<(String, String, String, String)> = db
+    let songs: Vec<(String, String, String, String, i64)> = db
         .read_blocking(|conn| {
             let mut statement =
-                conn.prepare("SELECT m.id, m.path, m.suffix, l.path FROM media_file m JOIN library l ON l.id = m.library_id WHERE m.missing = 0")?;
-            let rows = statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+                conn.prepare("SELECT m.id, m.path, m.suffix, l.path, l.id FROM media_file m JOIN library l ON l.id = m.library_id WHERE m.missing = 0")?;
+            let rows = statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
             rows.collect()
         })
         .map_err(|e| format!("cannot read the library: {e}"))?;
@@ -353,8 +488,26 @@ pub fn wanted(db: &Db, data_folder: &Path) -> Result<HashMap<String, Wanted>, St
             rows.collect()
         })
         .map_err(|e| format!("cannot read the covers: {e}"))?;
+    // the pictures that are files in the library's folders (cover.jpg), for a restore
+    type Places = (Vec<(i64, String)>, Vec<(String, String)>);
+    let (libraries, pictures): Places = db
+        .read_blocking(|conn| {
+            let libraries = conn.prepare("SELECT id, path FROM library")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+            let pictures = conn
+                .prepare("SELECT DISTINCT hash, source_path FROM item_artwork WHERE source = 'folder' AND hash != '' AND source_path != ''")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok((libraries, pictures))
+        })
+        .map_err(|e| format!("cannot read the covers' files: {e}"))?;
+    let mut picture_paths: HashMap<String, Vec<(i64, String)>> = HashMap::new();
+    for (hash, source) in pictures {
+        if let Some(place) = libraries.iter().find_map(|(id, root)| Some((*id, relative(Path::new(&source), Path::new(root))?))) {
+            picture_paths.entry(hash).or_default().push(place);
+        }
+    }
     let mut wanted = HashMap::new();
-    for (id, path, suffix, library) in songs {
+    for (id, path, suffix, library, library_id) in songs {
         // ids name objects: Navidrome's are letters and digits; anything else stays home
         if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') || !inside_library(&path) {
             continue;
@@ -363,7 +516,8 @@ pub fn wanted(db: &Db, data_folder: &Path) -> Result<HashMap<String, Wanted>, St
         let Ok(stamp) = Stamp::of(&file) else { continue };
         let version = stamp.version();
         let content_type = crate::library::entities::content_type(&suffix.to_ascii_lowercase()).unwrap_or("application/octet-stream").to_string();
-        wanted.insert(format!("m/{id}/{version}"), Wanted { kind: Kind::Song, item: id, stamp, version, path: file, content_type });
+        let restore = relative(&file, Path::new(&library)).map(|path| vec![(library_id, path)]).unwrap_or_default();
+        wanted.insert(format!("m/{id}/{version}"), Wanted { kind: Kind::Song, item: id, stamp, version, path: file, content_type, restore });
     }
     for (hash, mime) in covers {
         if hash.len() < 4 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -372,8 +526,22 @@ pub fn wanted(db: &Db, data_folder: &Path) -> Result<HashMap<String, Wanted>, St
         let file = artwork_file(data_folder, &hash, &mime);
         let Ok(stamp) = Stamp::of(&file) else { continue };
         let content_type = if mime.starts_with("image/") && mime.bytes().all(|b| b.is_ascii_graphic()) { mime } else { "application/octet-stream".into() };
+        let restore = picture_paths.remove(&hash).unwrap_or_default();
         // the hash names the picture's content: its version
-        wanted.insert(format!("a/{hash}"), Wanted { kind: Kind::Cover, item: hash.clone(), stamp, version: hash, path: file, content_type });
+        wanted.insert(format!("a/{hash}"), Wanted { kind: Kind::Cover, item: hash.clone(), stamp, version: hash, path: file, content_type, restore });
     }
     Ok(wanted)
+}
+
+/// A file's path inside a library's folder, `/` between its parts: none when it is not inside (or would leave it).
+pub fn relative(file: &Path, root: &Path) -> Option<String> {
+    let rest = file.strip_prefix(root).ok()?;
+    let parts: Vec<&str> = rest
+        .components()
+        .map(|part| match part {
+            std::path::Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    (!parts.is_empty() && parts.iter().all(|part| !part.contains('/'))).then(|| parts.join("/"))
 }

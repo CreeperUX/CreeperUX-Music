@@ -133,10 +133,17 @@ pub struct Library {
     /// How many requests were answered here, and how many went on to Navidrome.
     answered: AtomicU64,
     passed: AtomicU64,
+    /// The R2 mirror, once it runs: clients that ask are sent to it (`stream`, `getCoverArt`).
+    mirror: std::sync::OnceLock<Arc<crate::mirror::Mirror>>,
 }
+
+/// The parameter a client sends when it follows a redirect to the R2 mirror (and falls back to `0` when that fails).
+pub const MIRROR_PARAM: &str = "sonusMirror";
 
 /// A signed-in request to one of the library's methods.
 pub struct Request<'a> {
+    /// The client's address (trust.rs): whether it is at home decides whether it is sent to the mirror.
+    pub client: std::net::IpAddr,
     pub method: &'static str,
     /// The HTTP method (`GET`, `HEAD`, `POST`…).
     pub http_method: &'a str,
@@ -183,6 +190,8 @@ pub enum Reply {
     Transcode(Box<stream::Pending>),
     /// A cover to resize (media.rs, resize.rs).
     Resize(Box<media::PendingResize>),
+    /// `302 Found` to the R2 mirror: a presigned link, never logged.
+    Redirect(String),
     Navidrome(&'static str),
 }
 
@@ -222,6 +231,10 @@ pub struct Scope<'a> {
     pub transcoder: &'a transcoder::Transcoder,
     /// The cache of covers resized here (none: `ImageCacheSize` is 0).
     pub images: Option<&'a filecache::Cache>,
+    /// The R2 mirror, while it runs and its bucket answers: resized covers are offered to it.
+    pub mirror: Option<&'a crate::mirror::Mirror>,
+    /// Whether this request may be sent to the mirror: it asked (`sonusMirror=1`), from where the owner allows.
+    pub redirect: bool,
 }
 
 impl Scope<'_> {
@@ -269,7 +282,13 @@ impl Library {
             public_signer: setup.public_signer,
             answered: AtomicU64::new(0),
             passed: AtomicU64::new(0),
+            mirror: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Gives the library the R2 mirror. Once: a second call changes nothing.
+    pub fn set_mirror(&self, mirror: Arc<crate::mirror::Mirror>) {
+        let _ = self.mirror.set(mirror);
     }
 
     /// How many requests were answered here, and how many of the library's methods went on to Navidrome.
@@ -294,7 +313,7 @@ impl Library {
     }
 
     async fn answer(&self, request: &Request<'_>) -> Result<Response<Body>, &'static str> {
-        let Request { method, http_method, params, user, user_header, headers } = *request;
+        let Request { client: address, method, http_method, params, user, user_header, headers } = *request;
         if !answers(method) {
             return Err("not a method answered here");
         }
@@ -341,6 +360,9 @@ impl Library {
         let (user_id, client, params) = (user.user_id.clone(), client.to_string(), params.clone());
         let (http_method_owned, request_headers, player_owned) = (http_method.to_string(), headers.clone(), player.clone());
         let image_links = links::for_request(self.public_signer.as_ref(), &self.link_settings, headers);
+        // the mirror while its bucket answers; a request that asks for it, from where the owner allows, may be sent
+        let mirror = self.mirror.get().filter(|mirror| mirror.health.ok()).cloned();
+        let redirect = params.get(MIRROR_PARAM) == b"1" && mirror.as_ref().is_some_and(|mirror| mirror.sends(address));
         let reply = tokio::task::spawn_blocking(move || {
             let run = |conn: &rusqlite::Connection| {
                 let Some(viewer) = Viewer::load(conn, &user_id)? else { return Ok(Ok(Reply::Navidrome("the user is gone"))) };
@@ -360,6 +382,8 @@ impl Library {
                     headers: &request_headers,
                     transcoder: &transcoder,
                     images: images.as_deref(),
+                    mirror: mirror.as_deref(),
+                    redirect,
                 };
                 Ok(browse::answer(method, &scope))
             };
@@ -396,6 +420,7 @@ impl Library {
             Reply::Media(media) => Ok(self.media(media, headers, player.as_ref())),
             Reply::Transcode(pending) => self.transcode(*pending, headers, player.as_ref(), json).await,
             Reply::Resize(pending) => self.resize(*pending, headers).await,
+            Reply::Redirect(link) => self.redirect(&link, headers, player.as_ref()),
             Reply::Error { code, message } => {
                 let (content_type, body) = respond::render(&self.envelope, &Format::Json, &Payload::Error { code, message: &message });
                 Ok(self.response(content_type, body, headers, player.as_ref(), Vec::new()))
@@ -531,7 +556,7 @@ impl Library {
         let Ok(Ok(permit)) = tokio::time::timeout(RESIZE_WAIT, self.resizing.clone().acquire_owned()).await else {
             return Err("every resize is busy for too long: Navidrome's");
         };
-        let media::PendingResize { original, size, square, quality, key, headers } = pending;
+        let media::PendingResize { original, size, square, quality, key, headers, cover } = pending;
         let made = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             match resize::resize(&original, size, square, quality) {
@@ -550,7 +575,32 @@ impl Library {
                 }
             }
         }
+        // the size a client uses goes up to the mirror too, for the next client sent there
+        if let Some(mirror) = self.mirror.get().filter(|_| !cover.is_empty()) {
+            mirror.offer_resized(key.strip_prefix("h-").unwrap_or(&key), &cover, &made, content_type);
+        }
         Ok(self.picture(StatusCode::OK, Some(content_type), made, request, headers))
+    }
+
+    /// `302 Found` to the mirror: the presigned link as `Location`, never stored by anyone between (it opens the
+    /// object), with Navidrome's usual headers and the player's cookie.
+    fn redirect(&self, link: &str, request: &HeaderMap, player: Option<&Player>) -> Result<Response<Body>, &'static str> {
+        // a link is ASCII by its making; were it not, the request is Navidrome's
+        let location = HeaderValue::from_str(link).map_err(|_| "a mirror link that is no header value")?;
+        let mut response = Response::new(Full::new(Bytes::new()).map_err(|never| match never {}).boxed());
+        *response.status_mut() = StatusCode::FOUND;
+        let h = response.headers_mut();
+        respond::navidrome_headers(h, request, &self.frame_options);
+        h.insert(header::LOCATION, location);
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+        if let Some(player) = player {
+            h.insert(header::SET_COOKIE, player.cookie.clone());
+        }
+        if cfg!(debug_assertions) {
+            h.insert(ANSWERED_HEADER, HeaderValue::from_static("rust"));
+        }
+        Ok(response)
     }
 
     /// A transcode as Navidrome sends one it has not cached (`Stream.Serve`, not seekable): as it comes, without

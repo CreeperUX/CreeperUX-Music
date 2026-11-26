@@ -22,6 +22,7 @@ use serde_json::Value;
 use sonus_server::config::{LibraryOptions, TwoFactor};
 use sonus_server::db::Db;
 use sonus_server::library::{self, Library};
+use sonus_server::mirror::Mirror;
 use sonus_server::secrets::Keys;
 use sonus_server::subsonic::respond::Envelope;
 use sonus_server::subsonic::{Setup, Subsonic};
@@ -150,6 +151,10 @@ fn register(database: &Path, user: &[u8], client: &str) -> String {
 }
 
 async fn world_with(options: LibraryOptions, registers: bool) -> World {
+    world_with_mirror(options, registers, None).await
+}
+
+async fn world_with_mirror(options: LibraryOptions, registers: bool, mirror: Option<Arc<Mirror>>) -> World {
     let (dir, file) = make_database();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let (record, database) = (seen.clone(), file.clone());
@@ -181,6 +186,9 @@ async fn world_with(options: LibraryOptions, registers: bool) -> World {
         frame_options: "DENY".into(),
     });
     let library = Library::new(library::Setup { db, options, envelope, frame_options: "DENY".into(), base_path: String::new(), public_signer: None });
+    if let Some(mirror) = mirror {
+        library.set_mirror(mirror);
+    }
     let setup = GatewaySetup {
         upstream_user_header: SECRET_HEADER,
         checks_sign_ins: true,
@@ -856,6 +864,10 @@ fn mtime_nanos(path: &Path) -> i64 {
 /// The world with pictures: album Blue's cover is a file in its folder, album 2's is in Navidrome's image store
 /// (taken out of a song's file), album Cyan has none, album 10 has no state yet.
 async fn world_with_pictures() -> (World, PathBuf, PathBuf) {
+    world_with_pictures_and(None).await
+}
+
+async fn world_with_pictures_and(mirror: Option<Arc<Mirror>>) -> (World, PathBuf, PathBuf) {
     let (music, data) = {
         let base = std::env::temp_dir().join(format!("sonus-library-disk-{}-{}", std::process::id(), WORLDS.fetch_add(1, Ordering::Relaxed)));
         let _ = std::fs::remove_dir_all(&base);
@@ -864,7 +876,7 @@ async fn world_with_pictures() -> (World, PathBuf, PathBuf) {
     std::fs::create_dir_all(music.join("a")).unwrap();
     std::fs::create_dir_all(&data).unwrap();
     let options = LibraryOptions { data_folder: data.to_string_lossy().into_owned(), ..LibraryOptions::default() };
-    let w = world_with(options, true).await;
+    let w = world_with_mirror(options, true, mirror).await;
     let db = w.db();
     db.execute("UPDATE library SET path = ?1", [music.to_string_lossy()]).unwrap();
     // a cover in the album's folder
@@ -1568,6 +1580,164 @@ async fn streams_that_stay_navidromes() {
     navidromes(w.stream("GET", "id=s-1", &[]).await);
     let (status, headers, _) = w.stream("GET", "id=s-1&format=raw", &[]).await;
     assert_eq!((status, &headers[library::ANSWERED_HEADER]), (StatusCode::OK, &hyper::header::HeaderValue::from_static("rust")), "raw is raw for any player");
+}
+
+// ---------------------------------------------------------------- the R2 mirror's redirects (R2-b)
+
+/// The mirror on a fake S3 (`common/fake_s3.rs`), its bucket answering, with these home networks (the tests' client
+/// is 127.0.0.1), and the queue resized covers are offered on.
+fn test_mirror(fake: &common::fake_s3::FakeS3, home: &str) -> (Arc<Mirror>, tokio::sync::mpsc::Receiver<sonus_server::mirror::Resized>) {
+    use common::fake_s3::{BUCKET, KEY_ID, SECRET};
+    use sonus_server::mirror::{Health, ledger::Ledger, links::Redirects, s3, sigv4::Signer};
+    let s3 = Arc::new(s3::S3::new(s3::Endpoint { https: false, authority: fake.addr.to_string() }, BUCKET, Signer::new(KEY_ID, SECRET, "auto")));
+    let health = Arc::new(Health::default());
+    health.up();
+    let home = home.to_string();
+    let redirects = Redirects::from_env(&|name| (name == "SONUS_R2_HOME_NETWORKS").then(|| home.clone())).unwrap();
+    let (queue, offered) = tokio::sync::mpsc::channel(8);
+    (Arc::new(Mirror { health, ledger: Arc::new(Ledger::in_memory()), s3, redirects, resized: Some(queue) }), offered)
+}
+
+/// A request to a presigned link, as a client following the redirect makes it.
+async fn follow(link: &str, method: &str, range: Option<&str>) -> (StatusCode, HeaderMap, Vec<u8>) {
+    use hyper_util::client::legacy::Client;
+    let client: Client<_, TestBody> = Client::builder(hyper_util::rt::TokioExecutor::new()).build_http();
+    let mut request = Request::builder().method(method).uri(link);
+    if let Some(range) = range {
+        request = request.header(header::RANGE, range);
+    }
+    let answer = within("the mirror's answer", client.request(request.body(empty()).unwrap())).await.unwrap();
+    let (status, headers) = (answer.status(), answer.headers().clone());
+    (status, headers, body_bytes(answer.into_body()).await.to_vec())
+}
+
+fn transport_failure() -> sonus_server::mirror::s3::Error {
+    sonus_server::mirror::s3::Error::Transport("the test's".into())
+}
+
+#[tokio::test]
+async fn a_client_that_asks_is_sent_to_the_mirror_for_a_file_it_has() {
+    use sonus_server::mirror::{ledger::Kind, s3::Stamp};
+    common::logs::capture();
+    let fake = common::fake_s3::FakeS3::start().await;
+    // the tests' client (127.0.0.1) is away from this home
+    let (mirror, _) = test_mirror(&fake, "192.168.0.0/16");
+    let w = world_with_mirror(LibraryOptions::default(), true, Some(mirror.clone())).await;
+    let music = w.dir.join("music");
+    std::fs::create_dir_all(music.join("a")).unwrap();
+    let bytes: Vec<u8> = (0..1000u32).map(|i| (i * 7 % 251) as u8).collect();
+    std::fs::write(music.join("a").join("One.flac"), &bytes).unwrap();
+    w.db().execute("UPDATE library SET path = ?1", [music.to_string_lossy()]).unwrap();
+    let stamp = Stamp::of(&music.join("a").join("One.flac")).unwrap();
+    let key = format!("m/s-1/{}", stamp.version());
+
+    // not in the bucket yet: served here
+    let (status, headers, body) = w.stream("GET", "id=s-1&sonusMirror=1", &[]).await;
+    assert_eq!((status, body.len(), &headers[library::ANSWERED_HEADER]), (StatusCode::OK, 1000, &hyper::header::HeaderValue::from_static("rust")));
+
+    // in the bucket: a 302 to a presigned link, which nobody between may keep
+    mirror.s3.put_bytes(&key, bytes.clone().into(), "audio/flac").await.unwrap();
+    mirror.ledger.record_uploaded(&key, Kind::Song, "s-1", 1000, 0).unwrap();
+    let (status, headers, body) = w.stream("GET", "id=s-1&sonusMirror=1", &[]).await;
+    assert_eq!((status, body.len()), (StatusCode::FOUND, 0));
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    assert_eq!(headers[library::ANSWERED_HEADER], "rust");
+    assert!(headers[header::SET_COOKIE].to_str().unwrap().starts_with("nd-player-"), "the player's cookie, as for any stream");
+    let link = headers[header::LOCATION].to_str().unwrap().to_string();
+    assert!(link.starts_with(&format!("http://{}/music/m/s-1/{}?", fake.addr, stamp.version())), "{link}");
+    assert!(link.contains("X-Amz-Signature=") && !link.contains(common::fake_s3::SECRET));
+    // the link gives the file, whole and in part, and is the same for the hour
+    assert_eq!(follow(&link, "GET", None).await.2, bytes);
+    let (status, _, part) = follow(&link, "GET", Some("bytes=10-19")).await;
+    assert_eq!((status, &part[..]), (StatusCode::PARTIAL_CONTENT, &bytes[10..20]));
+    assert_eq!(w.stream("GET", "id=s-1&sonusMirror=1", &[("Range", "bytes=10-19")]).await.1[header::LOCATION], link.as_str());
+    // a HEAD gets a link for a HEAD
+    let (status, headers, _) = w.stream("HEAD", "id=s-1&sonusMirror=1", &[]).await;
+    assert_eq!(status, StatusCode::FOUND);
+    let head = headers[header::LOCATION].to_str().unwrap().to_string();
+    assert_ne!(head, link);
+    let (status, headers, _) = follow(&head, "HEAD", None).await;
+    assert_eq!((status, &headers[header::CONTENT_LENGTH]), (StatusCode::OK, &hyper::header::HeaderValue::from_static("1000")));
+    assert_eq!(follow(&head, "GET", None).await.0, StatusCode::FORBIDDEN, "a link is for its method only");
+    assert_eq!(fake.state.lock().unwrap().bad_signatures, 1);
+
+    // not asked for, or asked not to (the client's fallback): served here, as before
+    for query in ["id=s-1", "id=s-1&sonusMirror=0"] {
+        let (status, _, body) = w.stream("GET", query, &[]).await;
+        assert_eq!((status, body.len()), (StatusCode::OK, 1000), "{query}");
+    }
+    // a transcode is never sent there: Navidrome's, as before
+    assert_eq!(w.stream("GET", "id=s-1&sonusMirror=1&format=mp3", &[]).await.2, b"from navidrome");
+    // a user who may not read the song learns nothing of the mirror
+    let bob = w.request(Request::get(format!("/rest/stream?{BOB}&id=s-1&sonusMirror=1")).body(empty()).unwrap()).await;
+    assert_eq!((bob.0, String::from_utf8(bob.2).unwrap()), (StatusCode::OK, failed(70, "data not found")));
+    // the bucket not answering: served here
+    mirror.health.down(&transport_failure());
+    assert_eq!(w.stream("GET", "id=s-1&sonusMirror=1", &[]).await.0, StatusCode::OK);
+    mirror.health.up();
+    // the file changed since its upload: its new version is not in the bucket, so it is served here
+    std::fs::write(music.join("a").join("One.flac"), b"a new version").unwrap();
+    let (status, _, body) = w.stream("GET", "id=s-1&sonusMirror=1", &[]).await;
+    assert_eq!((status, &body[..]), (StatusCode::OK, &b"a new version"[..]));
+
+    // nothing of the links reached the log, at any level (the requests' own lines included)
+    let signature = link.split("X-Amz-Signature=").nth(1).unwrap();
+    common::logs::assert_none_of(&[common::fake_s3::SECRET, signature, "X-Amz-Signature", "X-Amz-Credential", "sonusMirror", &link, &head]);
+}
+
+#[tokio::test]
+async fn a_client_at_home_is_served_from_home() {
+    use sonus_server::mirror::ledger::Kind;
+    let fake = common::fake_s3::FakeS3::start().await;
+    // the default home networks: the LAN's ranges and this machine (the tests' client)
+    let (mirror, _) = test_mirror(&fake, sonus_server::mirror::links::DEFAULT_HOME_NETWORKS);
+    let w = world_with_mirror(LibraryOptions::default(), true, Some(mirror.clone())).await;
+    let music = w.dir.join("music");
+    std::fs::create_dir_all(music.join("a")).unwrap();
+    std::fs::write(music.join("a").join("One.flac"), b"bytes").unwrap();
+    w.db().execute("UPDATE library SET path = ?1", [music.to_string_lossy()]).unwrap();
+    let key = format!("m/s-1/{}", sonus_server::mirror::s3::Stamp::of(&music.join("a").join("One.flac")).unwrap().version());
+    mirror.ledger.record_uploaded(&key, Kind::Song, "s-1", 5, 0).unwrap();
+    let (status, _, body) = w.stream("GET", "id=s-1&sonusMirror=1", &[]).await;
+    assert_eq!((status, &body[..]), (StatusCode::OK, &b"bytes"[..]));
+}
+
+#[tokio::test]
+async fn covers_are_sent_to_the_mirror_too_and_their_sizes_go_up_as_clients_ask() {
+    use sonus_server::mirror::{ledger::Kind, resized_key};
+    let fake = common::fake_s3::FakeS3::start().await;
+    let (mirror, mut offered) = test_mirror(&fake, "192.168.0.0/16");
+    let (w, _music, _data) = world_with_pictures_and(Some(mirror.clone())).await;
+    // the original, not in the bucket: served here
+    let (status, _, body) = w.cover("id=al-al-b&sonusMirror=1", None).await;
+    assert_eq!((status, body.as_slice()), (StatusCode::OK, JPEG));
+    // in the bucket: sent there; what the client has already is still a 304 from here
+    let original = format!("a/{FOLDER_HASH}");
+    mirror.s3.put_bytes(&original, JPEG.to_vec().into(), "image/jpeg").await.unwrap();
+    mirror.ledger.record_uploaded(&original, Kind::Cover, FOLDER_HASH, JPEG.len() as u64, 0).unwrap();
+    let (status, headers, _) = w.cover("id=al-al-b&sonusMirror=1", None).await;
+    assert_eq!(status, StatusCode::FOUND);
+    let link = headers[header::LOCATION].to_str().unwrap().to_string();
+    assert!(link.starts_with(&format!("http://{}/music/{original}?", fake.addr)), "{link}");
+    assert_eq!(follow(&link, "GET", None).await.2, JPEG);
+    assert_eq!(w.cover("id=al-al-b&sonusMirror=1", Some(&format!("\"{FOLDER_HASH}\""))).await.0, StatusCode::NOT_MODIFIED);
+    assert_eq!(w.cover("id=al-al-b", None).await.0, StatusCode::OK, "not asked: served here");
+
+    // a size not in the bucket: made here, and offered to it under the key of its representation
+    let etag = format!("{FOLDER_HASH}.300.false.q75");
+    let (status, _, made) = w.cover("id=al-al-b&size=300&sonusMirror=1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let resized = within("the offer", offered.recv()).await.unwrap();
+    assert_eq!((resized.key.as_str(), resized.cover.as_str(), resized.content_type), (resized_key(&etag).as_str(), FOLDER_HASH, "image/jpeg"));
+    assert_eq!(resized.bytes, made);
+    // once it is up, clients that ask are sent there for it
+    mirror.ledger.record_uploaded(&resized_key(&etag), Kind::Resized, FOLDER_HASH, made.len() as u64, 0).unwrap();
+    let (status, headers, _) = w.cover("id=al-al-b&size=300&sonusMirror=1", None).await;
+    assert_eq!(status, StatusCode::FOUND);
+    assert!(headers[header::LOCATION].to_str().unwrap().contains(&resized_key(&etag)));
+    // and it is offered once only
+    w.cover("id=al-al-b&size=300", None).await;
+    assert!(offered.try_recv().is_err());
 }
 
 // ---------------------------------------------------------------- transcoding (phase 5, part 2)

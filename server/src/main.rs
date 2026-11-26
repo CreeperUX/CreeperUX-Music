@@ -17,6 +17,20 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() -> ExitCode {
     // `sonus-server enrolment-code <user>`: not the server, a word to its database (enrol.rs)
+    // `sonus-server r2-restore …`, `sonus-server r2-allow-deletions`: the R2 mirror's (mirror/cli.rs)
+    let mut mirror_args = std::env::args_os().skip(1);
+    if let Some(command) = mirror_args.next().filter(sonus_server::mirror::cli::is_command) {
+        return match sonus_server::mirror::cli::run(&command, mirror_args.collect(), &|name| std::env::var(name).ok()).await {
+            Ok(said) => {
+                println!("{said}");
+                ExitCode::SUCCESS
+            }
+            Err(why) => {
+                eprintln!("{why}");
+                ExitCode::from(1)
+            }
+        };
+    }
     let mut args = std::env::args_os().skip(1);
     if args.next().is_some_and(|first| first == sonus_server::enrol::COMMAND) {
         return match sonus_server::enrol::run(args.collect(), &|name| std::env::var(name).ok()) {
@@ -105,8 +119,13 @@ async fn main() -> ExitCode {
                     info!("Subsonic sign-ins are checked here; /auth, Sonus Connect version 2 and the library reads are answered here");
                     // off without the owner's bucket and keys (SONUS_R2_*): then nothing of it runs
                     if let Some(settings) = mirror {
-                        if let Err(e) = sonus_server::mirror::start(settings, local.db, std::path::PathBuf::from(&shared.data_folder)) {
-                            error!("R2 mirror: {e}; the server runs without it");
+                        match sonus_server::mirror::start(settings, local.db, std::path::PathBuf::from(&shared.data_folder)) {
+                            Ok(mirror) => {
+                                if let Some(library) = gateway.library() {
+                                    library.set_mirror(mirror);
+                                }
+                            }
+                            Err(e) => error!("R2 mirror: {e}; the server runs without it"),
                         }
                     }
                 }

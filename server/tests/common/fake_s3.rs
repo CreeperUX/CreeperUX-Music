@@ -1,6 +1,7 @@
 //! A fake S3 on 127.0.0.1 for the R2 mirror's tests: objects in memory, the requests the mirror makes (PUT, multipart
-//! uploads, HEAD, DELETE, ListObjectsV2), each checked as S3 checks it (the SigV4 signature with the test's keys,
-//! the time within 15 minutes, the body against its signed hash), and faults to switch on.
+//! uploads, GET, HEAD, DELETE, ListObjectsV2) and the presigned links clients are sent to, each checked as S3 checks
+//! it (the SigV4 signature with the test's keys, the time within 15 minutes or the link's expiry, the body against
+//! its signed hash), and faults to switch on.
 
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
@@ -130,10 +131,32 @@ fn decode(text: &str) -> String {
     String::from_utf8(out).unwrap()
 }
 
+/// An object as S3 sends it: whole, or the one range asked for (`bytes=a-b`, `bytes=a-`).
+fn serve_object(method: &str, object: &Stored, range: &str) -> Answer {
+    let size = object.body.len();
+    let mut builder = Response::builder().header("content-type", object.content_type.as_str()).header("accept-ranges", "bytes");
+    let (status, body) = match range.strip_prefix("bytes=").and_then(|r| r.split_once('-')) {
+        Some((from, to)) => {
+            let from: usize = from.parse().unwrap_or(0);
+            let to: usize = to.parse().unwrap_or(size.saturating_sub(1)).min(size.saturating_sub(1));
+            if from > to {
+                return answer(StatusCode::RANGE_NOT_SATISFIABLE, Bytes::new());
+            }
+            builder = builder.header("content-range", format!("bytes {from}-{to}/{size}"));
+            (StatusCode::PARTIAL_CONTENT, object.body.slice(from..=to))
+        }
+        None => (StatusCode::OK, object.body.clone()),
+    };
+    builder = builder.header("content-length", body.len());
+    let body = if method == "HEAD" { Bytes::new() } else { body };
+    builder.status(status).body(Full::new(body)).unwrap()
+}
+
 async fn handle(req: Request<Incoming>, state: &Mutex<State>, fault: &Mutex<Fault>) -> Answer {
     let fault = *fault.lock().unwrap();
     let method = req.method().as_str().to_string();
     let path = req.uri().path().to_string();
+    let raw_query = req.uri().query().unwrap_or("").to_string();
     let query: Vec<(String, String)> = req
         .uri()
         .query()
@@ -154,6 +177,25 @@ async fn handle(req: Request<Incoming>, state: &Mutex<State>, fault: &Mutex<Faul
         Fault::Refuse => return error(StatusCode::FORBIDDEN, "AccessDenied"),
         Fault::Down => return error(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable"),
         _ => {}
+    }
+
+    // a presigned link (a client sent to the mirror): the query as it was signed, within its time
+    if query.iter().any(|(n, _)| n == "X-Amz-Signature") {
+        let q = |name: &str| query.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone()).unwrap_or_default();
+        let Ok(time) = NaiveDateTime::parse_from_str(&q("X-Amz-Date"), "%Y%m%dT%H%M%SZ") else { return error(StatusCode::FORBIDDEN, "AccessDenied") };
+        let time = time.and_utc();
+        let Ok(expires) = q("X-Amz-Expires").parse::<i64>() else { return error(StatusCode::FORBIDDEN, "AccessDenied") };
+        if Utc::now() > time + chrono::Duration::seconds(expires) || time > Utc::now() + chrono::Duration::minutes(15) {
+            return error(StatusCode::FORBIDDEN, "AccessDenied");
+        }
+        let expected = Signer::new(KEY_ID, SECRET, "auto").presign(&method, &header("host"), &path, time, expires as u64);
+        if raw_query != expected {
+            state.lock().unwrap().bad_signatures += 1;
+            return error(StatusCode::FORBIDDEN, "SignatureDoesNotMatch");
+        }
+        let Some(rest) = path.strip_prefix(&format!("/{BUCKET}/")) else { return error(StatusCode::NOT_FOUND, "NoSuchBucket") };
+        let Some(object) = state.lock().unwrap().objects.get(&decode(rest)).cloned() else { return error(StatusCode::NOT_FOUND, "NoSuchKey") };
+        return serve_object(&method, &object, &header("range"));
     }
 
     // the signature, as S3 checks it
@@ -206,6 +248,10 @@ async fn handle(req: Request<Incoming>, state: &Mutex<State>, fault: &Mutex<Faul
             xml.push_str("</ListBucketResult>");
             answer(StatusCode::OK, xml)
         }
+        "GET" => match state.objects.get(&key) {
+            Some(object) => serve_object("GET", object, &header("range")),
+            None => error(StatusCode::NOT_FOUND, "NoSuchKey"),
+        },
         "HEAD" => match state.objects.get(&key) {
             Some(o) => Response::builder().header("content-length", o.body.len()).body(Full::new(Bytes::new())).unwrap(),
             None => answer(StatusCode::NOT_FOUND, Bytes::new()),

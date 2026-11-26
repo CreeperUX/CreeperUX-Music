@@ -568,7 +568,7 @@ name is the SHA-256 of the stream's key (the song's id and time, the bit rate, s
 and offset): nothing from the client names a file there. A cached entry is served like the song's own file (ranges,
 conditions). One writer per entry; a second request while it is written runs a transcode of its own, uncached.
 
-## The R2 mirror (uploads, part R2-a)
+## The R2 mirror (R2-a: uploads; R2-b: redirects, the manifest, the restore)
 
 **Off unless configured.** Without the bucket's settings (`SONUS_R2_*`), no code of `src/mirror/` runs. When some
 of them are set but not all, the server refuses to start.
@@ -576,7 +576,7 @@ of them are set but not all, the server refuses to start.
 **The keys:**
 - They come from the environment, or the secret from its own file (with a warning on Unix when others can read it).
 - They are kept in memory only. Debug output says "(set)", and the errors never contain them.
-- Requests are signed in the `Authorization` header, and nothing logs headers or signatures.
+- The server's own requests are signed in the `Authorization` header, and nothing logs headers or signatures.
 - The token the owner makes is scoped to the one bucket (object read and write), so a leaked token reaches that
   bucket alone.
 
@@ -586,18 +586,45 @@ of them are set but not all, the server refuses to start.
 - An endpoint with a user name, a path or a query is refused.
 
 **What goes out:**
-- The music files and the cover originals, under names that say nothing about them.
-- Nothing from Navidrome's database: no users, no paths, no titles. The R2-b manifest will carry paths, in the
-  private bucket.
+- The music files, the cover originals and the resized covers clients asked for, under names that say nothing about
+  them.
+- Nothing from Navidrome's database but the daily manifest: each file's library, path and size, in the private
+  bucket (it names artists and titles). No users, stars, playlists or plays.
 - Files are read only through the library's own rows: paths that leave their library folder (`inside_library`) and
   song ids other than letters, digits and `-` are skipped.
 - Each body is checked by S3 against its SHA-256, and each file's size and time are checked before and after its
   upload. A file that changes while it is read is not recorded as uploaded.
 
 **Deletions:**
-- Only the ledger's own songs and covers (`m/`, `a/`) are deleted, and only after 7 days out of the library.
+- Only the ledger's own songs, covers and resized covers (`m/`, `a/`, `r/`) are deleted, and only after 7 days out
+  of the library. The manifests past the last 14 are deleted when a new one goes up.
 - A changed file's old version is never deleted before its new one is up.
+- **The brake:** when more than 10% of the songs and covers (and more than 20) are gone at once, nothing is deleted
+  until the owner runs `sonus-server r2-allow-deletions`, which lets go only of what is gone by then. A disk not
+  mounted for weeks does not empty the backup.
 - Other names in the bucket are left alone.
+
+**Redirects (presigned links):**
+- A link opens one object, for its one method (`GET` or `HEAD`), to anyone who holds it until it expires (1 hour by
+  default, at most an hour more: links are signed on the hour). It carries no user name or password, and the object's
+  name says nothing of the music.
+- A link is made only after the request's sign-in and the user's right to the song or picture are checked, as for any
+  request, only for a client that asks (`sonusMirror=1`), from where the owner allows (away from the home networks by
+  default; the address is the one the gateway decides, so a client's own `X-Forwarded-For` counts only behind a
+  trusted proxy), and only while the bucket answers.
+- Only the file as it is: a transcode is never sent there, and the ledger must have the file's current version.
+- The 302 says `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+- **Nothing logs a link, a signature or a key.** The request log writes the path only (never the query), errors carry
+  S3's status and `<Code>` only, and every type that holds a key prints "(set)" in its Debug output (`Settings`,
+  `Signer`; `S3` and `Mirror` have no Debug output at all). The tests keep every log line of their runs, at every
+  level (the HTTP library's too), and search them for the keys, the signatures, `X-Amz-Credential` and the links
+  (`tests/common/logs.rs`, in `tests/library.rs` and `tests/mirror.rs`). `SONUS_R2_ENDPOINT` with a user name or
+  password is refused before any message repeats it.
+
+**Restore** (`sonus-server r2-restore`): run by whoever runs the server, with its settings. It writes only inside the
+folder it is given: each path from the manifest must be plain names (no `..`, root, drive or empty part), and a
+folder that leads out through a link is refused. Downloads are checked against the listed size before they are put in
+place.
 
 **The cost of mistakes:** uploads are capped by the day's bytes (20 GB by default), by the rate and by the hours.
 Failing files back off, and after 5 failures wait for the daily check. A refusal (401/403) stops everything until the

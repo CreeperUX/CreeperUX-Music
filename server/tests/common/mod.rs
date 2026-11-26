@@ -4,6 +4,7 @@
 
 pub mod database;
 pub mod fake_s3;
+pub mod logs;
 
 use std::convert::Infallible;
 use std::future::Future;

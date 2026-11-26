@@ -445,6 +445,8 @@ pub struct PendingResize {
     /// The cache key (`h-` and the representation tag).
     pub key: String,
     pub headers: Vec<(HeaderName, HeaderValue)>,
+    /// The original picture's hash when the R2 mirror keeps it (empty: a disc's): the resized one is offered to it.
+    pub cover: String,
 }
 
 /// `getCoverArt`: a picture Navidrome has settled, as it is or resized; a placeholder where Navidrome gives one.
@@ -513,7 +515,7 @@ fn serve(scope: &Scope, kind: &str, item: &str, size: i64, square: bool, request
     let Some(headers) = image_headers(&etag, Some(updated), requested, &state.hash) else { return Ok(Reply::Navidrome("a validator no header carries")) };
     let original = || original(options, &state);
     let missing = "the picture's bytes are not where Navidrome's state says: Navidrome looks again";
-    match source(scope, &etag, size, square, headers, &original) {
+    match source(scope, &etag, size, square, headers, &original, Some(&state.hash)) {
         Served::Reply(reply) => Ok(reply),
         Served::Missing | Served::TooBig => Ok(Reply::Navidrome(missing)),
     }
@@ -529,10 +531,28 @@ enum Served {
 }
 
 /// `serveSource`: the picture as it is, or resized under its own validator (cached by Navidrome or here, else made).
-fn source(scope: &Scope, etag: &str, size: i64, square: bool, headers: Vec<(HeaderName, HeaderValue)>, open: &dyn Fn() -> Option<Vec<u8>>) -> Served {
+/// `cover`: the picture's hash, when it is one the R2 mirror keeps (a settled picture; a disc's is not): a client
+/// that may be sent there is, when the mirror has this picture at this size, and a size made here is offered to it.
+fn source(
+    scope: &Scope,
+    etag: &str,
+    size: i64,
+    square: bool,
+    headers: Vec<(HeaderName, HeaderValue)>,
+    open: &dyn Fn() -> Option<Vec<u8>>,
+    cover: Option<&str>,
+) -> Served {
     let options = scope.options;
     let not_modified = || scope.if_none_match.is_some_and(|sent| if_none_match(sent, etag));
-    let bytes = if size == 0 && !square {
+    let as_is = size == 0 && !square;
+    // (what the client has already is still a 304 from here: cheaper than a trip to the mirror)
+    if let (Some(hash), Some(mirror), true) = (cover, scope.mirror, scope.redirect && !not_modified()) {
+        let key = if as_is { format!("a/{hash}") } else { crate::mirror::resized_key(etag) };
+        if let Some(link) = mirror.link(&key, None, scope.http_method) {
+            return Served::Reply(Reply::Redirect(link));
+        }
+    }
+    let bytes = if as_is {
         match open() {
             Some(bytes) => bytes,
             None => return Served::Missing,
@@ -541,7 +561,12 @@ fn source(scope: &Scope, etag: &str, size: i64, square: bool, headers: Vec<(Head
         let key = format!("h-{etag}");
         // made before, by Navidrome or here
         match resized(options, etag).or_else(|| scope.images.and_then(|cache| cache.get(&key)).and_then(|path| read_picture(&path))) {
-            Some(bytes) => bytes,
+            Some(bytes) => {
+                if let (Some(hash), Some(mirror), Some(content_type)) = (cover, scope.mirror, sniff(&bytes)) {
+                    mirror.offer_resized(etag, hash, &bytes, content_type);
+                }
+                bytes
+            }
             None => {
                 if options.enable_webp_encoding {
                     return Served::Reply(Reply::Navidrome("WebP encoding is on: Navidrome's encoder"));
@@ -555,7 +580,8 @@ fn source(scope: &Scope, etag: &str, size: i64, square: bool, headers: Vec<(Head
                 }
                 let quality = u8::try_from(options.cover_art_quality.clamp(1, 100)).unwrap_or(75);
                 let size = u32::try_from(size).unwrap_or(u32::MAX);
-                return Served::Reply(Reply::Resize(Box::new(PendingResize { original, size, square, quality, key, headers })));
+                let cover = cover.unwrap_or_default().to_string();
+                return Served::Reply(Reply::Resize(Box::new(PendingResize { original, size, square, quality, key, headers, cover })));
             }
         }
     };
@@ -628,7 +654,7 @@ fn serve_disc(scope: &Scope, item: &str, size: i64, square: bool, requested: &st
         *selected.borrow_mut() = Some(picked);
         bytes
     };
-    match source(scope, &etag, size, square, headers, &open) {
+    match source(scope, &etag, size, square, headers, &open, None) {
         Served::Reply(reply) => Ok(reply),
         // nothing for the disc (or too big to resize): the album's cover
         Served::Missing | Served::TooBig => match selected.into_inner() {

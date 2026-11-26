@@ -7,7 +7,8 @@
 //! cargo test --no-default-features --test mirror_s3 -- --nocapture
 //! ```
 //!
-//! The bucket must exist and be empty. Plain http only (this machine's own server, made for the run).
+//! The bucket must exist and be empty. Plain http only (this machine's own server, made for the run). Covers R2-a's
+//! requests (uploads, listing, HEAD, DELETE) and R2-b's (presigned links whole, by range and for HEAD; downloads).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,8 +43,16 @@ fn server() -> Option<Server> {
 }
 
 async fn fetch(url: &str) -> (u16, Bytes) {
+    fetch_range(url, "GET", None).await
+}
+
+async fn fetch_range(url: &str, method: &str, range: Option<&str>) -> (u16, Bytes) {
     let client: Client<_, Empty<Bytes>> = Client::builder(TokioExecutor::new()).build_http();
-    let answer = client.request(Request::get(url).body(Empty::new()).unwrap()).await.unwrap();
+    let mut request = Request::builder().method(method).uri(url);
+    if let Some(range) = range {
+        request = request.header("range", range);
+    }
+    let answer = client.request(request.body(Empty::new()).unwrap()).await.unwrap();
     let status = answer.status().as_u16();
     (status, answer.into_body().collect().await.unwrap().to_bytes())
 }
@@ -98,6 +107,26 @@ async fn a_real_s3_server_takes_what_the_mirror_sends() {
     let expired = Signer::new(&server.key_id, &server.secret, &server.region).presign("GET", &server.authority, &path, old, 3600);
     let (status, _) = fetch(&format!("http://{}{path}?{expired}", server.authority)).await;
     assert_eq!(status, 403, "an expired link");
+    // R2-b's links as the server makes them: on the hour, a part of the object, a HEAD
+    let link = s3.presigned_url("GET", &big_key, Utc::now() - chrono::Duration::minutes(59), 7200);
+    let (status, part) = fetch_range(&link, "GET", Some("bytes=1000-1999")).await;
+    assert_eq!((status, &part[..]), (206, &big_bytes[1000..2000]));
+    let head = s3.presigned_url("HEAD", &big_key, Utc::now(), 3600);
+    assert_eq!(fetch_range(&head, "HEAD", None).await.0, 200);
+    assert_eq!(fetch_range(&head, "GET", None).await.0, 403, "a HEAD link is no GET link");
+
+    // R2-b's downloads (the manifest, a restore), and small objects with their headers
+    let cached = [("content-type".to_string(), "application/gzip".to_string()), ("cache-control".to_string(), "private, no-cache".to_string())];
+    s3.put_bytes_with("manifest/2026-11-26.json.gz", Bytes::from_static(b"a manifest"), &cached).await.unwrap();
+    assert_eq!(s3.get_bytes("manifest/2026-11-26.json.gz", 1 << 20).await.unwrap().as_deref(), Some(&b"a manifest"[..]));
+    assert_eq!(s3.get_bytes("manifest/none.json.gz", 1 << 20).await.unwrap(), None);
+    let restored = dir.join("restored.flac");
+    s3.get_to_file(&big_key, &restored, big_bytes.len() as u64).await.unwrap();
+    assert!(std::fs::read(&restored).unwrap() == big_bytes, "the object downloaded whole");
+    let wrong_size = dir.join("wrong.flac");
+    assert!(s3.get_to_file(&small_key, &wrong_size, 3).await.is_err());
+    assert!(!wrong_size.exists(), "a download of the wrong size is not left behind");
+    s3.delete("manifest/2026-11-26.json.gz").await.unwrap();
 
     // wrong keys are refused as such
     let wrong =

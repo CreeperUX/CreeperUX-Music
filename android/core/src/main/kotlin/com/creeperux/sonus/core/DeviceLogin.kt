@@ -5,6 +5,8 @@ import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -36,23 +38,27 @@ object DeviceLogin {
     const val EXTENSION = "sonusDeviceLogin"
     private val jsonType = "application/json; charset=utf-8".toMediaType()
 
-    private suspend fun post(http: OkHttpClient, url: String, body: Map<String, String>): Pair<Int, JsonObject?> {
+    private class Answer(val status: Int, val body: JsonObject?, val url: HttpUrl)
+
+    /** A POST that stays a POST through a redirect (Redirects.post): the answer, and the address that gave it. */
+    private suspend fun post(http: OkHttpClient, url: String, body: Map<String, String>): Answer {
         val json = JsonObject(body.mapValues { JsonPrimitive(it.value) }).toString()
-        http.newCall(Request.Builder().url(url).post(json.toRequestBody(jsonType)).build()).await().use { res ->
+        Redirects.post(http, url, json.toRequestBody(jsonType)).use { res ->
             val text = res.body.string()
             val obj = try {
                 Json.parseToJsonElement(text) as? JsonObject
             } catch (_: SerializationException) {
                 null
             }
-            return res.code to obj
+            return Answer(res.code, obj, res.request.url)
         }
     }
 
     /**
      * The server's address as it answers (a private host typed without a scheme over HTTP, else HTTPS, as
      * [SubsonicClient.signIn]), and whether it offers the browser sign-in. Asked without signing in:
-     * getOpenSubsonicExtensions is public.
+     * getOpenSubsonicExtensions is public. An address that redirects (http:// → https://) gives the one it leads to:
+     * the sign-in, and everything after it, talks to that one.
      */
     suspend fun probe(server: String, http: OkHttpClient = SubsonicClient.Shared): Pair<String, Boolean> {
         val baseUrl = Hosts.normalizeServer(server)
@@ -63,7 +69,8 @@ object DeviceLogin {
         for (candidate in candidates) {
             try {
                 val url = "$candidate/rest/getOpenSubsonicExtensions.view?v=${SubsonicClient.API_VERSION}&c=Sonus&f=json"
-                http.newCall(Request.Builder().url(url).build()).await().use { res ->
+                val request = Request.Builder().url(url).build()
+                http.newCall(request).await().use { res ->
                     if (!res.isSuccessful) {
                         last = ServerUnreachableException("$candidate 返回了 ${res.code}。")
                         return@use
@@ -73,7 +80,8 @@ object DeviceLogin {
                         last = ServerUnreachableException("$candidate 不像是 Navidrome。")
                         return@use
                     }
-                    return candidate to J.array(body, "openSubsonicExtensions").any { J.str(it, "name") == EXTENSION }
+                    val server = Redirects.movedBase(request.url, res.request.url, "/rest/getOpenSubsonicExtensions.view") ?: candidate
+                    return server to J.array(body, "openSubsonicExtensions").any { J.str(it, "name") == EXTENSION }
                 }
             } catch (e: IOException) {
                 last = e
@@ -84,20 +92,26 @@ object DeviceLogin {
         throw ServerUnreachableException("连不上 $baseUrl。检查地址和网络。", last)
     }
 
-    /** Asks the server for a browser sign-in for this app ([client], "Sonus") on this device ([device], its name). */
+    /** Asks the server for a browser sign-in for this app ([client], "Sonus") on this device ([device], its name). When
+     *  [server] redirects, the sign-in (its approval page, the asking, the key) is the address it leads to's. */
     suspend fun start(server: String, client: String, device: String, http: OkHttpClient = SubsonicClient.Shared): DeviceLoginStart {
-        val (status, r) = try {
+        val answer = try {
             post(http, "$server/auth/device/start", mapOf("client" to client, "device" to device))
+        } catch (e: RedirectRefusedException) {
+            throw SubsonicException(0, e.message.orEmpty())
         } catch (e: IOException) {
             throw ServerUnreachableException("连不上 $server。检查地址和网络。", e)
         }
+        val status = answer.status
+        val r = answer.body
         if (status !in 200..299 || r == null) throw SubsonicException(0, "服务器没有开始登录（$status）。", status)
+        val at = Redirects.movedBase("$server/auth/device/start".toHttpUrl(), answer.url, "/auth/device/start") ?: server
         val path = J.str(r, "verificationPath") ?: "/app/#/device"
         return DeviceLoginStart(
-            server = server,
+            server = at,
             deviceCode = J.str(r, "deviceCode") ?: throw SerializationException("no deviceCode"),
             userCode = J.str(r, "userCode") ?: throw SerializationException("no userCode"),
-            verificationUrl = verificationUrl(server, path),
+            verificationUrl = verificationUrl(at, path),
             intervalMs = maxOf(1, J.int(r, "interval")) * 1000L,
             expires = System.currentTimeMillis() + maxOf(30, J.int(r, "expiresIn")) * 1000L,
         )
@@ -113,8 +127,9 @@ object DeviceLogin {
 
     /** How the sign-in stands now; approved, it is the sign-in to keep. */
     suspend fun poll(start: DeviceLoginStart, http: OkHttpClient = SubsonicClient.Shared): Pair<DeviceLoginState, Login?> {
-        val (status, r) = post(http, "${start.server}/auth/device/poll", mapOf("deviceCode" to start.deviceCode))
-        if (status !in 200..299 || r == null) return DeviceLoginState.Pending to null // asked again next time
+        val answer = post(http, "${start.server}/auth/device/poll", mapOf("deviceCode" to start.deviceCode))
+        val r = answer.body
+        if (answer.status !in 200..299 || r == null) return DeviceLoginState.Pending to null // asked again next time
         val key = J.str(r, "apiKey")
         return when (J.str(r, "status")) {
             "approved" -> if (!key.isNullOrEmpty()) DeviceLoginState.Approved to Login.withApiKey(start.server, J.str(r, "username").orEmpty(), key) else DeviceLoginState.Pending to null
@@ -144,7 +159,7 @@ object DeviceLogin {
     suspend fun revoke(login: Login, http: OkHttpClient = SubsonicClient.Shared): Boolean {
         if (!login.isApiKey) return false
         return try {
-            post(http, "${login.server}/auth/device/revoke", mapOf("apiKey" to login.apiKey!!)).first in 200..299
+            post(http, "${login.server}/auth/device/revoke", mapOf("apiKey" to login.apiKey!!)).status in 200..299
         } catch (_: IOException) {
             false
         }

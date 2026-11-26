@@ -19,6 +19,7 @@ import kotlinx.serialization.json.JsonObject
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.FormBody
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -35,11 +36,18 @@ import kotlin.coroutines.resumeWithException
  * authentication; JSON answers; writes are POSTed as forms when the server reads them. Answers are parsed off the main
  * thread (OkHttp's threads); every function is safe to call from any coroutine.
  */
-class SubsonicClient(val login: Login, val clientName: String, private val http: OkHttpClient = Shared) {
+class SubsonicClient(login: Login, val clientName: String, private val http: OkHttpClient = Shared) {
+    /** The sign-in. Its server is the address the server answers at: when a request is redirected to another (http://
+     *  to https://, a moved host), that one from then on, for every request, the streams and covers too (the app keeps
+     *  it as the sign-in's address). */
+    @Volatile
+    var login: Login = login
+        private set
+
 
     @Volatile
     var extensions: Set<String> = emptySet()
-        private set
+        internal set
 
     /** The OpenSubsonic extensions with the versions the server speaks of each (sonusConnect: [1, 2]). */
     @Volatile
@@ -90,17 +98,22 @@ class SubsonicClient(val login: Login, val clientName: String, private val http:
         val parameters = params(extra)
         val post = postWanted && "formPost" in extensions // a server that does not say it reads POSTed forms gets GET
         val url = "${login.server}/rest/$method.view"
-        val request = if (post) {
-            Request.Builder().url(url).post(FormBody.Builder().apply { parameters.forEach { (k, v) -> add(k, v) } }.build()).build()
-        } else {
-            Request.Builder().url("$url?${query(parameters)}").build()
-        }
         val body: String
         try {
-            http.newCall(request).await().use { res ->
+            // a POST stays a POST through a redirect (OkHttp would send it on as a GET without the form)
+            val res = if (post) {
+                Redirects.post(http, url, FormBody.Builder().apply { parameters.forEach { (k, v) -> add(k, v) } }.build())
+            } else {
+                http.newCall(Request.Builder().url("$url?${query(parameters)}").build()).await()
+            }
+            res.use {
                 if (!res.isSuccessful) throw SubsonicException(0, "服务器返回了 ${res.code} ${res.message}。".replace("  ", " "), res.code)
                 body = res.body.string()
+                // redirected: the address it led to is the server's from now on
+                Redirects.movedBase(url.toHttpUrl(), res.request.url, "/rest/$method.view")?.let { moved -> login = login.copy(server = moved) }
             }
+        } catch (e: RedirectRefusedException) {
+            throw SubsonicException(0, e.message.orEmpty())
         } catch (e: IOException) {
             online.value = false
             throw ServerUnreachableException("无法连接到音乐服务器。检查网络，然后重新连接。", e)
@@ -391,7 +404,7 @@ class SubsonicClient(val login: Login, val clientName: String, private val http:
             } catch (_: NotSubsonicException) {
                 throw ServerUnreachableException("$baseUrl 不像是 Navidrome（没有 Subsonic API 的回应）。")
             }
-            return login
+            return client.login // at the address the server answered at, when it redirected
         }
     }
 }

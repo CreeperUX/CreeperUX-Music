@@ -499,39 +499,39 @@ fun PlaybackBar() {
     val nav = LocalNav.current
     val t = currentTrack()
     Column(Modifier.fillMaxWidth()) {
-    Row(Modifier.fillMaxWidth().height(88.dp).padding(horizontal = 16.dp).testTag("playback-bar"), verticalAlignment = Alignment.CenterVertically) {
-        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-            if (t != null) {
-                Cover(session.trackCoverUrl(t, 56.dp.px()), 56.dp)
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f, fill = false)) {
-                    Text(t.title, style = Sonus.type.cardTitle, color = c.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { nav.go(Route.Album(t.albumId)) })
-                    Text(t.artist, style = Sonus.type.caption, color = c.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { nav.go(Route.Artist(t.artistId)) })
-                    WhereLine(besideStrip = true)
+        Row(Modifier.fillMaxWidth().height(88.dp).padding(horizontal = 16.dp).testTag("playback-bar"), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                if (t != null) {
+                    Cover(session.trackCoverUrl(t, 56.dp.px()), 56.dp)
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f, fill = false)) {
+                        Text(t.title, style = Sonus.type.cardTitle, color = c.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { nav.go(Route.Album(t.albumId)) })
+                        Text(t.artist, style = Sonus.type.caption, color = c.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { nav.go(Route.Artist(t.artistId)) })
+                        WhereLine(besideStrip = true)
+                    }
+                    Heart(t)
                 }
-                Heart(t)
+            }
+            Column(Modifier.weight(2f).widthIn(max = 720.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Controls(big = false)
+                SeekBar(Modifier.fillMaxWidth().widthIn(max = 720.dp))
+            }
+            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                DevicesButton()
+                val lyricsOn = nav.current == Route.Lyrics
+                RoundButton("lyrics", "歌词", { if (lyricsOn) nav.back() else nav.go(Route.Lyrics) }, on = lyricsOn)
+                val queueOn = nav.panelOpen.value && nav.panel.value == PanelView.Queue
+                RoundButton("queue", "播放队列", {
+                    if (queueOn) nav.panel.value = PanelView.NowPlaying
+                    else {
+                        nav.panelOpen.value = true
+                        nav.panel.value = PanelView.Queue
+                    }
+                }, on = queueOn)
             }
         }
-        Column(Modifier.weight(2f).widthIn(max = 720.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Controls(big = false)
-            SeekBar(Modifier.fillMaxWidth().widthIn(max = 720.dp))
-        }
-        Row(Modifier.weight(1f), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-            DevicesButton()
-            val lyricsOn = nav.current == Route.Lyrics
-            RoundButton("lyrics", "歌词", { if (lyricsOn) nav.back() else nav.go(Route.Lyrics) }, on = lyricsOn)
-            val queueOn = nav.panelOpen.value && nav.panel.value == PanelView.Queue
-            RoundButton("queue", "播放队列", {
-                if (queueOn) nav.panel.value = PanelView.NowPlaying
-                else {
-                    nav.panelOpen.value = true
-                    nav.panel.value = PanelView.Queue
-                }
-            }, on = queueOn)
-        }
-    }
-    // while another device plays, the strip under the bar (as the Windows bar's, Spotify's)
-    ElsewhereStrip(Modifier.padding(start = 8.dp, end = 8.dp, bottom = 6.dp).clip(RoundedCornerShape(4.dp)))
+        // while another device plays, the strip under the bar (as the Windows bar's, Spotify's)
+        ElsewhereStrip(Modifier.padding(start = 8.dp, end = 8.dp, bottom = 6.dp).clip(RoundedCornerShape(4.dp)))
     }
 }
 

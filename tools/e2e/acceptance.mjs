@@ -12,9 +12,9 @@
 // that server has, and a check the server's library cannot give is reported as skipped, with the reason.
 // Usage: node tools/e2e/acceptance.mjs [--arch=x64|ARM64] [--no-build] [--only=signin,pages,playback,playlists,search,devices,connect,layout,offline,smtc,restart,updates,former,browser] [--exe=<path>]
 import { createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
-import { build, TestApp, sleep, work, exeFor, credentialKept, forgetCredential, mediaSessions, formerCredentialKept, forgetFormerCredential, writeFormerCredential, writeCredential, testCredential, formerCredential } from './e2e.mjs';
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, copyFileSync, existsSync } from 'node:fs';
+import { join, basename } from 'node:path';
+import { build, TestApp, instances, sleep, work, exeFor, credentialKept, forgetCredential, mediaSessions, formerCredentialKept, forgetFormerCredential, writeFormerCredential, writeCredential, testCredential, formerCredential } from './e2e.mjs';
 import { startTarget } from './target.mjs';
 import { startFakeGitHub } from './fake-github.mjs';
 
@@ -35,15 +35,60 @@ async function check(name, fn) {
   try { await fn(); results.push({ round: current, name, ok: true }); log(`  ✓ ${name} (${Date.now() - t0} ms)`); }
   catch (e) {
     if (e instanceof Skip && !server.demo) { skip(name, e.message); return; }
-    results.push({ round: current, name, ok: false, error: e.message.split('\n')[0] }); log(`  ✗ ${name}: ${e.message.split('\n')[0]}`);
+    let error = e.message.split('\n')[0];
+    // an instance that ended by itself is named, with its exit code, the first time a check fails after it
+    const died = instances.find(a => a.died && !a.reported);
+    if (died) { died.reported = true; if (!error.startsWith('测试实例意外退出')) error = `${died.diedText()}；${error}`; }
+    results.push({ round: current, name, ok: false, error }); log(`  ✗ ${name}: ${error}`);
+    keepLogs(name, error);
   }
 }
+
+// ---------------------------------------------------------------- what a failure leaves: logs and crash dumps
+// Kept in .work/acceptance/kept-<when this run started>/<n>-<round>/, which no later run clears (the next run starts its
+// instances on fresh data folders, losing their logs): every instance's app.log, and for an instance that ended by
+// itself, the dump Windows Error Reporting wrote for it (%LOCALAPPDATA%\CrashDumps\Sonus.exe.<pid>.dmp, where WER keeps
+// local dumps, as it does on this PC).
+const reportDir = join(work, 'acceptance');
+const keptDir = join(reportDir, `kept-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`);
+let kept = 0;
+function keepLogs(name, error) {
+  const into = join(keptDir, `${String(++kept).padStart(2, '0')}-${current}`);
+  try {
+    mkdirSync(into, { recursive: true });
+    const lines = [`检查：${name}`, `失败：${error}`, '', '测试实例：'];
+    const folders = new Set();
+    for (const a of instances) {
+      lines.push(`- ${instanceLine(a)}`);
+      folders.add(a.data);
+      if (a.died && !a.dumpKept) {
+        a.dumpKept = true;
+        const dump = join(process.env.LOCALAPPDATA ?? '', 'CrashDumps', `Sonus.exe.${a.pid}.dmp`);
+        if (existsSync(dump)) { copyFileSync(dump, join(into, basename(dump))); lines.push(`  崩溃转储：${basename(dump)}`); }
+      }
+    }
+    for (const folder of folders) for (const f of ['app.log', 'app.log.1']) {
+      if (existsSync(join(folder, f))) copyFileSync(join(folder, f), join(into, `${basename(folder)}-${f}`));
+    }
+    writeFileSync(join(into, 'failure.txt'), lines.join('\n') + '\n');
+    log(`    日志已保留：${into}`);
+  } catch (e) { log(`    （没能保留日志：${e.message}）`); }
+}
+/** One instance: its name, process, when it started and how it ended. */
+const instanceLine = a => `${a.name}，进程 ${a.pid}，${a.started?.toLocaleTimeString('zh-CN') ?? '?'} 启动：${a.exitText()}${!a.exit ? '' : !a.exit.expected ? '，意外退出' : a.killed ? '，停止时被强制结束' : '，按要求关闭'}`;
 /** A check this server cannot give the data for (never against the demo server): reported, not failed. */
 function skip(name, reason) { results.push({ round: current, name, ok: true, skipped: reason }); log(`  – ${name}：跳过（${reason}）`); }
 const assert = (ok, msg) => { if (!ok) throw new Error(msg); };
 function round(name, title) { current = name; log(`\n${title}`); }
 function quiet(app) {
-  const q = app.quiet();
+  if (app.died) {
+    results.push({ round: current, name: `静默检查：${app.diedText()}`, ok: false }); log(`  ✗ 静默检查：${app.diedText()}`);
+    if (!app.reported) { app.reported = true; keepLogs('静默检查', app.diedText()); }
+    noExceptions(app); // what it logged before it ended ([crash] …)
+    return;
+  }
+  let q;
+  try { q = app.quiet(); } catch (e) { q = `出错：${e.message.split('\n')[0]}`; }
   results.push({ round: current, name: `静默：${q}`, ok: q.startsWith('QUIET') });
   log(`  ${q.startsWith('QUIET') ? '✓' : '✗'} 静默检查：${q}`);
   noExceptions(app);
@@ -132,6 +177,10 @@ try {
       const s = await state();
       assert(s.songs === nSongs && s.albums === nAlbums && s.playlists.length === nPlaylists + 2, JSON.stringify({ songs: s.songs, albums: s.albums, pl: s.playlists.length }));
       assert(s.route === 'home' && s.title === '首页 · Sonus', s.title);
+    });
+    await check('UI 线程等锁时，别的线程调用进来的 COM 调用要等它空下来，不在等待中途执行（0.6.2 登录后崩溃的原因）', async () => {
+      const r = await app.send('reentrancy', 10000);
+      assert(r.startsWith('after the wait'), r);
     });
     await check('登录信息在 Windows 凭据管理器里（测试专用条目），设置文件里没有令牌', async () => {
       assert(credentialKept(), `凭据管理器里没有 ${testCredential('server')}`);
@@ -988,8 +1037,10 @@ try {
 }
 
 const passed = results.filter(r => r.ok).length, skipped = results.filter(r => r.skipped).length;
-const dir = join(work, 'acceptance');
+const dir = reportDir;
 mkdirSync(dir, { recursive: true });
-writeFileSync(join(dir, 'report.md'), `# 验收报告 ${new Date().toLocaleString('zh-CN')}\n\n服务器：${server.describe}\n\n${passed}/${results.length} 通过${skipped ? `（其中 ${skipped} 项跳过）` : ''}\n\n${results.map(r => `- ${r.skipped ? '–' : r.ok ? '✓' : '✗'} [${r.round}] ${r.name}${r.skipped ? `：跳过（${r.skipped}）` : r.ok ? '' : `：${r.error}`}`).join('\n')}\n`);
+const ended = `\n## 测试实例\n\n${instances.map(a => `- ${instanceLine(a)}`).join('\n')}\n${kept ? `\n失败时的日志${instances.some(a => a.died) ? '和崩溃转储' : ''}：${keptDir}\n` : ''}`;
+writeFileSync(join(dir, 'report.md'), `# 验收报告 ${new Date().toLocaleString('zh-CN')}\n\n服务器：${server.describe}\n\n${passed}/${results.length} 通过${skipped ? `（其中 ${skipped} 项跳过）` : ''}\n\n${results.map(r => `- ${r.skipped ? '–' : r.ok ? '✓' : '✗'} [${r.round}] ${r.name}${r.skipped ? `：跳过（${r.skipped}）` : r.ok ? '' : `：${r.error}`}`).join('\n')}\n${ended}`);
+log(`测试实例：${instances.map(a => `${a.name} ${a.pid} ${a.exitText()}${a.died ? '（意外）' : ''}`).join('；')}`);
 log(`\n${passed}/${results.length} 通过${skipped ? `（其中 ${skipped} 项跳过）` : ''}${passed === results.length ? '' : `，${results.length - passed} 项失败`}（报告：tools/e2e/.work/acceptance/report.md）`);
 process.exit(passed === results.length ? 0 : 1);

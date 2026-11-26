@@ -66,6 +66,7 @@ public sealed partial class MainWindow : Window, IShell
         };
         AppWindow.Closing += async (_, e) =>
         {
+            Log.Write($"[window] closing ({(_music is null ? "signed out: closes at once" : "signed in")}{(_closing ? ", already closing" : "")})");
             if (_music is null || _closing) return;
             e.Cancel = true; _closing = true;
             await _music.SaveQueueNowAsync(); // the position, for another device
@@ -105,6 +106,7 @@ public sealed partial class MainWindow : Window, IShell
     {
         if (_closing) return;
         _closing = true;
+        Log.Write("[window] closing for the update");
         if (_music is { } m) { await m.SaveQueueNowAsync(); _connect?.Dispose(); _session?.Dispose(); m.Dispose(); }
         Close();
     }

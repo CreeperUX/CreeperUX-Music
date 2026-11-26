@@ -38,11 +38,18 @@ export async function startDemoServer({ scale = 1 } = {}) {
   return { url, process: p, log: async () => (await fetch(`${url}/__test/log`)).json(), offline: on => fetch(`${url}/__test/offline?on=${on ? 1 : 0}`), stop: () => p.kill() };
 }
 
+/** Every test instance this process started, in order: a failed check keeps their logs (acceptance.mjs). */
+export const instances = [];
+// the instances end with this process: node's own exit kills what is left (the app also ends itself, SONUS_E2E_PARENT)
+process.on('exit', () => { for (const a of instances) if (a.proc && !a.exit) { try { a.proc.kill(); } catch { /* gone */ } } });
+const hex = n => `0x${(n >>> 0).toString(16).toUpperCase().padStart(8, '0')}`;
+
 /** A test instance: start(), send(command), shot(name), quiet(), stop(). */
 export class TestApp {
   /** @param env more environment for the instance (SONUS_GITHUB_API: a fake GitHub) */
   constructor(name, { exe = exeFor(), demo = null, fresh = true, env = {} } = {}) {
     this.name = name; this.exe = exe; this.demo = demo; this.env = env;
+    this.exit = null; // { code, signal, expected, at } once the process has ended
     this.data = join(work, `data-${name}`);
     this.pipe = `sonus-e2e-${name}-${process.pid}`;
     if (fresh) rmSync(this.data, { recursive: true, force: true });
@@ -52,12 +59,28 @@ export class TestApp {
 
   async start() {
     if (!existsSync(this.exe)) throw new Error(`${this.exe} not built (node tools/e2e/acceptance.mjs builds it)`);
-    this.proc = spawn(this.exe, [], { env: { ...process.env, SONUS_E2E: this.pipe, SONUS_DATA_DIR: this.data, SONUS_TEST_CREDENTIAL: TEST_RUN, ...(this.demo ? { SONUS_DEMO: this.demo } : {}), ...this.env }, stdio: 'ignore' });
+    this.exit = null; this.stopping = false; this.reported = false;
+    // Detached: outside node's job object (libuv's). That job sets SEM_NOGPFAULTERRORBOX on its processes: a crash in one
+    // ends it with the exception code and nothing else, no Windows Error Reporting, no Application Error event, no dump.
+    // Outside it a crash is reported as any app's (WER's local dumps keep a .dmp, which acceptance.mjs copies). The job
+    // also ended the instances with node: SONUS_E2E_PARENT does that now (the app ends itself when this process ends).
+    this.proc = spawn(this.exe, [], { env: { ...process.env, SONUS_E2E: this.pipe, SONUS_E2E_PARENT: String(process.pid), SONUS_DATA_DIR: this.data, SONUS_TEST_CREDENTIAL: TEST_RUN, ...(this.demo ? { SONUS_DEMO: this.demo } : {}), ...this.env }, stdio: 'ignore', detached: true });
+    this.proc.on('exit', (code, signal) => { this.exit = { code, signal, expected: this.stopping, at: new Date() }; });
+    this.proc.on('error', e => { this.exit ??= { code: null, signal: null, error: e.message, expected: false, at: new Date() }; });
     this.pid = this.proc.pid;
+    this.started = new Date();
+    instances.push(this);
     for (let i = 0; i < 150; i++) {
+      if (this.exit) throw new Error(`测试实例 ${this.name} 启动时就退出了，${this.exitText()}`);
       try {
-        if ((await this.send('ping', 1500)) === 'pong') { this.pid = Number(await this.send('pid')); return this; } // the process that owns the window
-      } catch { /* not up yet */ }
+        if ((await this.send('ping', 1500)) === 'pong') {
+          this.pid = Number(await this.send('pid')); // the process that owns the window
+          // another process answering on this pipe (an instance left from before with the same data folder): its exit
+          // could not be seen here
+          if (this.pid !== this.proc.pid) throw new Error(`测试实例 ${this.name} 的窗口属于进程 ${this.pid}，不是刚启动的 ${this.proc.pid}`);
+          return this;
+        }
+      } catch (e) { if (e.message.startsWith('测试实例')) throw e; /* not up yet */ }
       await sleep(200);
     }
     throw new Error(`test instance ${this.name} did not open its pipe`);
@@ -68,13 +91,28 @@ export class TestApp {
   async send(command, timeout = 15000) {
     const t0 = Date.now();
     for (;;) {
+      if (this.died) throw new Error(this.diedText());
       try { return await this.#once(command, timeout); }
       catch (e) {
-        if (!['ENOENT', 'EBUSY'].includes(e.code) || Date.now() - t0 > Math.min(timeout, 5000)) throw e;
-        await sleep(30);
+        if (['ENOENT', 'EBUSY'].includes(e.code) && Date.now() - t0 <= Math.min(timeout, 5000) && !this.exit) { await sleep(30); continue; }
+        // the pipe broke ("write EOF") or went away because the process ended: say that, with its exit code
+        if (this.proc && !this.stopping) { for (let i = 0; i < 20 && !this.exit; i++) await sleep(50); }
+        if (this.died) throw new Error(this.diedText());
+        throw e;
       }
     }
   }
+
+  /** The process ended without being told to (stop()): a crash, or something outside the test closed it. */
+  get died() { return !!this.exit && !this.exit.expected; }
+  /** How the process ended: its exit code in hex (a crash's is the exception code, 0xC0000005 say), or still running. */
+  exitText() {
+    if (!this.exit) return '还在运行';
+    const { code, signal, error } = this.exit;
+    if (error) return `启动失败：${error}`;
+    return code === null || code === undefined ? `被结束（${signal}）` : `退出码 ${hex(code)}${signal ? `（${signal}）` : ''}`;
+  }
+  diedText() { return `测试实例意外退出，${this.exitText()}（${this.name}，进程 ${this.pid}）`; }
 
   #once(command, timeout) {
     return new Promise((ok, fail) => {
@@ -118,9 +156,11 @@ export class TestApp {
   }
 
   async stop() {
+    this.stopping = true;
+    if (this.exit) return;
     try { await this.send('close', 3000); } catch { /* gone */ }
-    for (let i = 0; i < 30 && this.proc.exitCode === null; i++) await sleep(100);
-    if (this.proc.exitCode === null) this.proc.kill();
+    for (let i = 0; i < 30 && !this.exit; i++) await sleep(100);
+    if (!this.exit) { this.killed = true; this.proc.kill(); for (let i = 0; i < 40 && !this.exit; i++) await sleep(50); }
   }
 }
 

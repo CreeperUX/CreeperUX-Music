@@ -47,6 +47,7 @@ internal static class E2EChannel
     {
         if (PipeName is not { } pipe) return;
         Log.Write($"[e2e] channel on pipe {pipe}");
+        EndWithTheRun();
         _ = Task.Run(async () =>
         {
             while (true)
@@ -66,12 +67,86 @@ internal static class E2EChannel
         });
     }
 
+    /// <summary>
+    /// The test run's process (SONUS_E2E_PARENT): when it ends, this instance ends too. tools/e2e starts instances outside
+    /// node's job object, so that a crash reaches Windows Error Reporting (inside it, a crash ends the process silently);
+    /// that job used to end them with node.
+    /// </summary>
+    private static void EndWithTheRun()
+    {
+        if (!int.TryParse(Environment.GetEnvironmentVariable("SONUS_E2E_PARENT"), out int pid)) return;
+        System.Diagnostics.Process run;
+        try { run = System.Diagnostics.Process.GetProcessById(pid); }
+        catch (ArgumentException) { Log.Write("[e2e] the test run has already ended: closing"); Environment.Exit(3); return; }
+        new Thread(() =>
+        {
+            run.WaitForExit();
+            Log.Write("[e2e] the test run ended: closing");
+            Environment.Exit(3);
+        }) { IsBackground = true, Name = "test run watch" }.Start();
+    }
+
+    /// <summary>
+    /// "reentrancy": 0.6.2's crash, without the crash. The UI thread waits 400 ms for a lock another thread holds while a
+    /// third thread calls into the UI thread's COM context, as the finalizer does when it releases a XAML object. "after the
+    /// wait": the call waited for the UI thread to be free (UiSynchronizationContext); "during the wait": the CLR pumped
+    /// and ran it inside the wait, which XAML in the middle of a layout does not survive.
+    /// </summary>
+    private static async Task<string> Reentrancy()
+    {
+        Guid iid = IidContextCallback;
+        if (CoGetObjectContext(ref iid, out IntPtr context) < 0) return "error: no COM context";
+        var gate = new object();
+        using var held = new ManualResetEventSlim();
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        long ran = -1;
+        var holder = new Thread(() => { lock (gate) { held.Set(); Thread.Sleep(400); } }) { IsBackground = true };
+        holder.Start();
+        held.Wait();
+        var caller = new Thread(() => { Thread.Sleep(100); CallIn(context, () => ran = clock.ElapsedMilliseconds); Marshal.Release(context); }) { IsBackground = true };
+        caller.Start();
+        lock (gate) { }
+        long acquired = clock.ElapsedMilliseconds;
+        await Task.Run(caller.Join); // back to the message loop: the call can come in now
+        return ran < 0 ? "error: the call did not run" : $"{(ran < acquired ? "during" : "after")} the wait (call at {ran} ms, lock at {acquired} ms)";
+    }
+
+    private static readonly Guid IidContextCallback = new("000001da-0000-0000-C000-000000000046");
+    // what CsWinRT passes for its calls into a context (Context.CallInContext)
+    private static readonly Guid IidCallbackWithNoReentrancyToApplicationSta = new("0A299774-3E4E-FC42-1D9D-72CEE105CA57");
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ComCallData { public uint Dispid, Reserved; public IntPtr UserDefined; }
+
+    private static unsafe void CallIn(IntPtr context, Action action)
+    {
+        var handle = GCHandle.Alloc(action);
+        try
+        {
+            var data = new ComCallData { UserDefined = GCHandle.ToIntPtr(handle) };
+            Guid iid = IidCallbackWithNoReentrancyToApplicationSta;
+            // IContextCallback::ContextCallback, the vtable's fourth method
+            var call = (delegate* unmanaged[Stdcall]<IntPtr, delegate* unmanaged[Stdcall]<ComCallData*, int>, ComCallData*, Guid*, int, IntPtr, int>)(*(IntPtr**)context)[3];
+            Marshal.ThrowExceptionForHR(call(context, &RunCallback, &data, &iid, 5, IntPtr.Zero));
+        }
+        finally { handle.Free(); }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvStdcall)])]
+    private static unsafe int RunCallback(ComCallData* data)
+    {
+        ((Action)GCHandle.FromIntPtr(data->UserDefined).Target!)();
+        return 0;
+    }
+
+    [DllImport("ole32.dll")] private static extern int CoGetObjectContext(ref Guid iid, out IntPtr context);
+
     private static Task<string> RunOnUi(DispatcherQueue ui, string line)
     {
         var done = new TaskCompletionSource<string>();
         ui.TryEnqueue(async () =>
         {
-            try { done.SetResult(line.StartsWith("shot ", StringComparison.Ordinal) ? await Shot(line[5..].Trim()) : Execute(line.Trim())); }
+            try { done.SetResult(line.StartsWith("shot ", StringComparison.Ordinal) ? await Shot(line[5..].Trim()) : line.Trim() == "reentrancy" ? await Reentrancy() : Execute(line.Trim())); }
             catch (Exception ex) { Log.Write($"[e2e] {line}: {ex}"); done.SetResult("error: " + ex.Message); }
         });
         return done.Task;

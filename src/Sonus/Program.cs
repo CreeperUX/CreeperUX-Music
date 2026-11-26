@@ -24,6 +24,8 @@ public static partial class Program
         SetCurrentProcessExplicitAppUserModelID(AppPaths.IsTestInstance ? "Sonus.Test" : "Sonus");
         TakeOverFormerName();
         if (RedirectToRunningInstance()) return 0;
+        // the start and the end of each process, so a log section can be matched with an exit code
+        Log.Write($"[process] {Environment.ProcessId} started: Sonus {Updates.UpdateService.CurrentText} {RuntimeInformation.ProcessArchitecture} on {RuntimeInformation.OSArchitecture}");
         // The songs stream through WinINet (Media Foundation's HTTP source) and so do the media controls' cover thumbnails.
         // WinINet allows 2 connections per server: the playing song, the next one (loaded ahead) and the thumbnail queue
         // behind each other, and a new song can wait seconds for a connection (seen against a remote server).
@@ -34,10 +36,11 @@ public static partial class Program
         }
         Application.Start(p =>
         {
-            SynchronizationContext.SetSynchronizationContext(new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread()));
+            SynchronizationContext.SetSynchronizationContext(new UiSynchronizationContext(DispatcherQueue.GetForCurrentThread()));
             _ = new App();
             WatchUiThread(DispatcherQueue.GetForCurrentThread());
         });
+        Log.Write("[exit] the window closed: the app ends");
         return 0;
     }
 

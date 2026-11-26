@@ -243,27 +243,45 @@ public sealed class PlaybackBar : UserControl
     }
 
     // ---------------------------------------------------------------- devices (Sonus Connect)
-    /// <summary>The user's devices, as Spotify's device picker: this one, then the others with what they play; picking
-    /// one plays there (what plays moves along) and the bar controls it.</summary>
+    /// <summary>The user's devices, as Spotify's device picker. With version 2: the device that plays on top ("当前设备",
+    /// with its volume), then the others on one line each (a click moves playback there; each has a small volume slider,
+    /// rule 8). With version 1: this one and the others with what each plays; picking one controls it.</summary>
     private Flyout DevicesFlyout()
     {
-        var list = new StackPanel { Spacing = 2, Width = 320, Padding = new Thickness(4) };
+        var list = new StackPanel { Width = 300 };
         var flyout = new Flyout { Content = list, Placement = FlyoutPlacementMode.Top };
+        flyout.FlyoutPresenterStyle = new Style(typeof(FlyoutPresenter))
+        {
+            Setters = { new Setter(Control.PaddingProperty, new Thickness(6, 8, 6, 8)), new Setter(Control.CornerRadiusProperty, new CornerRadius(10)) },
+        };
         // a test window draws it inside itself: as a popup window of its own it would take the foreground (as menus)
         flyout.ShouldConstrainToRootBounds = Testing.E2EChannel.Enabled || flyout.ShouldConstrainToRootBounds;
-        void Fill()
+
+        void Heading()
         {
             list.Children.Clear();
-            var heading = Ui.Text("在哪台设备上播放", size: 15, foreground: Ui.Brush("TextPrimaryBrush"), bold: true);
-            heading.Margin = new Thickness(8, 4, 8, 8);
+            var heading = Ui.Text("在哪台设备上播放", size: 14, foreground: Ui.Brush("TextPrimaryBrush"), bold: true);
+            heading.Margin = new Thickness(10, 2, 10, 6);
             list.Children.Add(heading);
-            if (!_connect.IsConnected)
-            {
-                var note = Ui.Note(Glyphs.Info, "正在连接服务器上的 Sonus Connect…");
-                note.Margin = new Thickness(8, 0, 8, 8);
-                list.Children.Add(note);
-                return;
-            }
+        }
+        void Note(string text)
+        {
+            var note = Ui.Note(Glyphs.Info, text);
+            note.Margin = new Thickness(10, 4, 10, 4);
+            list.Children.Add(note);
+        }
+        void Caption(string text)
+        {
+            var caption = Ui.Text(text, size: 12, foreground: Ui.Brush("TextTertiaryBrush"));
+            caption.Margin = new Thickness(10, 8, 10, 2);
+            list.Children.Add(caption);
+        }
+
+        // version 1: each device with what it plays; picking one controls it (and moves what plays here)
+        void Fill()
+        {
+            Heading();
+            if (!_connect.IsConnected) { Note("正在连接服务器上的 Sonus Connect…"); return; }
             var m = _music;
             string hereStatus = m.Current is { } t ? $"{(m.IsActive ? "正在播放" : "已暂停")} · {t.Title}" : "空闲";
             list.Children.Add(Row("这台电脑", Glyphs.Devices, hereStatus, m.IsActive, Remote is null, () => _ = _connect.SelectAsync(null)));
@@ -272,93 +290,156 @@ public sealed class PlaybackBar : UserControl
                 string status = d.State is { TrackId: not null } s ? $"{(s.Playing ? "正在播放" : "已暂停")} · {s.Title ?? m.Library.Track(s.TrackId)?.Title}" : "空闲";
                 list.Children.Add(Row(d.Name, GlyphOf(d.Kind), status, d.State?.Playing == true, Remote?.Id == d.Id, () => _ = _connect.SelectAsync(d)));
             }
-            if (_connect.Others.Count == 0)
-            {
-                var note = Ui.Note(Glyphs.Info, "没有其他设备在线。在另一台电脑或手机上打开 Sonus，登录同一个账号，就会出现在这里。");
-                note.Margin = new Thickness(8, 4, 8, 8);
-                list.Children.Add(note);
-            }
+            if (_connect.Others.Count == 0) Note("没有其他设备在线。在另一台电脑或手机上打开 Sonus，登录同一个账号，就会出现在这里。");
         }
-        Button Row(string name, string glyph, string status, bool playing, bool current, Action click)
+        Button Row(string name, string glyph, string? status, bool playing, bool current, Action click)
         {
-            var icon = Ui.Icon(glyph, 18, current ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextSecondaryBrush"));
-            var title = Ui.Text(name, size: 14, foreground: current ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextPrimaryBrush"), bold: current);
-            var sub = Ui.Text(status, size: 12, foreground: Ui.Brush("TextSecondaryBrush"));
-            var text = Ui.Column(1, title, sub);
-            text.VerticalAlignment = VerticalAlignment.Center;
-            var grid = new Grid { ColumnSpacing = 12 };
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(24) });
-            grid.ColumnDefinitions.Add(new ColumnDefinition());
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            grid.Children.Add(icon);
-            Grid.SetColumn(text, 1); grid.Children.Add(text);
+            var grid = Label(name, glyph, status, current, 18);
             if (playing) { var bars = new EqBars(true, 12); Grid.SetColumn(bars, 2); grid.Children.Add(bars); }
-            var b = new Button
-            {
-                Content = grid, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch,
-                Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0), Padding = new Thickness(8, 8, 8, 8), CornerRadius = new CornerRadius(6),
-            };
+            var b = Plain(grid, new Thickness(10, 7, 10, 7));
             b.Resources["ButtonBackgroundPointerOver"] = Ui.Brush("HoverBrush");
             b.Resources["ButtonBackgroundPressed"] = Ui.Brush("HoverBrush");
             AutomationProperties.SetName(b, name);
-            AutomationProperties.SetHelpText(b, status);
+            if (status is not null) AutomationProperties.SetHelpText(b, status);
             b.Click += (_, _) => { flyout.Hide(); click(); };
             return b;
         }
-        // version 2: the session's devices; picking one moves playback there (a transfer), and each one's volume is here
+
+        // version 2: the session's devices
         string shown = "";
+        string Shown(SessionService v2) =>
+            $"{v2.IsConnected}|{v2.Session.ActiveDevice}|{v2.Session.Playing}|{v2.Session.Current?.TrackId}|{string.Join(',', v2.Devices.Select(d => d.Id + d.Name + d.CanPlay))}";
         void FillSession(SessionService session)
         {
+            shown = Shown(session);
+            Heading();
+            if (!session.IsConnected) { Note("正在连接服务器上的 Sonus Connect…"); return; }
             var now = session.Session;
-            shown = $"{session.IsConnected}|{now.ActiveDevice}|{now.Playing}|{now.Current?.TrackId}|{string.Join(',', session.Devices.Select(d => d.Id + d.Name))}";
-            list.Children.Clear();
-            var heading = Ui.Text("在哪台设备上播放", size: 15, foreground: Ui.Brush("TextPrimaryBrush"), bold: true);
-            heading.Margin = new Thickness(8, 4, 8, 8);
-            list.Children.Add(heading);
-            if (!session.IsConnected)
+            // this computer first, then the others as they joined
+            var devices = new List<(string Id, string Name, string Glyph, bool CanPlay, double Volume, bool Muted)> { (session.Id, "这台电脑", Glyphs.Devices, true, _music.Volume, _music.Muted) };
+            devices.AddRange(session.Devices.Where(d => d.Id != session.Id).Select(d => (d.Id, d.Name, GlyphOf(d.Kind), d.CanPlay, d.Volume, d.Muted)));
+            if (now.ActiveDevice is { } activeId && devices.All(d => d.Id != activeId) && session.ActiveElsewhere is { } gone)
+                devices.Add((gone.Id, gone.Name, GlyphOf(gone.Kind), true, gone.Volume, gone.Muted)); // in its grace period
+            var active = devices.FirstOrDefault(d => d.Id == now.ActiveDevice);
+            if (active.Id is not null)
             {
-                var note = Ui.Note(Glyphs.Info, "正在连接服务器上的 Sonus Connect…");
-                note.Margin = new Thickness(8, 0, 8, 8);
-                list.Children.Add(note);
-                return;
+                string? title = _music.Current?.Title ?? now.Now?.Title;
+                list.Children.Add(Current(session, active.Id, active.Name, active.Glyph, $"{(now.Playing ? "正在播放" : "已暂停")}{(title is null ? "" : " · " + title)}", now.Playing, active.Volume, active.Muted));
             }
-            string? title = _music.Current?.Title ?? now.Now?.Title;
-            string Status(string id, bool canPlay) => now.ActiveDevice == id ? $"{(now.Playing ? "正在播放" : "已暂停")}{(title is null ? "" : " · " + title)}" : canPlay ? "空闲" : "只能遥控";
-            FrameworkElement Device(string id, string name, string glyph, bool canPlay, double volume, bool muted)
-            {
-                bool active = now.ActiveDevice == id;
-                var row = Row(name, glyph, Status(id, canPlay), active && now.Playing, active, () => { if (!active && canPlay) session.Transfer(id); });
-                row.IsEnabled = canPlay || active;
-                // rule 8: any device's volume, from here
-                var level = new Slider { Minimum = 0, Maximum = 100, StepFrequency = 1, Value = muted ? 0 : volume * 100, Margin = new Thickness(44, -6, 12, 2), IsThumbToolTipEnabled = false };
-                AutomationProperties.SetName(level, $"「{name}」的音量");
-                var send = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(120) };
-                send.Tick += (_, _) => { send.Stop(); session.SetVolume(id, level.Value / 100, level.Value > 0 && muted ? false : null); };
-                level.ValueChanged += (_, _) => { send.Stop(); send.Start(); };
-                return Ui.Column(0, row, level);
-            }
-            list.Children.Add(Device(session.Id, "这台电脑", Glyphs.Devices, true, _music.Volume, _music.Muted));
-            foreach (var d in session.Devices.Where(d => d.Id != session.Id)) list.Children.Add(Device(d.Id, d.Name, GlyphOf(d.Kind), d.CanPlay, d.Volume, d.Muted));
-            if (session.Devices.All(d => d.Id == session.Id))
-            {
-                var note = Ui.Note(Glyphs.Info, "没有其他设备在线。在另一台电脑或手机上打开 Sonus，登录同一个账号，就会出现在这里。");
-                note.Margin = new Thickness(8, 4, 8, 8);
-                list.Children.Add(note);
-            }
+            var others = devices.Where(d => d.Id != active.Id).ToList();
+            if (others.Count > 0) Caption(active.Id is null ? "选择设备" : "选择其他设备");
+            foreach (var d in others) list.Children.Add(Other(session, d.Id, d.Name, d.Glyph, d.CanPlay, d.Volume, d.Muted));
+            if (devices.Count == 1) Note("没有其他设备在线。在另一台电脑或手机上打开 Sonus，登录同一个账号，就会出现在这里。");
         }
-        flyout.Opening += (_, _) => { if (_session is { } s) FillSession(s); else Fill(); };
-        _connect.Changed += () => { if (flyout.IsOpen && _session is null) Fill(); };
-        if (_session is { } v2)
+
+        // the device that plays: a card in the accent colour, with what it plays and its volume
+        FrameworkElement Current(SessionService session, string id, string name, string glyph, string status, bool playing, double volume, bool muted)
         {
-            // drawn again when what it lists changes (not for a volume: a slider being dragged stays)
-            v2.Changed += () =>
+            var top = Label(name, glyph, status, current: true, 20);
+            if (playing) { var bars = new EqBars(true, 12); Grid.SetColumn(bars, 2); top.Children.Add(bars); }
+            var level = Volume(session, id, name, volume, muted);
+            level.Margin = new Thickness(30, 2, 0, 0); // under the name, past the icon
+            var card = new Border
             {
-                if (!flyout.IsOpen) return;
-                var now = v2.Session;
-                if (shown != $"{v2.IsConnected}|{now.ActiveDevice}|{now.Playing}|{now.Current?.TrackId}|{string.Join(',', v2.Devices.Select(d => d.Id + d.Name))}") FillSession(v2);
+                Background = Ui.Brush("SurfaceBrush"), CornerRadius = new CornerRadius(8), Padding = new Thickness(10, 10, 12, 6), Margin = new Thickness(0, 0, 0, 2),
+                Child = Ui.Column(4, top, level),
             };
+            AutomationProperties.SetName(card, $"当前设备：{name}");
+            return card;
         }
+
+        // another device, on one line: a click moves playback there (rule 4); its volume at the end of the line (rule 8)
+        FrameworkElement Other(SessionService session, string id, string name, string glyph, bool canPlay, double volume, bool muted)
+        {
+            var pick = Plain(Label(name, glyph, canPlay ? null : "只能遥控", current: false, 18), new Thickness(10, 7, 4, 7));
+            pick.Resources["ButtonBackgroundPointerOver"] = new SolidColorBrush(Microsoft.UI.Colors.Transparent); // the line lights up instead
+            pick.Resources["ButtonBackgroundPressed"] = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+            pick.IsEnabled = canPlay;
+            AutomationProperties.SetName(pick, name);
+            AutomationProperties.SetHelpText(pick, canPlay ? "在这台设备上播放" : "只能遥控，不能播放");
+            pick.Click += (_, _) => { flyout.Hide(); session.Transfer(id); };
+            var level = Volume(session, id, name, volume, muted);
+            level.Width = 104;
+            level.Margin = new Thickness(0, 0, 10, 0);
+            var line = new Grid { CornerRadius = new CornerRadius(6), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
+            line.ColumnDefinitions.Add(new ColumnDefinition());
+            line.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            line.Children.Add(pick);
+            Grid.SetColumn(level, 1); line.Children.Add(level);
+            Motion.BrushFade(line);
+            line.PointerEntered += (_, _) => line.Background = Ui.Brush("HoverBrush");
+            line.PointerExited += (_, _) => line.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+            return line;
+        }
+
+        flyout.Opening += (_, _) => { if (_session is { } s) FillSession(s); else Fill(); };
+        // focus starts on the first device to pick, not on a volume slider (which would show its focus frame at once)
+        flyout.Opened += (_, _) => { if (Ui.Descendant<Button>(list) is { IsEnabled: true } first) first.Focus(FocusState.Programmatic); };
+        _connect.Changed += () => { if (flyout.IsOpen && _session is null) Fill(); };
+        // drawn again when what it lists changes (not for a volume: a slider being dragged stays)
+        if (_session is { } session) session.Changed += () => { if (flyout.IsOpen && shown != Shown(session)) FillSession(session); };
         return flyout;
+    }
+
+    /// <summary>A device's icon, name and (when there is one) a status line under it; column 2 is free for the bars.</summary>
+    private static Grid Label(string name, string glyph, string? status, bool current, double iconSize)
+    {
+        var icon = Ui.Icon(glyph, iconSize, current ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextSecondaryBrush"));
+        icon.VerticalAlignment = VerticalAlignment.Center;
+        var title = Ui.Text(name, size: 14, foreground: current ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextPrimaryBrush"), bold: current);
+        title.TextTrimming = TextTrimming.CharacterEllipsis;
+        FrameworkElement text = title;
+        if (status is not null)
+        {
+            var sub = Ui.Text(status, size: 12, foreground: Ui.Brush("TextSecondaryBrush"));
+            sub.TextTrimming = TextTrimming.CharacterEllipsis;
+            text = Ui.Column(0, title, sub);
+        }
+        text.VerticalAlignment = VerticalAlignment.Center;
+        var grid = new Grid { ColumnSpacing = 10 };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(iconSize + 2) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition());
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.Children.Add(icon);
+        Grid.SetColumn(text, 1); grid.Children.Add(text);
+        return grid;
+    }
+
+    /// <summary>A flat, full-width button around some content (a device line).</summary>
+    private static Button Plain(UIElement content, Thickness padding) => new()
+    {
+        Content = content, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch,
+        Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0), Padding = padding, CornerRadius = new CornerRadius(6),
+    };
+
+    /// <summary>A device's volume in the picker: a speaker and a slim slider, sent a few times a second while dragged.</summary>
+    private FrameworkElement Volume(SessionService session, string id, string name, double volume, bool muted)
+    {
+        var level = new Slider { Minimum = 0, Maximum = 100, StepFrequency = 1, Value = muted ? 0 : volume * 100, IsThumbToolTipEnabled = false, VerticalAlignment = VerticalAlignment.Center };
+        // slimmer than the bar's: a 3 px track and a 12 px thumb
+        level.Resources["SliderHorizontalHeight"] = 24.0;
+        level.Resources["SliderTrackThemeHeight"] = 3.0;
+        level.Resources["SliderHorizontalThumbWidth"] = 12.0;
+        level.Resources["SliderHorizontalThumbHeight"] = 12.0;
+        level.Resources["SliderInnerThumbWidth"] = 6.0;
+        level.Resources["SliderInnerThumbHeight"] = 6.0;
+        level.Resources["SliderThumbCornerRadius"] = new CornerRadius(6);
+        AutomationProperties.SetName(level, $"「{name}」的音量");
+        var speaker = Ui.Icon(muted || volume == 0 ? Glyphs.Mute : Glyphs.Volume, 13, Ui.Brush("TextTertiaryBrush"));
+        speaker.VerticalAlignment = VerticalAlignment.Center;
+        var send = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(120) };
+        send.Tick += (_, _) => { send.Stop(); session.SetVolume(id, level.Value / 100, level.Value > 0 && muted ? false : null); };
+        level.ValueChanged += (_, e) =>
+        {
+            speaker.Glyph = e.NewValue == 0 ? Glyphs.Mute : Glyphs.Volume;
+            send.Stop(); send.Start();
+        };
+        var row = new Grid { ColumnSpacing = 8 };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new ColumnDefinition());
+        row.Children.Add(speaker);
+        Grid.SetColumn(level, 1); row.Children.Add(level);
+        return row;
     }
 
     private static string GlyphOf(string kind) => kind switch { "phone" or "tablet" => Glyphs.Headphones, "speaker" => Glyphs.Speaker, _ => Glyphs.Devices };

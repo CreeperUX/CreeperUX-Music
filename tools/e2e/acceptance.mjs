@@ -548,6 +548,24 @@ try {
         assert((await b.state()).engine === 'Stopped', '第二台在出声');
         playing = s;
       });
+      // a song that ends by itself: the next one (gapless) has its own length on every device (0.6.0 kept the length of the
+      // song before, and every device's position stopped there)
+      await check('一首歌自己放完，接上更长的下一首：两台都显示新歌的长度，进度走过上一首的长度', async () => {
+        const songs = (await api('getAlbum', { id: cat.playable.id })).album.song.map(x => ({ id: x.id, d: x.duration }));
+        const i = songs.findIndex((x, k) => k + 1 < songs.length && songs[k + 1].d > x.d + 10);
+        if (i < 0) throw new Skip('这张专辑里没有接着一首更长的歌');
+        const [first, second] = [songs[i], songs[i + 1]];
+        await app.send(`do play album ${cat.playable.id} ${i}`);
+        await until(async () => { const s = await state(); return s.engineTrack === first.id && s.engine === 'Playing'; }, 'A plays the first', 10000);
+        await b.send(`do seek ${first.d - 4}`); // from the remote: 4 s before its end
+        await until(async () => { const s = await state(); return s.engineTrack === second.id && s.engine === 'Playing'; }, 'A went on by itself to the next', 15000);
+        await until(async () => Math.abs((await state()).engineDuration - second.d) < 1.5, `A's engine has the new length (${second.d} s)`, 5000);
+        for (const [who, x] of [['A', app], ['B', b]]) await x.until(async () => { const s = await x.state(); return s.track === second.id && Math.abs(s.duration - second.d) < 1.5; }, `${who} shows the new length (${second.d} s)`, 5000);
+        await b.send(`do seek ${first.d - 2}`); // in the new song, just before where the one before ended
+        await sleep(5000);
+        for (const [who, x] of [['第一台', app], ['第二台', b]]) { const s = await x.state(); assert(s.position > first.d + 1.5, `${who}：进度 ${s.position?.toFixed(1)} 停在上一首的长度 ${first.d} s 前后`); }
+        playing = await state();
+      });
       await check('第二台加歌到队列：第一台的队列里有它（只有一份队列）', async () => {
         const song = cat.songIds[0];
         await b.send(`do queue ${song}`);
@@ -579,9 +597,11 @@ try {
         await b.invoke('这台电脑');
         await b.until(async () => { const s = await b.state(); return s.engine === 'Playing' && s.engineTrack === before.engineTrack; }, 'B plays A\'s song', 10000);
         await until(async () => (await state()).engine === 'Stopped', 'A stopped', 5000);
+        // the position it starts from is applied once the stream is open (a far one takes a moment)
+        await b.until(async () => Math.abs((await b.state()).enginePosition - before.enginePosition) < 5, 'B at A’s position', 5000)
+          .catch(async () => { throw new Error(`位置 ${(await b.state()).enginePosition}，第一台是 ${before.enginePosition}`); });
         const s = await b.state();
         assert(s.session.here === true, JSON.stringify(s.session));
-        assert(Math.abs(s.enginePosition - before.enginePosition) < 5, `位置 ${s.enginePosition}，第一台是 ${before.enginePosition}`);
         await until(async () => (await app.texts()).includes('正在「第二台」上播放'), 'the line in A\'s bar', 5000);
         await shot('connect-moved');
       });

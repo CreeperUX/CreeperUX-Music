@@ -192,7 +192,7 @@ internal static class E2EChannel
         {
             ready = W?.Ready == true, route = W?.Route, title = W?.Title, view = W?.CurrentView?.GetType().Name,
             track = m?.Queue.Current, trackTitle = m?.Current?.Title, state = m?.State.ToString(), error = m?.Error, position = m?.Position, duration = m?.Duration,
-            engine = m?.Engine.State.ToString(), engineTrack = m?.Engine.CurrentId, engineNext = m?.Engine.NextId, enginePosition = m?.Engine.Position, volume = m?.Engine.Volume,
+            engine = m?.Engine.State.ToString(), engineTrack = m?.Engine.CurrentId, engineNext = m?.Engine.NextId, enginePosition = m?.Engine.Position, engineDuration = m?.Engine.Duration, volume = m?.Engine.Volume,
             order = m?.Queue.Order.ToString(), context = m?.Queue.Context, queue = m?.Queue.Entries.Select(e => e.TrackId).Take(20), manual = m?.Queue.Entries.Count(e => e.Manual),
             online = m?.IsOnline, lyric = W?.Panel?.CurrentLyric, services = Services.MusicService.Alive, songs = m?.Library.Tracks.Count, albums = m?.Library.Albums.Count, artists = m?.Library.Artists.Count,
             playlists = m?.Playlists.Select(p => new { p.Id, p.Name, kind = p.Kind.ToString(), count = p.TrackIds.Count, p.Owner }),

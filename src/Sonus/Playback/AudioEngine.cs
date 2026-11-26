@@ -47,6 +47,7 @@ public sealed class AudioEngine : IDisposable
     private volatile string? _currentId, _nextId, _error;
     private double _position, _volume = 1;
     private double? _duration;
+    private double? _staleDuration; // the song before a gapless change: the session can report its length for a while
     private volatile bool _muted;
     /// <summary>Counts loads (written on the UI thread). An event raised for an earlier load is dropped, so a late "ended" or
     /// "failed" of the previous song never acts on the one just chosen.</summary>
@@ -116,7 +117,21 @@ public sealed class AudioEngine : IDisposable
         _player.MediaFailed += (_, e) =>
         {
             int g = Volatile.Read(ref _generation);
-            Do(() => { if (g == Volatile.Read(ref _generation)) Fail(_currentId, e.ErrorMessage is { Length: > 0 } m ? m : e.Error.ToString()); });
+            var error = e.Error;
+            string message = e.ErrorMessage is { Length: > 0 } m ? m : error.ToString();
+            Do(() =>
+            {
+                if (g != Volatile.Read(ref _generation)) return;
+                // The player's failure names no song. While the current one plays on, it is not that song's: a list just
+                // replaced (its sources are released) or the preloaded next one can raise it. A song that really fails stops.
+                if (_player.PlaybackSession.PlaybackState == MediaPlaybackState.Playing && _state == EngineState.Playing)
+                {
+                    Log.Write($"[engine] a failure ({error}) while {_currentId} plays on: not this song's, ignored");
+                    return;
+                }
+                Log.Write($"[engine] {_currentId} failed ({error})");
+                Fail(_currentId, message);
+            });
         };
         _player.PlaybackSession.PlaybackStateChanged += (s, _) => { var st = s.PlaybackState; Do(() => OnSessionState(st)); };
         var commands = _player.CommandManager;
@@ -132,7 +147,18 @@ public sealed class AudioEngine : IDisposable
     {
         var list = new MediaPlaybackList { AutoRepeatEnabled = false, ShuffleEnabled = false };
         list.CurrentItemChanged += (_, e) => { int g = Volatile.Read(ref _generation); Do(() => OnItemChanged(e, g)); };
-        list.ItemFailed += (_, e) => { int g = Volatile.Read(ref _generation); Do(() => { if (g == Volatile.Read(ref _generation)) Fail(Id(e.Item), Describe(e.Error)); }); };
+        // a list replaced by a newer one (its sources released) can still report a failure: only the attached list's count
+        list.ItemFailed += (_, e) =>
+        {
+            string? id = Id(e.Item);
+            var error = e.Error;
+            Do(() =>
+            {
+                if (!ReferenceEquals(list, _list)) { Log.Write($"[engine] {id} failed in a list no longer playing ({error.ErrorCode}): ignored"); return; }
+                Log.Write($"[engine] {id} failed ({error.ErrorCode}){(id != _currentId ? ", the preloaded next song" : "")}");
+                Fail(id, Describe(error));
+            });
+        };
         return list;
     }
 
@@ -140,7 +166,7 @@ public sealed class AudioEngine : IDisposable
     {
         var session = _player.PlaybackSession;
         Volatile.Write(ref _position, session.Position.TotalSeconds);
-        _duration = session.NaturalDuration is { TotalSeconds: > 0 } d ? d.TotalSeconds : null;
+        _duration = CurrentDuration(session);
         // Watchdog: now and then Media Foundation takes a Play() for a list it is still swapping in and never starts.
         // Asked again after 2.5 s; after 6 s the list is attached anew. (Seen about once in 40 loads in the tests.)
         if (_wantPlay && _state == EngineState.Loading && session.PlaybackState is MediaPlaybackState.Paused or MediaPlaybackState.None)
@@ -149,6 +175,18 @@ public sealed class AudioEngine : IDisposable
             if (waited > 6 && _nudges < 2) { _nudges = 2; Log.Write($"[engine] play did not start in 6 s: attaching the list again ({_currentId})"); _player.Source = null; _player.Source = _list; _player.Play(); }
             else if (waited > 2.5 && _nudges < 1) { _nudges = 1; Log.Write($"[engine] play did not start in 2.5 s: asking again ({_currentId})"); _player.Play(); }
         }
+    }
+
+    /// <summary>The current song's length: its own source's when known; else the session's, unless that is still the length
+    /// of the song before a gapless change (Media Foundation can keep reporting it for a while after the switch).</summary>
+    private double? CurrentDuration(MediaPlaybackSession session)
+    {
+        var item = _list.CurrentItem ?? (_list.Items.Count > 0 ? _list.Items[0] : null);
+        if (item is not null && Id(item) == _currentId && item.Source?.Duration is { TotalSeconds: > 0 } own) { _staleDuration = null; return own.TotalSeconds; }
+        if (session.NaturalDuration is not { TotalSeconds: > 0 } natural) return null;
+        if (_staleDuration is { } stale && Math.Abs(natural.TotalSeconds - stale) < 0.01) return null;
+        _staleDuration = null;
+        return natural.TotalSeconds;
     }
 
     /// <summary>Lets go of a song's stream at once: an HTTP connection left open per song (a MediaSource is only closed when
@@ -179,7 +217,9 @@ public sealed class AudioEngine : IDisposable
     {
         var source = MediaSource.CreateFromUri(new Uri(e.Url));
         source.CustomProperties["id"] = e.Id;
-        var item = e.StartAt > 0 ? new MediaPlaybackItem(source, TimeSpan.FromSeconds(e.StartAt)) : new MediaPlaybackItem(source);
+        // no start time on the item: the position it starts from is set once it is open (ApplyPendingSeek). Both together
+        // added up (a song taken over 172 s in started at 344 s, past its end, and the next one played at once).
+        var item = new MediaPlaybackItem(source);
         var props = item.GetDisplayProperties();
         props.Type = MediaPlaybackType.Music;
         props.MusicProperties.Title = e.Title;
@@ -198,7 +238,7 @@ public sealed class AudioEngine : IDisposable
         _error = null;
         _currentId = item.Id; _nextId = next?.Id;
         Volatile.Write(ref _position, item.StartAt);
-        _duration = null;
+        _duration = null; _staleDuration = null;
         SetState(autoplay ? EngineState.Loading : EngineState.Paused);
         Do(() =>
         {
@@ -281,8 +321,9 @@ public sealed class AudioEngine : IDisposable
     }
 
     // ---------------------------------------------------------------- what Media Foundation reports (engine thread)
-    /// <summary>A start position given with the song (continuing on another device) once the song is open: the start time a
-    /// MediaPlaybackItem is created with is not kept when the song is loaded paused and played later.</summary>
+    /// <summary>A start position given with the song (taking it over on another device, continuing where it stopped), set
+    /// once the song is open; the only place it is set (a start time on the MediaPlaybackItem too would add up with it, and
+    /// is not kept anyway when the song is loaded paused and played later).</summary>
     private void ApplyPendingSeek()
     {
         if (_pendingSeek <= 0) return;
@@ -315,6 +356,9 @@ public sealed class AudioEngine : IDisposable
         while (_list.Items.Count > 0 && _list.Items[0] != e.NewItem) { Release(_list.Items[0]); _list.Items.RemoveAt(0); }
         Remember();
         Volatile.Write(ref _position, 0);
+        // the previous song's length is not this one's (and the session may report it for a while yet)
+        _staleDuration = _duration;
+        _duration = null;
         Post(generation, () => Advanced?.Invoke(id));
     }
 

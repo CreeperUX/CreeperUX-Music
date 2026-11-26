@@ -442,6 +442,21 @@ try {
       await until(async () => (await state()).playlists.some(p => p.Name === '另一台设备的歌单'), 'appears');
       await api('deletePlaylist', { id: made.id });
     });
+    await check('打开正在播放的歌单：直接定位到正在播放的那首（在视野中间）', async () => {
+      // far down the library's list, so that only the jump brings its row into being (the list builds what is in view)
+      const at = Math.min(200, cat.counts.songs - 1);
+      await app.send(`do play playlist library ${at}`);
+      await until(async () => (await state()).engine === 'Playing', 'playing', 10000);
+      const playing = await state();
+      await app.send('nav home');
+      await until(async () => (await state()).route === 'home', 'home');
+      await app.send('nav playlist:library');
+      // its row in the list (not the bar's title): rows are named "title · artist"
+      await until(async () => (await names()).some(n => n.startsWith(`${playing.trackTitle} · `) && n.endsWith('[ListViewItem]')), `the playing song's row (${playing.trackTitle}, row ${at + 1}) in view`, 8000);
+      await sleep(400);
+      await shot('playlist-at-playing');
+      await app.send('do pause');
+    });
     quiet(app);
   }
 

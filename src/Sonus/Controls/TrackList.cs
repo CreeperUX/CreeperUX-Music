@@ -58,7 +58,8 @@ public sealed class TrackRow(Track track, int index) : INotifyPropertyChanged
 /// <summary>
 /// A list of songs (album, playlist, artist's popular songs, search results, the queue's context): number or cover, title and
 /// artist, album, like, duration and "more". Double-click or Enter plays from that song within the list's context; the
-/// right button or "…" opens the song menu. Own playlists can be reordered by dragging.
+/// right button or "…" opens the song menu. Own playlists can be reordered by dragging. As a page, it opens at the song
+/// that plays when its album or playlist is the one playing.
 /// </summary>
 public sealed class TrackList : UserControl
 {
@@ -70,6 +71,7 @@ public sealed class TrackList : UserControl
     private readonly IShell _shell;
     private readonly Func<IReadOnlyList<string>>? _contextIds;
     private readonly bool _showAlbum, _covers;
+    private bool _page, _jumped;
 
     public string ContextKind { get; }
     public string ContextId { get; }
@@ -135,7 +137,7 @@ public sealed class TrackList : UserControl
         music.PlayerChanged += SyncState;
         music.TrackChanged += OnTrackChanged;
         Unloaded += (_, _) => { music.PlayerChanged -= SyncState; music.TrackChanged -= OnTrackChanged; };
-        _list.Loaded += (_, _) => _shownAt = DateTime.UtcNow;
+        _list.Loaded += (_, _) => { _shownAt = DateTime.UtcNow; JumpToPlaying(); };
         Loaded += (_, _) => { music.PlayerChanged -= SyncState; music.TrackChanged -= OnTrackChanged; music.PlayerChanged += SyncState; music.TrackChanged += OnTrackChanged; SyncState(); };
     }
 
@@ -169,6 +171,37 @@ public sealed class TrackList : UserControl
         ScrollViewer.SetVerticalScrollMode(_list, ScrollMode.Enabled);
         ScrollViewer.SetVerticalScrollBarVisibility(_list, ScrollBarVisibility.Auto);
         Content = _list;
+        _page = true;
+    }
+
+    /// <summary>
+    /// The page of what plays (its album, playlist…) opens at the song that plays, in the middle of the view, once: the
+    /// rows are virtualised, so the list is first brought to it and then centred on its row once that row exists.
+    /// </summary>
+    private void JumpToPlaying()
+    {
+        if (_jumped || !_page || !_list.IsLoaded || !_music.IsContext(ContextKind, ContextId) || PlayingRow() is not { } row) return;
+        _jumped = true;
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            _list.ScrollIntoView(row, ScrollIntoViewAlignment.Leading);
+            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+            {
+                if (Ui.Descendant<ScrollViewer>(_list) is not { } scroller || _list.ContainerFromItem(row) is not FrameworkElement item) return;
+                double y = item.TransformToVisual(scroller).TransformPoint(new Windows.Foundation.Point(0, 0)).Y;
+                scroller.ChangeView(null, Math.Max(0, scroller.VerticalOffset + y - (scroller.ViewportHeight - item.ActualHeight) / 2), null, disableAnimation: true);
+            });
+        });
+    }
+
+    /// <summary>The row of the song that plays: where the queue is in this context when the song is there (a song can be
+    /// in a playlist twice), else its first row.</summary>
+    private TrackRow? PlayingRow()
+    {
+        if (_music.Queue.Current is not { } current) return null;
+        int at = _music.Queue.Pointer;
+        if (at >= 0 && at < _rows.Count && _rows[at].Track.Id == current && _music.Queue.Order is PlaybackOrder.Default or PlaybackOrder.RepeatPlaylist or PlaybackOrder.RepeatTrack) return _rows[at];
+        return _rows.FirstOrDefault(r => r.Track.Id == current);
     }
 
     /// <summary>Moves <paramref name="layer"/> (the page's tint) with the rows as they scroll. It runs on the compositor, so
@@ -219,6 +252,7 @@ public sealed class TrackList : UserControl
         }
         if (_columns is not null) _columns.Visibility = _rows.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         SyncState();
+        JumpToPlaying(); // the songs may arrive after the page (a playlist read from the server)
     }
 
     public IReadOnlyList<string> Ids => _rows.Select(r => r.Track.Id).ToList();

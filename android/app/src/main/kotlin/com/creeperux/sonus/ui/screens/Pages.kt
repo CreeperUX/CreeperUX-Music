@@ -73,6 +73,7 @@ import com.creeperux.sonus.ui.components.TrackRow
 import com.creeperux.sonus.ui.components.pageTint
 import com.creeperux.sonus.ui.components.px
 import com.creeperux.sonus.ui.components.rememberCoverColor
+import com.creeperux.sonus.ui.StatusBarScrim
 import com.creeperux.sonus.ui.entrance
 import com.creeperux.sonus.ui.pageTop
 import com.creeperux.sonus.ui.theme.Shapes
@@ -219,36 +220,39 @@ fun AlbumPage(id: String) {
         }
         found
     }
-    LazyColumn(Modifier.fillMaxSize().testTag("album-page"), state = list, contentPadding = PaddingValues(bottom = 32.dp)) {
-        item {
-            Hero(
-                Formats.albumType(a.type), a.title,
-                listOf(a.artist, a.year.takeIf { it > 0 }?.toString(), "${Formats.songs(tracks.size)}，${Formats.longDuration(tracks.sumOf { it.duration })}").filterNotNull().joinToString(" · "),
-                "album", id, tint,
-                art = { s, shape -> Cover(session.coverUrl(id, s.px()), s, shape = shape) },
-                extra = first?.let { Formats.quality(it) },
-                more = { dismiss ->
-                    DropdownMenuItem({ Text("加入播放队列") }, { player.queueAdd(a.trackIds); session.say(Toast("已加入播放队列")); dismiss() })
-                    DropdownMenuItem({ Text("下一首播放") }, { player.queueAdd(a.trackIds, next = true); session.say(Toast("将在下一首播放")); dismiss() })
-                    DropdownMenuItem({ Text("加入歌单") }, { addTo = true; dismiss() })
-                    DropdownMenuItem({ Text("查看艺人") }, { nav.go(Route.Artist(a.artistId)); dismiss() })
-                },
-            )
-        }
-        if (discs.size > 1) {
-            for (d in discs) {
-                item("disc$d") { Text("碟片 $d", style = Sonus.type.panelHeading, color = c.textMuted, modifier = Modifier.padding(start = 24.dp, top = 16.dp, bottom = 4.dp)) }
-                trackItems(tracks.filter { it.disc == d }, "album", id, covers = false, ids = a.trackIds)
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.fillMaxSize().testTag("album-page"), state = list, contentPadding = PaddingValues(bottom = 32.dp)) {
+            item {
+                Hero(
+                    Formats.albumType(a.type), a.title,
+                    listOf(a.artist, a.year.takeIf { it > 0 }?.toString(), "${Formats.songs(tracks.size)}，${Formats.longDuration(tracks.sumOf { it.duration })}").filterNotNull().joinToString(" · "),
+                    "album", id, tint,
+                    art = { s, shape -> Cover(session.coverUrl(id, s.px()), s, shape = shape) },
+                    extra = first?.let { Formats.quality(it) },
+                    more = { dismiss ->
+                        DropdownMenuItem({ Text("加入播放队列") }, { player.queueAdd(a.trackIds); session.say(Toast("已加入播放队列")); dismiss() })
+                        DropdownMenuItem({ Text("下一首播放") }, { player.queueAdd(a.trackIds, next = true); session.say(Toast("将在下一首播放")); dismiss() })
+                        DropdownMenuItem({ Text("加入歌单") }, { addTo = true; dismiss() })
+                        DropdownMenuItem({ Text("查看艺人") }, { nav.go(Route.Artist(a.artistId)); dismiss() })
+                    },
+                )
             }
-        } else {
-            trackItems(tracks, "album", id, covers = false)
+            if (discs.size > 1) {
+                for (d in discs) {
+                    item("disc$d") { Text("碟片 $d", style = Sonus.type.panelHeading, color = c.textMuted, modifier = Modifier.padding(start = 24.dp, top = 16.dp, bottom = 4.dp)) }
+                    trackItems(tracks.filter { it.disc == d }, "album", id, covers = false, ids = a.trackIds)
+                }
+            } else {
+                trackItems(tracks, "album", id, covers = false)
+            }
+            item {
+                Text(
+                    listOfNotNull(a.year.takeIf { it > 0 }?.let { "发行于 $it 年" }, a.label.takeIf { it.isNotEmpty() }?.let { "© $it" }).joinToString(" "),
+                    style = Sonus.type.caption, color = c.textMuted, modifier = Modifier.padding(24.dp),
+                )
+            }
         }
-        item {
-            Text(
-                listOfNotNull(a.year.takeIf { it > 0 }?.let { "发行于 $it 年" }, a.label.takeIf { it.isNotEmpty() }?.let { "© $it" }).joinToString(" "),
-                style = Sonus.type.caption, color = c.textMuted, modifier = Modifier.padding(24.dp),
-            )
-        }
+        StatusBarScrim(list)
     }
     if (addTo) AddToPlaylistDialog(a.trackIds) { addTo = false }
 }
@@ -272,58 +276,62 @@ fun ArtistPage(id: String) {
     val tint = rememberCoverColor(session.coverUrl(albums.firstOrNull()?.id, 64))
     val info by produceState<ArtistInfo?>(null, id) { value = runCatching { session.artistInfo(id) }.getOrNull() }
     val uri = LocalUriHandler.current
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
-        item {
-            Hero(
-                "艺人" + if (ar.genre != "—") " · ${ar.genre}" else "", ar.name,
-                "${albums.size} 张专辑 · ${Formats.songs(songs.size)}", "artist", id, tint,
-                art = { s, _ -> Cover(session.coverUrl(albums.firstOrNull()?.id, s.px()), s, shape = CircleShape, placeholder = "artist") },
-                artShape = CircleShape,
-            )
-        }
-        item { SectionHeader("热门", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp)) }
-        trackItems(popular.take(if (showMore) 10 else 5), "artist", id, covers = true, ids = popular.map { it.id })
-        if (popular.size > 5) {
+    val list = rememberLazyListState()
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(bottom = 32.dp)) {
             item {
-                Text(if (showMore) "收起" else "显示更多", style = Sonus.type.bodySmall, color = c.textMuted, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp).then(Modifier.testTag("more-popular")).clickableText { showMore = !showMore })
+                Hero(
+                    "艺人" + if (ar.genre != "—") " · ${ar.genre}" else "", ar.name,
+                    "${albums.size} 张专辑 · ${Formats.songs(songs.size)}", "artist", id, tint,
+                    art = { s, _ -> Cover(session.coverUrl(albums.firstOrNull()?.id, s.px()), s, shape = CircleShape, placeholder = "artist") },
+                    artShape = CircleShape,
+                )
             }
-        }
-        item {
-            Column(Modifier.padding(top = 20.dp)) {
-                SectionHeader("唱片", Modifier.padding(horizontal = 16.dp))
-                Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Chip("专辑", records == "album", { records = "album" })
-                    Chip("单曲和 EP", records == "single", { records = "single" })
-                }
-                val shown = albums.filter { (it.type == AlbumType.Single || it.type == AlbumType.Ep) == (records == "single") }
-                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    items(shown, key = { it.id }) { CardFor("album", it.id, cardWidth()) }
-                }
-                if (shown.isEmpty()) Text("没有${if (records == "album") "专辑" else "单曲和 EP"}。", style = Sonus.type.muted, color = c.textMuted, modifier = Modifier.padding(horizontal = 16.dp))
-            }
-        }
-        info?.takeIf { it.biography.isNotEmpty() || it.url != null }?.let { bio ->
-            item {
-                Column(Modifier.padding(16.dp).padding(top = 12.dp)) {
-                    SectionHeader("简介")
-                    Spacer(Modifier.height(8.dp))
-                    if (bio.biography.isNotEmpty()) Text(bio.biography, style = Sonus.type.body, color = c.textMuted, maxLines = 6, overflow = TextOverflow.Ellipsis)
-                    bio.url?.let { link -> Text("在 Last.fm 上阅读全文", style = Sonus.type.bodySmall, color = c.accentText, modifier = Modifier.padding(top = 8.dp).clickableText { uri.openUri(link) }) }
+            item { SectionHeader("热门", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp)) }
+            trackItems(popular.take(if (showMore) 10 else 5), "artist", id, covers = true, ids = popular.map { it.id })
+            if (popular.size > 5) {
+                item {
+                    Text(if (showMore) "收起" else "显示更多", style = Sonus.type.bodySmall, color = c.textMuted, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp).then(Modifier.testTag("more-popular")).clickableText { showMore = !showMore })
                 }
             }
-        }
-        val similar = lib.artists.filter { it.id != id && it.genre == ar.genre && ar.genre != "—" && it.albumIds.isNotEmpty() }.take(12)
-        if (similar.isNotEmpty()) {
             item {
-                Column(Modifier.padding(top = 12.dp)) {
-                    SectionHeader("同流派艺人", Modifier.padding(horizontal = 16.dp))
-                    Spacer(Modifier.height(8.dp))
+                Column(Modifier.padding(top = 20.dp)) {
+                    SectionHeader("唱片", Modifier.padding(horizontal = 16.dp))
+                    Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Chip("专辑", records == "album", { records = "album" })
+                        Chip("单曲和 EP", records == "single", { records = "single" })
+                    }
+                    val shown = albums.filter { (it.type == AlbumType.Single || it.type == AlbumType.Ep) == (records == "single") }
                     LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        items(similar, key = { it.id }) { CardFor("artist", it.id, cardWidth()) }
+                        items(shown, key = { it.id }) { CardFor("album", it.id, cardWidth()) }
+                    }
+                    if (shown.isEmpty()) Text("没有${if (records == "album") "专辑" else "单曲和 EP"}。", style = Sonus.type.muted, color = c.textMuted, modifier = Modifier.padding(horizontal = 16.dp))
+                }
+            }
+            info?.takeIf { it.biography.isNotEmpty() || it.url != null }?.let { bio ->
+                item {
+                    Column(Modifier.padding(16.dp).padding(top = 12.dp)) {
+                        SectionHeader("简介")
+                        Spacer(Modifier.height(8.dp))
+                        if (bio.biography.isNotEmpty()) Text(bio.biography, style = Sonus.type.body, color = c.textMuted, maxLines = 6, overflow = TextOverflow.Ellipsis)
+                        bio.url?.let { link -> Text("在 Last.fm 上阅读全文", style = Sonus.type.bodySmall, color = c.accentText, modifier = Modifier.padding(top = 8.dp).clickableText { uri.openUri(link) }) }
+                    }
+                }
+            }
+            val similar = lib.artists.filter { it.id != id && it.genre == ar.genre && ar.genre != "—" && it.albumIds.isNotEmpty() }.take(12)
+            if (similar.isNotEmpty()) {
+                item {
+                    Column(Modifier.padding(top = 12.dp)) {
+                        SectionHeader("同流派艺人", Modifier.padding(horizontal = 16.dp))
+                        Spacer(Modifier.height(8.dp))
+                        LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            items(similar, key = { it.id }) { CardFor("artist", it.id, cardWidth()) }
+                        }
                     }
                 }
             }
         }
+        StatusBarScrim(list)
     }
 }
 
@@ -360,27 +368,30 @@ fun PlaylistPage(id: String) {
     }
     val list = rememberLazyListState()
     JumpToPlaying(list, "playlist", id, tracks.size) { song -> tracks.indexOfFirst { it.id == song }.takeIf { it >= 0 }?.let { it + 1 } } // after the hero
-    LazyColumn(Modifier.fillMaxSize().testTag("playlist-page"), state = list, contentPadding = PaddingValues(bottom = 32.dp)) {
-        item {
-            Hero(
-                kind, p.name,
-                listOfNotNull(p.owner.takeIf { it.isNotEmpty() }, "${Formats.songs(tracks.size)}，${Formats.longDuration(tracks.sumOf { it.duration })}").joinToString(" · "),
-                "playlist", id, tint,
-                art = { s, shape -> PlaylistCover(id, s, shape) },
-                extra = p.comment,
-                more = { dismiss ->
-                    DropdownMenuItem({ Text("加入播放队列") }, { player.queueAdd(p.trackIds); session.say(Toast("已加入播放队列")); dismiss() })
-                    if (p.isEditable) {
-                        DropdownMenuItem({ Text("重命名") }, { renaming = true; dismiss() })
-                        DropdownMenuItem({ Text("删除歌单", color = c.bad) }, { deleting = true; dismiss() })
-                    }
-                },
-            )
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.fillMaxSize().testTag("playlist-page"), state = list, contentPadding = PaddingValues(bottom = 32.dp)) {
+            item {
+                Hero(
+                    kind, p.name,
+                    listOfNotNull(p.owner.takeIf { it.isNotEmpty() }, "${Formats.songs(tracks.size)}，${Formats.longDuration(tracks.sumOf { it.duration })}").joinToString(" · "),
+                    "playlist", id, tint,
+                    art = { s, shape -> PlaylistCover(id, s, shape) },
+                    extra = p.comment,
+                    more = { dismiss ->
+                        DropdownMenuItem({ Text("加入播放队列") }, { player.queueAdd(p.trackIds); session.say(Toast("已加入播放队列")); dismiss() })
+                        if (p.isEditable) {
+                            DropdownMenuItem({ Text("重命名") }, { renaming = true; dismiss() })
+                            DropdownMenuItem({ Text("删除歌单", color = c.bad) }, { deleting = true; dismiss() })
+                        }
+                    },
+                )
+            }
+            if (tracks.isEmpty()) {
+                item { EmptyState("这个歌单还是空的", "在歌曲的菜单里选择“加入歌单”，把歌加进来。", icon = "playlist") }
+            }
+            trackItems(tracks, "playlist", id, covers = true, playlistId = id)
         }
-        if (tracks.isEmpty()) {
-            item { EmptyState("这个歌单还是空的", "在歌曲的菜单里选择“加入歌单”，把歌加进来。", icon = "playlist") }
-        }
-        trackItems(tracks, "playlist", id, covers = true, playlistId = id)
+        StatusBarScrim(list)
     }
     if (renaming) {
         var name by remember { mutableStateOf(p.name) }
@@ -425,22 +436,26 @@ fun GenrePage(name: String) {
     val songs = lib.tracks.filter { it.genre == name }.sortedByDescending { it.playCount }
     val albums = songs.map { it.albumId }.distinct()
     val tint = rememberCoverColor(session.coverUrl(albums.firstOrNull(), 64))
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
-        item {
-            Hero("流派", name, "${albums.size} 张专辑 · ${Formats.songs(songs.size)}", "genre", name, tint,
-                art = { s, shape -> Cover(session.coverUrl(albums.firstOrNull(), s.px()), s, shape = shape) }, ids = songs.map { it.id })
-        }
-        item {
-            Column(Modifier.padding(top = 12.dp)) {
-                SectionHeader("专辑", Modifier.padding(horizontal = 16.dp))
-                Spacer(Modifier.height(8.dp))
-                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    items(albums, key = { it }) { CardFor("album", it, cardWidth()) }
+    val list = rememberLazyListState()
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(bottom = 32.dp)) {
+            item {
+                Hero("流派", name, "${albums.size} 张专辑 · ${Formats.songs(songs.size)}", "genre", name, tint,
+                    art = { s, shape -> Cover(session.coverUrl(albums.firstOrNull(), s.px()), s, shape = shape) }, ids = songs.map { it.id })
+            }
+            item {
+                Column(Modifier.padding(top = 12.dp)) {
+                    SectionHeader("专辑", Modifier.padding(horizontal = 16.dp))
+                    Spacer(Modifier.height(8.dp))
+                    LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        items(albums, key = { it }) { CardFor("album", it, cardWidth()) }
+                    }
                 }
             }
+            item { SectionHeader("歌曲", Modifier.padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 4.dp)) }
+            trackItems(songs, "genre", name, covers = true, ids = songs.map { it.id })
         }
-        item { SectionHeader("歌曲", Modifier.padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 4.dp)) }
-        trackItems(songs, "genre", name, covers = true, ids = songs.map { it.id })
+        StatusBarScrim(list)
     }
 }
 

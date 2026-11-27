@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -54,6 +55,7 @@ import com.creeperux.sonus.ui.components.SectionHeader
 import com.creeperux.sonus.ui.components.pageTint
 import com.creeperux.sonus.ui.components.pressable
 import com.creeperux.sonus.ui.components.px
+import com.creeperux.sonus.ui.StatusBarScrim
 import com.creeperux.sonus.ui.entrance
 import com.creeperux.sonus.ui.pageTop
 import com.creeperux.sonus.ui.theme.Shapes
@@ -115,46 +117,50 @@ fun HomeScreen() {
         else -> ShelfTitles.keys.toList()
     }
 
-    LazyColumn(Modifier.fillMaxSize().testTag("home"), contentPadding = PaddingValues(bottom = 24.dp)) {
-        item {
-            Column(Modifier.fillMaxWidth().pageTint(Tints.Neutral, 360.dp).pageTop().padding(horizontal = 16.dp).padding(top = 16.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(Formats.greeting(LocalTime.now().hour), style = Sonus.type.pageTitle, color = c.text, modifier = Modifier.weight(1f))
-                    if (phone) {
-                        if (!online) {
-                            Row(Modifier.clip(RoundedCornerShape(16.dp)).background(c.raised).pressable({ scope.launch { session.goOnline() } }).padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                                OnlineDot(false)
-                                Spacer(Modifier.width(6.dp))
-                                Text("未连接到服务器", style = Sonus.type.caption, color = c.text)
+    val list = rememberLazyListState()
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.fillMaxSize().testTag("home"), state = list, contentPadding = PaddingValues(bottom = 24.dp)) {
+            item {
+                Column(Modifier.fillMaxWidth().pageTint(Tints.Neutral, 360.dp).pageTop().padding(horizontal = 16.dp).padding(top = 16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(Formats.greeting(LocalTime.now().hour), style = Sonus.type.pageTitle, color = c.text, modifier = Modifier.weight(1f))
+                        if (phone) {
+                            if (!online) {
+                                Row(Modifier.clip(RoundedCornerShape(16.dp)).background(c.raised).pressable({ scope.launch { session.goOnline() } }).padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    OnlineDot(false)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("未连接到服务器", style = Sonus.type.caption, color = c.text)
+                                }
                             }
+                            val update by LocalGraph.current.updater.available.collectAsState()
+                            RoundButton("settings", if (update != null) "设置（有新版本）" else "设置", { nav.go(Route.Settings) }, Modifier.testTag("open-settings"), badge = update != null)
                         }
-                        val update by LocalGraph.current.updater.available.collectAsState()
-                        RoundButton("settings", if (update != null) "设置（有新版本）" else "设置", { nav.go(Route.Settings) }, Modifier.testTag("open-settings"), badge = update != null)
                     }
-                }
-                Spacer(Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("album" to "专辑", "playlist" to "歌单", "artist" to "艺人").forEach { (k, label) ->
-                        Chip(label, filter == k, { filter = if (filter == k) "" else k })
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("album" to "专辑", "playlist" to "歌单", "artist" to "艺人").forEach { (k, label) ->
+                            Chip(label, filter == k, { filter = if (filter == k) "" else k })
+                        }
                     }
-                }
-                Spacer(Modifier.height(16.dp))
-                if (filter.isEmpty()) QuickTiles(tiles)
-            }
-        }
-        for ((shelf, key) in wanted.withIndex()) {
-            val cards = shelves.byKey(key)
-            if (cards.isEmpty()) continue
-            item(key) {
-                Column(Modifier.entrance(6 + shelf).padding(top = 24.dp)) {
-                    SectionHeader(ShelfTitles.getValue(key), Modifier.padding(horizontal = 16.dp), "显示全部") { nav.go(Route.Shelf(key)) }
-                    Spacer(Modifier.height(8.dp))
-                    LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        items(cards.take(12), key = { "${it.type}:${it.id}" }) { CardFor(it.type, it.id, cardWidth()) }
-                    }
+                    Spacer(Modifier.height(16.dp))
+                    if (filter.isEmpty()) QuickTiles(tiles)
                 }
             }
+            for ((shelf, key) in wanted.withIndex()) {
+                val cards = shelves.byKey(key)
+                if (cards.isEmpty()) continue
+                item(key) {
+                    Column(Modifier.entrance(6 + shelf).padding(top = 24.dp)) {
+                        SectionHeader(ShelfTitles.getValue(key), Modifier.padding(horizontal = 16.dp), "显示全部") { nav.go(Route.Shelf(key)) }
+                        Spacer(Modifier.height(8.dp))
+                        LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            items(cards.take(12), key = { "${it.type}:${it.id}" }) { CardFor(it.type, it.id, cardWidth()) }
+                        }
+                    }
+                }
+            }
         }
+        StatusBarScrim(list)
     }
 }
 
@@ -219,9 +225,9 @@ fun CardGrid(title: String, cards: List<CardRef>) {
         val w = cardWidth()
         val columns = maxOf(2, ((maxWidth - 32.dp + 12.dp) / (w + 12.dp)).toInt())
         val cell = (maxWidth - 32.dp - 12.dp * (columns - 1)) / columns
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
+        LazyColumn(Modifier.fillMaxSize().pageTop(), contentPadding = PaddingValues(bottom = 24.dp)) {
             item {
-                Column(Modifier.pageTop().padding(16.dp)) {
+                Column(Modifier.padding(16.dp)) {
                     BackRow()
                     Text(title, style = Sonus.type.pageTitle, color = c.text)
                 }

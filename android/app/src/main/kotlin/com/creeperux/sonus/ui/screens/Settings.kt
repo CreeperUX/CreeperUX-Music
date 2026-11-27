@@ -19,6 +19,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -39,6 +40,7 @@ import com.creeperux.sonus.ui.LocalGraph
 import com.creeperux.sonus.ui.LocalPlayer
 import com.creeperux.sonus.ui.LocalSession
 import com.creeperux.sonus.ui.components.Chip
+import com.creeperux.sonus.ui.components.LocalOnRaised
 import com.creeperux.sonus.ui.components.PillButton
 import com.creeperux.sonus.ui.pageTop
 import com.creeperux.sonus.ui.theme.Shapes
@@ -56,7 +58,7 @@ fun SettingsScreen() {
     val theme by graph.themeMode.collectAsState()
     var gain by remember { mutableStateOf(player.replayGain) }
     val context = LocalContext.current
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).pageTop().padding(16.dp).testTag("settings"), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+    Column(Modifier.fillMaxSize().pageTop().verticalScroll(rememberScrollState()).padding(16.dp).testTag("settings"), verticalArrangement = Arrangement.spacedBy(20.dp)) {
         BackRow()
         Text("设置", style = Sonus.type.pageTitle, color = c.text)
 
@@ -121,7 +123,7 @@ private fun Group(title: String, content: @Composable () -> Unit) {
     val c = Sonus.colors
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(Shapes.panel)).background(c.raised).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(title, style = Sonus.type.section, color = c.text)
-        content()
+        CompositionLocalProvider(LocalOnRaised provides true) { content() }
     }
 }
 

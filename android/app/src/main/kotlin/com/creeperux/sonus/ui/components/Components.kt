@@ -12,6 +12,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -38,6 +39,7 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -83,17 +85,19 @@ fun Dp.px(): Int = with(LocalDensity.current) { this@px.roundToPx() }
  * instead of from the empty colour.
  */
 @Composable
-fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, shape: Shape = RoundedCornerShape(Shapes.smallCover), placeholder: String = "album", follows: Boolean = false) {
+fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, shape: Shape = RoundedCornerShape(Shapes.smallCover), placeholder: String = "album", follows: Boolean = false, instant: Boolean = false) {
     val c = Sonus.colors
     val context = LocalPlatformContext.current
+    val motion = LocalMotion.current
     var shown by remember(url) { mutableStateOf(false) } // the image is there: the icon under it is not drawn
     val previous = remember { mutableStateOf<MemoryCache.Key?>(null) }
     Box(modifier.size(size).clip(shape).background(c.raised), contentAlignment = Alignment.Center) {
-        if (url == null || !shown) KitIcon(placeholder, size = size * 0.32f, tint = c.textQuiet)
+        if (url == null || (!shown && !instant)) KitIcon(placeholder, size = size * 0.32f, tint = c.textQuiet)
         if (url != null) {
-            val request = remember(url) {
-                ImageRequest.Builder(context).data(url).crossfade(if (follows) Motion.SHEET else 180)
-                    .apply { if (follows) previous.value?.let { placeholderMemoryCacheKey(it) } }
+            val crossfade = if (instant || !motion) 0 else if (follows) Motion.SHEET else 180
+            val request = remember(url, crossfade) {
+                ImageRequest.Builder(context).data(url).crossfade(crossfade)
+                    .apply { if (follows && !instant) previous.value?.let { placeholderMemoryCacheKey(it) } }
                     .build()
             }
             AsyncImage(
@@ -184,10 +188,17 @@ fun RoundButton(
     }
 }
 
+/**
+ * True inside a raised container (such as a settings group card), where controls that normally sit on [SonusColors.raised]
+ * step up to [SonusColors.raisedHover] with a hairline border so their edges stay clear against the card.
+ */
+val LocalOnRaised = compositionLocalOf { false }
+
 /** A filter chip (歌单 / 专辑 / 艺人 …): Material 3's FilterChip in the Sonus colours (raised; ink when selected). */
 @Composable
 fun Chip(text: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val c = Sonus.colors
+    val onRaised = LocalOnRaised.current
     FilterChip(
         selected = selected,
         onClick = onClick,
@@ -195,23 +206,28 @@ fun Chip(text: String, selected: Boolean, onClick: () -> Unit, modifier: Modifie
         modifier = modifier,
         shape = RoundedCornerShape(Shapes.chip),
         colors = FilterChipDefaults.filterChipColors(
-            containerColor = c.raised, labelColor = c.text,
-            selectedContainerColor = c.text, selectedLabelColor = c.panel,
+            containerColor = if (onRaised) c.raisedHover else c.raised,
+            labelColor = c.text,
+            selectedContainerColor = c.text,
+            selectedLabelColor = c.panel,
         ),
-        border = null,
+        border = if (onRaised && !selected) BorderStroke(1.dp, c.divider) else null,
     )
 }
 
-/** A pill button with text (登录, 重试 …): Material 3's Button, amber when [primary], else raised. */
+/** A pill button with text (登录, 重试 …): Material 3's Button, amber when [primary], else raised (stepped up with a hairline border inside raised cards). */
 @Composable
 fun PillButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, primary: Boolean = false, enabled: Boolean = true, icon: String? = null) {
     val c = Sonus.colors
+    val onRaised = LocalOnRaised.current
+    val fill = if (onRaised) c.raisedHover else c.raised
     val colors = if (primary) {
         ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent, disabledContainerColor = c.accent.copy(alpha = 0.45f), disabledContentColor = c.onAccent.copy(alpha = 0.6f))
     } else {
-        ButtonDefaults.buttonColors(containerColor = c.raised, contentColor = c.text, disabledContainerColor = c.raised, disabledContentColor = c.textQuiet)
+        ButtonDefaults.buttonColors(containerColor = fill, contentColor = c.text, disabledContainerColor = fill, disabledContentColor = c.textQuiet)
     }
-    Button(onClick, modifier.height(44.dp), enabled = enabled, shape = RoundedCornerShape(22.dp), colors = colors, contentPadding = PaddingValues(horizontal = 20.dp)) {
+    val border = if (!primary && onRaised) BorderStroke(1.dp, c.divider) else null
+    Button(onClick, modifier.height(44.dp), enabled = enabled, shape = RoundedCornerShape(22.dp), colors = colors, border = border, contentPadding = PaddingValues(horizontal = 20.dp)) {
         if (icon != null) {
             KitIcon(icon, size = 16.dp, tint = LocalContentColor.current)
             Spacer(Modifier.width(8.dp))

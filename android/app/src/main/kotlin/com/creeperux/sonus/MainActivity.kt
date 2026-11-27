@@ -1,14 +1,19 @@
 package com.creeperux.sonus
 
 import android.content.ComponentName
+import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import com.creeperux.sonus.data.ThemeMode
 import com.creeperux.sonus.playback.PlaybackService
 import com.creeperux.sonus.ui.SonusRoot
 import com.creeperux.sonus.ui.theme.SonusTheme
@@ -23,6 +28,17 @@ class MainActivity : ComponentActivity() {
         val graph = (application as SonusApp).graph
         setContent {
             val mode by graph.themeMode.collectAsState()
+            val dark = when (mode) {
+                ThemeMode.Dark -> true
+                ThemeMode.Light -> false
+                ThemeMode.System -> isSystemInDarkTheme()
+            }
+            // keep system bar icon contrast in sync with the in-app theme choice (e.g. Light mode on a dark system)
+            DisposableEffect(dark) {
+                val style = if (dark) SystemBarStyle.dark(Color.TRANSPARENT) else SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
+                enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+                onDispose {}
+            }
             SonusTheme(mode) { SonusRoot(graph) }
         }
     }

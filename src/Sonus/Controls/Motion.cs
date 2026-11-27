@@ -135,9 +135,10 @@ public static class Motion
         });
     }
 
-    /// <summary>A side panel closing: it moves <paramref name="slide"/> px to the right as it fades out, from wherever it is
-    /// (one closed while it was still coming in leaves from there), then <paramref name="done"/>.</summary>
-    public static void SlideOut(UIElement e, float slide, Action done)
+    /// <summary>A panel or a sheet closing: it moves <paramref name="slide"/> px to the right (or <paramref name="drop"/> px
+    /// down) as it fades out, from wherever it is (one closed while it was still coming in leaves from there), then
+    /// <paramref name="done"/>.</summary>
+    public static void SlideOut(UIElement e, Action done, float slide = 0, float drop = 0)
     {
         if (!Enabled) { done(); return; }
         var visual = ElementCompositionPreview.GetElementVisual(e);
@@ -149,14 +150,14 @@ public static class Motion
         fade.Duration = Control;
         var away = c.CreateVector3KeyFrameAnimation();
         away.InsertExpressionKeyFrame(0, "this.StartingValue");
-        away.InsertKeyFrame(1, new Vector3(slide, 0, 0), EaseIn(c));
+        away.InsertKeyFrame(1, new Vector3(slide, drop, 0), EaseIn(c));
         away.Duration = Control;
         visual.StartAnimation("Opacity", fade);
         visual.StartAnimation("Translation", away);
         After(Control + TimeSpan.FromMilliseconds(40), done);
     }
 
-    /// <summary>A side panel opened again before it had gone: back into place from where it is.</summary>
+    /// <summary>A panel or a sheet opened again before it had gone: back into place from where it is.</summary>
     public static void SlideBack(UIElement e)
     {
         if (!Enabled) return;

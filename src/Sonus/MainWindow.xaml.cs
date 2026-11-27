@@ -261,8 +261,9 @@ public sealed partial class MainWindow : Window, IShell
         _panel.ModeChanged += () => SyncBarPanel();
         PanelHost.Child = _panel;
         _bar = new PlaybackBar(music, _connect, _session, this);
-        _bar.QueueToggled += open => { SetPanel(true); _panel.Show(open ? "queue" : "now"); };
-        _bar.DevicesToggled += open => { SetPanel(true); _panel.Show(open ? "devices" : "now"); };
+        // a panel that opens for it comes in whole; one already open changes what it shows with its own motion
+        _bar.QueueToggled += open => { bool shown = PanelColumn.Width.Value > 0; SetPanel(true); _panel.Show(open ? "queue" : "now", animate: shown); };
+        _bar.DevicesToggled += open => { bool shown = PanelColumn.Width.Value > 0; SetPanel(true); _panel.Show(open ? "devices" : "now", animate: shown); };
         BarHost.Child = _bar;
         BarHost.Visibility = Visibility.Visible;
         SetPanel(_settings.PanelOpen, animate: false);
@@ -348,7 +349,7 @@ public sealed partial class MainWindow : Window, IShell
         settings.Resources["ButtonForegroundPointerOver"] = Ui.Brush("TextPrimaryBrush");
         _panelToggle = Ui.IconToggle(Glyphs.Panel, "显示或隐藏正在播放", 36);
         _panelToggle.IsChecked = _settings.PanelOpen;
-        _panelToggle.Click += (_, _) => { SetPanel(_panelToggle.IsChecked == true); if (_panelToggle.IsChecked == true) _panel?.Show("now"); };
+        _panelToggle.Click += (_, _) => { SetPanel(_panelToggle.IsChecked == true); if (_panelToggle.IsChecked == true) _panel?.Show("now", animate: false); };
         TopEnd.Children.Add(_connection); TopEnd.Children.Add(settings); TopEnd.Children.Add(_panelToggle);
         SyncUpdatePill();
 
@@ -451,7 +452,7 @@ public sealed partial class MainWindow : Window, IShell
                 PanelHost.Width = 340; PanelHost.HorizontalAlignment = HorizontalAlignment.Right;
                 PanelHost.IsHitTestVisible = false;
                 _panelLeaving = true;
-                Motion.SlideOut(PanelHost, PanelSlide, () => { if (move == _panelMoves) { PanelHost.Visibility = Visibility.Collapsed; DockPanel(); } });
+                Motion.SlideOut(PanelHost, () => { if (move == _panelMoves) { PanelHost.Visibility = Visibility.Collapsed; DockPanel(); } }, slide: PanelSlide);
             }
             else { PanelHost.Visibility = Visibility.Collapsed; DockPanel(); }
         }

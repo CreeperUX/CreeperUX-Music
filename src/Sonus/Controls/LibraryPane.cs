@@ -19,11 +19,12 @@ public sealed class LibraryPane : UserControl
     private readonly ItemsRepeater _items;
     private readonly HashSet<Button> _shown = []; // the items' buttons that exist now (those in view and around)
     private readonly TextBox _find = new() { PlaceholderText = "在音乐库中搜索", MinWidth = 0 };
-    private readonly ComboBox _sort = new() { MinWidth = 120 };
+    private readonly ComboBox _sort = new() { MinWidth = 0 };
     private readonly Chips _chips;
     private readonly StackPanel _tools;
     private readonly TextBlock _title;
     private bool _rail;
+    private string _currentRoute = "";
     private Grid? _head;
     private Button? _titleButton, _create;
 
@@ -215,7 +216,15 @@ public sealed class LibraryPane : UserControl
         return b;
     }
 
-    /// <summary>Marks the playing context: amber name and a speaker.</summary>
+    /// <summary>Highlights the currently viewed route in the library, distinct from the playing context.</summary>
+    public void SetCurrentRoute(string route)
+    {
+        if (_currentRoute == route) return;
+        _currentRoute = route;
+        Mark();
+    }
+
+    /// <summary>Marks the playing context (amber name and level bars) and the currently viewed route (quiet plate).</summary>
     private void Mark() { foreach (var b in _shown) Mark(b); }
 
     private void Mark(Button b)
@@ -223,7 +232,10 @@ public sealed class LibraryPane : UserControl
         if (b.Tag is not ValueTuple<Entry, TextBlock, Border> tag) return;
         var (e, name, host) = tag;
         bool current = _music.IsContext(e.Type, e.Id);
+        bool viewing = e.Route == _currentRoute;
         name.Foreground = current ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextPrimaryBrush");
+        b.Background = viewing ? Ui.Brush("HoverBrush") : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        b.Resources["ButtonBackgroundPointerOver"] = viewing ? Ui.Brush("SurfaceHoverBrush") : Ui.Brush("HoverBrush");
         string state = current && !_rail ? _music.IsActive ? "playing" : "paused" : "";
         if (Equals(host.Tag, state)) return; // new bars only when it changes, so the moving ones keep moving
         host.Tag = state;

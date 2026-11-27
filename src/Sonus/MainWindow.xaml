@@ -36,15 +36,16 @@
             <StackPanel x:Name="TopEnd" Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,12,0" />
         </Grid>
 
-        <Grid x:Name="Panels" Grid.Row="1" Margin="8,0,8,0" ColumnSpacing="8">
+        <!-- Gaps live on the side panels themselves (not Grid.ColumnSpacing, which still leaves an extra 8 px beside a 0-width column) -->
+        <Grid x:Name="Panels" Grid.Row="1" Margin="8,0,8,0">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition x:Name="LibraryColumn" Width="300" />
+                <ColumnDefinition x:Name="LibraryColumn" Width="308" />
                 <ColumnDefinition Width="*" />
-                <ColumnDefinition x:Name="PanelColumn" Width="340" />
+                <ColumnDefinition x:Name="PanelColumn" Width="348" />
             </Grid.ColumnDefinitions>
-            <Border x:Name="LibraryHost" CornerRadius="8" Background="{StaticResource PanelBrush}" />
+            <Border x:Name="LibraryHost" Margin="0,0,8,0" CornerRadius="8" Background="{StaticResource PanelBrush}" />
             <Border x:Name="MainHost" Grid.Column="1" CornerRadius="8" Background="{StaticResource PanelBrush}" />
-            <Border x:Name="PanelHost" Grid.Column="2" CornerRadius="8" Background="{StaticResource PanelBrush}" />
+            <Border x:Name="PanelHost" Grid.Column="2" Margin="8,0,0,0" CornerRadius="8" Background="{StaticResource PanelBrush}" />
         </Grid>
 
         <Border x:Name="BarHost" Grid.Row="2" />

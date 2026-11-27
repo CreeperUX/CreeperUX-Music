@@ -31,7 +31,8 @@ public sealed partial class MainWindow : Window, IShell
     private TextBox? _search;
     private Border? _searchPill;
     private UIElement? _browseSeparator;
-    private Button? _connection;
+    private Button? _connection, _settingsButton;
+    private bool _connectionOver;
     private Microsoft.UI.Xaml.Controls.Primitives.ToggleButton? _panelToggle;
     private DispatcherTimer? _searchTimer;
 
@@ -158,7 +159,7 @@ public sealed partial class MainWindow : Window, IShell
     private void ShowLogin(string? error = null)
     {
         Panels.Visibility = Visibility.Collapsed; BarHost.Visibility = Visibility.Collapsed;
-        TopCenter.Children.Clear(); TopEnd.Children.Clear(); _updatePill = null;
+        TopCenter.Children.Clear(); TopEnd.Children.Clear(); _updatePill = null; _settingsButton = null; _connectionOver = false;
         var login = new LoginView(_settings.LastServer, Program.DemoServer, error, IsActive);
         login.SignedIn += async l => { Interop.Credentials.Write(l.ToJson(), l.User); _settings.LastServer = l.Server; _settings.Save(); await Connect(l); };
         login.SignIn = (server, user, password) => SubsonicClient.SignInAsync(server, user, password, ClientName);
@@ -247,7 +248,7 @@ public sealed partial class MainWindow : Window, IShell
         _library = new LibraryPane(music, this, _settings);
         _library.RailChanged += (rail, byUser) =>
         {
-            LibraryColumn.Width = new GridLength(rail ? 80 : 300); // 80: a 48 px cover with 16 px either side
+            LibraryColumn.Width = new GridLength(rail ? 88 : 308); // 80 / 300 px panel + 8 px gap on LibraryHost
             if (byUser) { _settings.LibraryOpen = !rail; _settings.Save(); }
         };
         LibraryHost.Child = _library;
@@ -269,7 +270,7 @@ public sealed partial class MainWindow : Window, IShell
         SetPanel(_settings.PanelOpen, animate: false);
 
         // the top bar
-        TopCenter.Children.Clear(); TopEnd.Children.Clear(); _updatePill = null;
+        TopCenter.Children.Clear(); TopEnd.Children.Clear(); _updatePill = null; _settingsButton = null; _connectionOver = false;
         // foobar2k's top bar: a raised round Home button (48) that grows under the pointer, and the search pill (48): a search
         // icon, the field (no box, no underline), a hairline, the Browse button
         var home = Ui.IconButton(Glyphs.Home, "首页", (_, _) => Navigate("home"), 48, 20);
@@ -332,8 +333,8 @@ public sealed partial class MainWindow : Window, IShell
         _connection = new Button { Content = Ui.Row(8, dot, label), Style = Ui.Style("PillButtonStyle"), Tag = (dot, label), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), Height = 36, CornerRadius = new CornerRadius(18), Padding = new Thickness(14, 0, 14, 0), VerticalAlignment = VerticalAlignment.Center };
         _connection.Resources["ButtonBackgroundPointerOver"] = Ui.Brush("HoverBrush");
         _connection.Resources["ButtonBackgroundPressed"] = Ui.Brush("HoverBrush");
-        _connection.PointerEntered += (_, _) => label.Foreground = Ui.Brush("TextPrimaryBrush");
-        _connection.PointerExited += (_, _) => label.Foreground = Ui.Brush("TextSecondaryBrush");
+        _connection.PointerEntered += (_, _) => { _connectionOver = true; SyncConnection(); };
+        _connection.PointerExited += (_, _) => { _connectionOver = false; SyncConnection(); };
         _connection.Click += async (_, _) =>
         {
             if (!music.IsOnline) { await music.GoOnlineAsync(); return; }
@@ -347,6 +348,7 @@ public sealed partial class MainWindow : Window, IShell
         };
         var settings = Ui.IconButton(Glyphs.Settings, "设置", (_, _) => Navigate("settings"), 36, 16);
         settings.Resources["ButtonForegroundPointerOver"] = Ui.Brush("TextPrimaryBrush");
+        _settingsButton = settings;
         _panelToggle = Ui.IconToggle(Glyphs.Panel, "显示或隐藏正在播放", 36);
         _panelToggle.IsChecked = _settings.PanelOpen;
         _panelToggle.Click += (_, _) => { SetPanel(_panelToggle.IsChecked == true); if (_panelToggle.IsChecked == true) _panel?.Show("now", animate: false); };
@@ -416,9 +418,15 @@ public sealed partial class MainWindow : Window, IShell
     {
         if (_connection?.Tag is not ValueTuple<Microsoft.UI.Xaml.Shapes.Ellipse, TextBlock> parts || _music is not { } m) return;
         var (dot, label) = parts;
-        dot.Fill = m.IsOnline ? Ui.Brush("GoodBrush") : Ui.Brush("BadBrush");
-        label.Text = m.IsOnline ? m.Server.Name : "未连接到服务器";
-        string name = m.IsOnline ? $"已连接 · {m.Server.Version}" : "未连接到服务器，点击重新连接";
+        bool online = m.IsOnline;
+        dot.Fill = online ? Ui.Brush("GoodBrush") : Ui.Brush("BadBrush");
+        label.Text = online ? m.Server.Name : "未连接到服务器";
+        // offline stands out with a soft red tint and primary text (foobar2k's .f2k-conn[data-state="offline"])
+        label.Foreground = !online || _connectionOver ? Ui.Brush("TextPrimaryBrush") : Ui.Brush("TextSecondaryBrush");
+        _connection.Background = online ? new SolidColorBrush(Microsoft.UI.Colors.Transparent) : Ui.Brush("OfflineBrush");
+        _connection.Resources["ButtonBackgroundPointerOver"] = online ? Ui.Brush("HoverBrush") : Ui.Brush("OfflineHoverBrush");
+        _connection.Resources["ButtonBackgroundPressed"] = online ? Ui.Brush("HoverBrush") : Ui.Brush("OfflineHoverBrush");
+        string name = online ? $"已连接 · {m.Server.Version}" : "未连接到服务器，点击重新连接";
         AutomationProperties.SetName(_connection, name);
         ToolTipService.SetToolTip(_connection, name);
     }
@@ -433,7 +441,7 @@ public sealed partial class MainWindow : Window, IShell
     private void SetPanel(bool open, bool byUser = true, bool animate = true)
     {
         bool wasOpen = PanelColumn.Width.Value > 0;
-        PanelColumn.Width = new GridLength(open ? 340 : 0);
+        PanelColumn.Width = new GridLength(open ? 348 : 0); // 340 px panel + 8 px left gap on PanelHost
         if (open)
         {
             bool leaving = _panelLeaving;
@@ -449,6 +457,7 @@ public sealed partial class MainWindow : Window, IShell
             {
                 // while it goes, over the end of the page (its column is gone already), where it was, untouchable
                 Grid.SetColumn(PanelHost, 1); Grid.SetColumnSpan(PanelHost, 2);
+                PanelHost.Margin = new Thickness(0);
                 PanelHost.Width = 340; PanelHost.HorizontalAlignment = HorizontalAlignment.Right;
                 PanelHost.IsHitTestVisible = false;
                 _panelLeaving = true;
@@ -466,6 +475,7 @@ public sealed partial class MainWindow : Window, IShell
     {
         _panelLeaving = false;
         Grid.SetColumn(PanelHost, 2); Grid.SetColumnSpan(PanelHost, 1);
+        PanelHost.Margin = new Thickness(8, 0, 0, 0);
         PanelHost.Width = double.NaN; PanelHost.HorizontalAlignment = HorizontalAlignment.Stretch;
         PanelHost.IsHitTestVisible = true;
     }
@@ -662,9 +672,28 @@ public sealed partial class MainWindow : Window, IShell
         Motion.Enter(view, rise: 6, move: Motion.Push); // the page fades in; its rows and cards rise in after it
         Title = view.Title.Length > 0 ? $"{view.Title} · Sonus" : "Sonus";
         if (_search is not null && kind != "search" && _search.FocusState == FocusState.Unfocused) _search.Text = "";
+        SyncActiveNav(kind);
         SyncBarPanel(lyrics: kind == "lyrics");
         Navigated?.Invoke(route);
         if (clock.ElapsedMilliseconds >= 150) Log.Write($"[page] {route} built in {clock.ElapsedMilliseconds} ms");
+    }
+
+    /// <summary>Marks where the user is: Home brightens on home, Settings turns amber on settings, and the library highlights
+    /// the viewed playlist / album / artist separately from what is playing.</summary>
+    private void SyncActiveNav(string kind)
+    {
+        if (_home is not null)
+        {
+            bool onHome = kind is not ("album" or "playlist" or "artist" or "search" or "genre" or "shelf" or "lyrics" or "settings");
+            _home.Foreground = onHome ? Ui.Brush("TextPrimaryBrush") : Ui.Brush("TextSecondaryBrush");
+        }
+        if (_settingsButton is not null)
+        {
+            bool onSettings = kind == "settings";
+            _settingsButton.Foreground = onSettings ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextSecondaryBrush");
+            _settingsButton.Resources["ButtonForegroundPointerOver"] = onSettings ? Ui.Brush("AccentHiBrush") : Ui.Brush("TextPrimaryBrush");
+        }
+        _library?.SetCurrentRoute(_route);
     }
 
     public event Action<string>? Navigated;
@@ -762,7 +791,7 @@ public sealed partial class MainWindow : Window, IShell
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         row.Children.Add(icon);
         Grid.SetColumn(text, 1); row.Children.Add(text);
-        var edge = new Border { Width = 3, Background = Ui.Brush("BadBrush"), HorizontalAlignment = HorizontalAlignment.Left, Visibility = message.IsError ? Visibility.Visible : Visibility.Collapsed };
+        var edge = new Border { Width = 3, Background = Ui.Brush("BadBrush"), CornerRadius = new CornerRadius(6, 0, 0, 6), HorizontalAlignment = HorizontalAlignment.Left, Visibility = message.IsError ? Visibility.Visible : Visibility.Collapsed };
         var toast = new Border
         {
             Background = Ui.Brush("ToastBrush"), BorderBrush = Ui.Brush("LineBrush"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(7), Width = 360,

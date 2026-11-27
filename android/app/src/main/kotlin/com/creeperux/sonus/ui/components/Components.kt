@@ -85,7 +85,17 @@ fun Dp.px(): Int = with(LocalDensity.current) { this@px.roundToPx() }
  * instead of from the empty colour.
  */
 @Composable
-fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, shape: Shape = RoundedCornerShape(Shapes.smallCover), placeholder: String = "album", follows: Boolean = false, instant: Boolean = false) {
+fun Cover(
+    url: String?,
+    size: Dp,
+    modifier: Modifier = Modifier,
+    shape: Shape = RoundedCornerShape(Shapes.smallCover),
+    placeholder: String = "album",
+    follows: Boolean = false,
+    instant: Boolean = false,
+    placeholderKey: MemoryCache.Key? = null,
+    onCacheKey: ((MemoryCache.Key?) -> Unit)? = null,
+) {
     val c = Sonus.colors
     val context = LocalPlatformContext.current
     val motion = LocalMotion.current
@@ -95,14 +105,19 @@ fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, shape: Shape = 
         if (url == null || (!shown && !instant)) KitIcon(placeholder, size = size * 0.32f, tint = c.textQuiet)
         if (url != null) {
             val crossfade = if (instant || !motion) 0 else if (follows) Motion.SHEET else 180
-            val request = remember(url, crossfade) {
+            val holdKey = if (instant) placeholderKey else if (follows) previous.value else null
+            val request = remember(url, crossfade, holdKey) {
                 ImageRequest.Builder(context).data(url).crossfade(crossfade)
-                    .apply { if (follows && !instant) previous.value?.let { placeholderMemoryCacheKey(it) } }
+                    .apply { holdKey?.let(::placeholderMemoryCacheKey) }
                     .build()
             }
             AsyncImage(
                 model = request, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize(),
-                onSuccess = { shown = true; previous.value = it.result.memoryCacheKey },
+                onSuccess = {
+                    shown = true
+                    previous.value = it.result.memoryCacheKey
+                    onCacheKey?.invoke(it.result.memoryCacheKey)
+                },
             )
         }
     }

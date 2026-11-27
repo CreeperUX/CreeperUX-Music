@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -47,6 +48,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import coil3.memory.MemoryCache
 import com.creeperux.sonus.core.Track
 import com.creeperux.sonus.playback.PlayerStatus
 import com.creeperux.sonus.ui.components.Cover
@@ -212,24 +214,54 @@ class TrackSwipeController(
     var dragging by mutableStateOf(false)
         private set
 
-    /** The track id that was active before a swipe committed; cleared once the player reports the new track. */
-    private var pendingFrom: String? = null
+    /**
+     * The track id active when a swipe committed, held as Compose state so [visualOffset] and [isSwipedInto] flip to
+     * 0f / true synchronously on the very first frame after `state.trackId` changes — before [LaunchedEffect] runs —
+     * preventing a 1-frame flash of the next-next slot.
+     */
+    private var pendingFrom by mutableStateOf<String?>(null)
     private var settleJob: Job? = null
 
     /** Set to the track id handed off by a swipe so its Cover skips the crossfade (it is already on screen). */
     var swipedIntoTrackId by mutableStateOf<String?>(null)
         private set
 
-    /** Called whenever the player's current track id changes so a held swipe snaps back cleanly on the new track. */
-    fun onTrackChanged(newTrackId: String?) {
+    /** Coil memory-cache (url, key) of the preloaded adjacent covers (plain fields, never trigger recomposition). */
+    internal var nextCached: Pair<String, MemoryCache.Key>? = null
+    internal var prevCached: Pair<String, MemoryCache.Key>? = null
+
+    /** Cache entry of the incoming cover captured at swipe commit so the center Cover paints synchronously on frame 1. */
+    private var handoffCached: Pair<String, MemoryCache.Key>? = null
+
+    /** Returns the preloaded cache key only when [url] matches the cover that slid into center. */
+    fun handoffCacheKeyFor(url: String?): MemoryCache.Key? =
+        if (url != null && handoffCached?.first == url) handoffCached?.second else null
+
+    /** Draw-phase offset for [trackId]: snaps visually to 0f the instant [trackId] differs from [pendingFrom]. */
+    fun visualOffset(trackId: String?): Float {
+        val from = pendingFrom
+        return if (from != null && trackId != from) 0f else offset.value
+    }
+
+    /** True when [trackId] is the song that just slid into center via a swipe. */
+    fun isSwipedInto(trackId: String?): Boolean {
+        if (trackId == null) return false
+        val from = pendingFrom
+        return swipedIntoTrackId == trackId || (from != null && trackId != from)
+    }
+
+    /** Called from LaunchedEffect(trackId) to finish resetting [offset] to 0f after a swipe handoff. */
+    suspend fun onTrackChanged(newTrackId: String?) {
         val from = pendingFrom
         if (from != null && newTrackId != from) {
-            pendingFrom = null
-            swipedIntoTrackId = newTrackId
             settleJob?.cancel()
-            scope.launch { offset.snapTo(0f) }
+            swipedIntoTrackId = newTrackId
+            // snap offset to 0f BEFORE clearing pendingFrom so visualOffset() stays 0f across every frame
+            offset.snapTo(0f)
+            pendingFrom = null
         } else if (newTrackId != swipedIntoTrackId) {
             swipedIntoTrackId = null
+            handoffCached = null
         }
     }
 
@@ -284,6 +316,7 @@ class TrackSwipeController(
         if (!motionEnabled()) {
             haptics.dragEnd()
             swipedIntoTrackId = null
+            handoffCached = null
             settleJob = scope.launch { offset.snapTo(0f) }
             if (dir > 0) onSkipNext() else onSkipPrevious()
             return
@@ -294,19 +327,22 @@ class TrackSwipeController(
             val remaining = abs(target - offset.value)
             offset.animateTo(target, releaseSpec(remaining, speedTowards))
             haptics.dragEnd()
+            handoffCached = if (dir > 0) nextCached else prevCached
             pendingFrom = fromTrack
             if (dir > 0) onSkipNext() else onSkipPrevious()
             // local mode updates trackId immediately (and a 1-song repeating list stays on the same trackId);
             // Connect v2 remote mode waits briefly for the server's session so the old cover does not flash back
-            if (currentTrackId() != fromTrack || (expectedTrack != null && expectedTrack == fromTrack)) {
-                pendingFrom = null
-                swipedIntoTrackId = currentTrackId()
+            val now = currentTrackId()
+            if (now != fromTrack || (expectedTrack != null && expectedTrack == fromTrack)) {
+                swipedIntoTrackId = now
                 offset.snapTo(0f)
+                pendingFrom = null
             } else {
                 // safety fallback if offline or the server refused the skip: spring back so the cover is never stuck
                 delay(1_500)
                 if (pendingFrom == fromTrack) {
                     pendingFrom = null
+                    handoffCached = null
                     offset.animateTo(0f, tween(Motion.PUSH, easing = Motion.EaseOut))
                 }
             }
@@ -338,7 +374,6 @@ fun rememberTrackSwipe(): TrackSwipeController {
     val motion = LocalMotion.current
     val flick = with(LocalDensity.current) { 700.dp.toPx() }
     val motionRef = rememberUpdatedState(motion)
-    val trackIdRef = rememberUpdatedState(state.trackId)
     val controller = remember(player, scope, haptics, flick) {
         TrackSwipeController(
             scope = scope,
@@ -347,7 +382,7 @@ fun rememberTrackSwipe(): TrackSwipeController {
             motionEnabled = { motionRef.value },
             canSkipNext = { player.canSkipNext },
             canSkipPrevious = { player.canSkipPrevious },
-            currentTrackId = { trackIdRef.value },
+            currentTrackId = { player.state.value.trackId },
             nextTrackId = { player.nextTrackId },
             previousTrackId = { player.previousTrackId },
             onSkipNext = player::next,
@@ -363,7 +398,7 @@ fun rememberTrackSwipe(): TrackSwipeController {
 /**
  * Full-width swipeable cover carousel for the phone's full player (with [verticalDrag] to dismiss) and the tablet's
  * right panel (with [verticalDrag] null so the panel keeps scrolling vertically). Adjacent covers are rendered beside
- * the current cover so they slide in seamlessly with the finger.
+ * the current cover and positioned strictly in draw-phase [graphicsLayer] blocks so dragging causes zero recomposition.
  */
 @Composable
 fun SwipeableCover(
@@ -393,32 +428,42 @@ fun SwipeableCover(
             .testTag(tag),
         contentAlignment = Alignment.Center,
     ) {
+        val density = LocalDensity.current
         val side = minOf((maxWidth - horizontalInset * 2).coerceAtLeast(1.dp), maxHeight)
-        val stridePx = with(LocalDensity.current) { (side + pageGap).toPx() }
-        swipe.stridePx = stridePx
+        val stridePx = with(density) { (side + pageGap).toPx() }
+        val shadowPx = with(density) { shadowElevation.toPx() }
+        SideEffect { swipe.stridePx = stridePx }
         val px = side.px()
         val shape = RoundedCornerShape(Shapes.panel)
-        val offsetX = swipe.offset.value
-        val active = offsetX != 0f || swipe.dragging
+        val trackId = track?.id
+        val swipedHere = swipe.isSwipedInto(trackId)
+        val prevUrl = prevTrack?.let { session.trackCoverUrl(it, px) }
+        val nextUrl = nextTrack?.let { session.trackCoverUrl(it, px) }
+        val curUrl = track?.let { session.trackCoverUrl(it, px) }
 
         if (canPrev) {
             Box(
                 Modifier
                     .graphicsLayer {
-                        translationX = offsetX - stridePx
+                        val ox = swipe.visualOffset(trackId)
+                        val active = ox != 0f || swipe.dragging
+                        translationX = ox - stridePx
                         alpha = if (active) 1f else 0f
+                        this.shadowElevation = if (active) shadowPx else 0f
+                        this.shape = shape
+                        this.clip = false
                     }
                     .size(side)
-                    .then(if (shadowElevation > 0.dp && active) Modifier.shadow(shadowElevation, shape) else Modifier)
                     .clearAndSetSemantics {},
             ) {
                 Cover(
-                    prevTrack?.let { session.trackCoverUrl(it, px) },
+                    prevUrl,
                     side,
                     Modifier.fillMaxSize(),
                     shape = shape,
                     placeholder = if (prevTrack == null) "shuffle" else "album",
                     instant = true,
+                    onCacheKey = { key -> if (prevUrl != null && key != null) swipe.prevCached = prevUrl to key },
                 )
             }
         }
@@ -426,37 +471,43 @@ fun SwipeableCover(
             Box(
                 Modifier
                     .graphicsLayer {
-                        translationX = offsetX + stridePx
+                        val ox = swipe.visualOffset(trackId)
+                        val active = ox != 0f || swipe.dragging
+                        translationX = ox + stridePx
                         alpha = if (active) 1f else 0f
+                        this.shadowElevation = if (active) shadowPx else 0f
+                        this.shape = shape
+                        this.clip = false
                     }
                     .size(side)
-                    .then(if (shadowElevation > 0.dp && active) Modifier.shadow(shadowElevation, shape) else Modifier)
                     .clearAndSetSemantics {},
             ) {
                 Cover(
-                    nextTrack?.let { session.trackCoverUrl(it, px) },
+                    nextUrl,
                     side,
                     Modifier.fillMaxSize(),
                     shape = shape,
                     placeholder = if (nextTrack == null) "shuffle" else "album",
                     instant = true,
+                    onCacheKey = { key -> if (nextUrl != null && key != null) swipe.nextCached = nextUrl to key },
                 )
             }
         }
         Box(
             Modifier
-                .graphicsLayer { translationX = offsetX }
+                .graphicsLayer { translationX = swipe.visualOffset(trackId) }
                 .then(coverModifier)
                 .size(side)
                 .then(if (shadowElevation > 0.dp) Modifier.shadow(shadowElevation, shape) else Modifier),
         ) {
             Cover(
-                track?.let { session.trackCoverUrl(it, px) },
+                curUrl,
                 side,
                 Modifier.fillMaxSize(),
                 shape = shape,
                 follows = true,
-                instant = track?.id != null && swipe.swipedIntoTrackId == track.id,
+                instant = swipedHere,
+                placeholderKey = if (swipedHere) swipe.handoffCacheKeyFor(curUrl) else null,
             )
         }
     }
@@ -464,7 +515,8 @@ fun SwipeableCover(
 
 /**
  * The mini player's song strip (cover + title + subtitle) that slides horizontally with [swipe] while the mini
- * player's background, buttons and progress line stay put.
+ * player's background, buttons and progress line stay put. All drag offset reads stay in [graphicsLayer] so dragging
+ * never recomposes the mini player.
  */
 @Composable
 fun SwipeableMiniTrack(
@@ -480,51 +532,67 @@ fun SwipeableMiniTrack(
     val prevTrack = remember(state.queueVersion, state.trackId, state.order) { player.previousTrackId?.let(session.lib::track) }
     val canNext = remember(state.queueVersion, state.trackId, state.order) { player.canSkipNext }
     val canPrev = remember(state.queueVersion, state.trackId, state.order) { player.canSkipPrevious }
+    val trackId = track.id
+    val swipedHere = swipe.isSwipedInto(trackId)
+    val miniPx = 44.dp.px()
+    val prevUrl = prevTrack?.let { session.trackCoverUrl(it, miniPx) }
+    val nextUrl = nextTrack?.let { session.trackCoverUrl(it, miniPx) }
+    val curUrl = session.trackCoverUrl(track, miniPx)
 
     Box(
         modifier
             .clipToBounds()
             .onSizeChanged { if (it.width > 0) swipe.stridePx = it.width.toFloat() },
     ) {
-        val offsetX = swipe.offset.value
-        val stride = swipe.stridePx
-        val active = offsetX != 0f || swipe.dragging
-
-        if (canPrev && active) {
+        if (canPrev) {
             MiniTrackRow(
                 track = prevTrack,
+                coverUrl = prevUrl,
                 fallbackTitle = "随机上一首",
                 isCurrent = false,
                 coverModifier = Modifier,
                 instant = true,
+                onCacheKey = { key -> if (prevUrl != null && key != null) swipe.prevCached = prevUrl to key },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .graphicsLayer { translationX = offsetX - stride }
+                    .graphicsLayer {
+                        val ox = swipe.visualOffset(trackId)
+                        translationX = ox - swipe.stridePx
+                        alpha = if (ox != 0f || swipe.dragging) 1f else 0f
+                    }
                     .clearAndSetSemantics {},
             )
         }
-        if (canNext && active) {
+        if (canNext) {
             MiniTrackRow(
                 track = nextTrack,
+                coverUrl = nextUrl,
                 fallbackTitle = "随机下一首",
                 isCurrent = false,
                 coverModifier = Modifier,
                 instant = true,
+                onCacheKey = { key -> if (nextUrl != null && key != null) swipe.nextCached = nextUrl to key },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .graphicsLayer { translationX = offsetX + stride }
+                    .graphicsLayer {
+                        val ox = swipe.visualOffset(trackId)
+                        translationX = ox + swipe.stridePx
+                        alpha = if (ox != 0f || swipe.dragging) 1f else 0f
+                    }
                     .clearAndSetSemantics {},
             )
         }
         MiniTrackRow(
             track = track,
+            coverUrl = curUrl,
             fallbackTitle = "",
             isCurrent = true,
             coverModifier = coverModifier,
-            instant = swipe.swipedIntoTrackId == track.id,
+            instant = swipedHere,
+            placeholderKey = if (swipedHere) swipe.handoffCacheKeyFor(curUrl) else null,
             modifier = Modifier
                 .fillMaxWidth()
-                .graphicsLayer { translationX = offsetX },
+                .graphicsLayer { translationX = swipe.visualOffset(trackId) },
         )
     }
 }
@@ -532,19 +600,29 @@ fun SwipeableMiniTrack(
 @Composable
 private fun MiniTrackRow(
     track: Track?,
+    coverUrl: String?,
     fallbackTitle: String,
     isCurrent: Boolean,
     coverModifier: Modifier,
     instant: Boolean,
+    placeholderKey: MemoryCache.Key? = null,
+    onCacheKey: ((MemoryCache.Key?) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val c = Sonus.colors
-    val session = LocalSession.current
     val state by LocalPlayer.current.state.collectAsState()
     Row(modifier, verticalAlignment = Alignment.CenterVertically) {
         if (track != null) {
             Box(coverModifier.size(44.dp)) {
-                Cover(session.trackCoverUrl(track, 44.dp.px()), 44.dp, Modifier.fillMaxSize(), follows = isCurrent, instant = instant)
+                Cover(
+                    coverUrl,
+                    44.dp,
+                    Modifier.fillMaxSize(),
+                    follows = isCurrent,
+                    instant = instant,
+                    placeholderKey = placeholderKey,
+                    onCacheKey = onCacheKey,
+                )
             }
         } else {
             Box(

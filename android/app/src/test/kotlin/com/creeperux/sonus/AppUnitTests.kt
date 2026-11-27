@@ -12,6 +12,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -308,6 +309,58 @@ class TrackSwipeUiTest {
         assertThat(small).isLessThan(large)
         assertThat(large).isLessThan(50f)
         assertThat(TrackSwipeController.rubberBand(-500f, 50f)).isEqualTo(-large)
+    }
+
+    @Test
+    fun drawPhaseReadsAvoidRecompositionDuringDragAndSnapOffsetSynchronouslyOnHandoff() {
+        var recompositions = 0
+        var remoteTrack = "t1"
+        lateinit var controller: TrackSwipeController
+        compose.mainClock.autoAdvance = false
+        compose.setContent {
+            val scope = rememberCoroutineScope()
+            controller = androidx.compose.runtime.remember {
+                TrackSwipeController(
+                    scope = scope,
+                    flickPxPerSec = 700f,
+                    haptics = Haptics {},
+                    motionEnabled = { true },
+                    canSkipNext = { true },
+                    canSkipPrevious = { false },
+                    currentTrackId = { remoteTrack },
+                    // simulate Connect v2: onSkipNext does not mutate trackId synchronously
+                    onSkipNext = {},
+                    onSkipPrevious = {},
+                ).apply { stridePx = 200f }
+            }
+            recompositions++
+            Box(
+                Modifier
+                    .size(200.dp)
+                    .directionalDrag(horizontal = controller)
+                    .graphicsLayer { translationX = controller.visualOffset(remoteTrack) }
+                    .testTag("drag-box"),
+            )
+        }
+        compose.mainClock.advanceTimeByFrame()
+        val initial = recompositions
+        // dragging and settling must not recompose when offset/dragging are read in graphicsLayer
+        compose.onNodeWithTag("drag-box").performTouchInput {
+            down(Offset(180f, 100f))
+            moveBy(Offset(-30f, 0f), delayMillis = 16)
+            moveBy(Offset(-30f, 0f), delayMillis = 16)
+            moveBy(Offset(-30f, 0f), delayMillis = 16)
+            advanceEventTime(16)
+            up()
+        }
+        // advance past the ~200 ms settle animation, before the 1500 ms offline fallback
+        compose.mainClock.advanceTimeBy(400)
+        assertThat(recompositions).isEqualTo(initial)
+        // offset is held at -stride while waiting for Connect v2 server reply; the instant trackId flips to "t2",
+        // visualOffset("t2") and isSwipedInto("t2") must already be 0f / true BEFORE onTrackChanged runs
+        assertThat(controller.visualOffset("t1")).isWithin(1f).of(-200f)
+        assertThat(controller.visualOffset("t2")).isWithin(0.1f).of(0f)
+        assertThat(controller.isSwipedInto("t2")).isTrue()
     }
 
     @Test

@@ -47,6 +47,7 @@ internal static class E2EChannel
     {
         if (PipeName is not { } pipe) return;
         Log.Write($"[e2e] channel on pipe {pipe}");
+        EndWithTheRun();
         _ = Task.Run(async () =>
         {
             while (true)
@@ -66,12 +67,116 @@ internal static class E2EChannel
         });
     }
 
+    /// <summary>
+    /// The test run's process (SONUS_E2E_PARENT): when it ends, this instance ends too. tools/e2e starts instances outside
+    /// node's job object, so that a crash reaches Windows Error Reporting (inside it, a crash ends the process silently);
+    /// that job used to end them with node.
+    /// </summary>
+    private static void EndWithTheRun()
+    {
+        if (!int.TryParse(Environment.GetEnvironmentVariable("SONUS_E2E_PARENT"), out int pid)) return;
+        System.Diagnostics.Process run;
+        try { run = System.Diagnostics.Process.GetProcessById(pid); }
+        catch (ArgumentException) { Log.Write("[e2e] the test run has already ended: closing"); Environment.Exit(3); return; }
+        new Thread(() =>
+        {
+            run.WaitForExit();
+            Log.Write("[e2e] the test run ended: closing");
+            Environment.Exit(3);
+        }) { IsBackground = true, Name = "test run watch" }.Start();
+    }
+
+    /// <summary>
+    /// "reentrancy": 0.6.2's crash, without the crash. The UI thread waits 400 ms for a lock another thread holds while a
+    /// third thread calls into the UI thread's COM context, as the finalizer does when it releases a XAML object. "after the
+    /// wait": the call waited for the UI thread to be free (UiSynchronizationContext); "during the wait": the CLR pumped
+    /// and ran it inside the wait, which XAML in the middle of a layout does not survive.
+    /// </summary>
+    private static async Task<string> Reentrancy()
+    {
+        Guid iid = IidContextCallback;
+        if (CoGetObjectContext(ref iid, out IntPtr context) < 0) return "error: no COM context";
+        var gate = new object();
+        using var held = new ManualResetEventSlim();
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        long ran = -1;
+        var holder = new Thread(() => { lock (gate) { held.Set(); Thread.Sleep(400); } }) { IsBackground = true };
+        holder.Start();
+        held.Wait();
+        var caller = new Thread(() => { Thread.Sleep(100); CallIn(context, () => ran = clock.ElapsedMilliseconds); Marshal.Release(context); }) { IsBackground = true };
+        caller.Start();
+        lock (gate) { }
+        long acquired = clock.ElapsedMilliseconds;
+        await Task.Run(caller.Join); // back to the message loop: the call can come in now
+        return ran < 0 ? "error: the call did not run" : $"{(ran < acquired ? "during" : "after")} the wait (call at {ran} ms, lock at {acquired} ms)";
+    }
+
+    /// <summary>
+    /// "memory": managed memory after a full collection, in KB (pages left behind must not pile up). It collects on a pool
+    /// thread: the finalizer releases XAML objects with calls into the UI thread, so the UI thread must be free to take them.
+    /// Waiting for the finalizers on the UI thread stood still a second and then pumped (UiSynchronizationContext).
+    /// </summary>
+    private static async Task<string> Memory()
+    {
+        long bytes = await Task.Run(() => { GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); return GC.GetTotalMemory(true); });
+        return (bytes / 1024).ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static string LongWait()
+    {
+        var gate = new object();
+        using var held = new ManualResetEventSlim();
+        var holder = new Thread(() => { lock (gate) { held.Set(); Thread.Sleep(1500); } }) { IsBackground = true };
+        holder.Start();
+        held.Wait();
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        lock (gate) { }
+        return $"waited {clock.ElapsedMilliseconds} ms";
+    }
+
+    private static readonly Guid IidContextCallback = new("000001da-0000-0000-C000-000000000046");
+    // what CsWinRT passes for its calls into a context (Context.CallInContext)
+    private static readonly Guid IidCallbackWithNoReentrancyToApplicationSta = new("0A299774-3E4E-FC42-1D9D-72CEE105CA57");
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ComCallData { public uint Dispid, Reserved; public IntPtr UserDefined; }
+
+    private static unsafe void CallIn(IntPtr context, Action action)
+    {
+        var handle = GCHandle.Alloc(action);
+        try
+        {
+            var data = new ComCallData { UserDefined = GCHandle.ToIntPtr(handle) };
+            Guid iid = IidCallbackWithNoReentrancyToApplicationSta;
+            // IContextCallback::ContextCallback, the vtable's fourth method
+            var call = (delegate* unmanaged[Stdcall]<IntPtr, delegate* unmanaged[Stdcall]<ComCallData*, int>, ComCallData*, Guid*, int, IntPtr, int>)(*(IntPtr**)context)[3];
+            Marshal.ThrowExceptionForHR(call(context, &RunCallback, &data, &iid, 5, IntPtr.Zero));
+        }
+        finally { handle.Free(); }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvStdcall)])]
+    private static unsafe int RunCallback(ComCallData* data)
+    {
+        ((Action)GCHandle.FromIntPtr(data->UserDefined).Target!)();
+        return 0;
+    }
+
+    [DllImport("ole32.dll")] private static extern int CoGetObjectContext(ref Guid iid, out IntPtr context);
+
     private static Task<string> RunOnUi(DispatcherQueue ui, string line)
     {
         var done = new TaskCompletionSource<string>();
         ui.TryEnqueue(async () =>
         {
-            try { done.SetResult(line.StartsWith("shot ", StringComparison.Ordinal) ? await Shot(line[5..].Trim()) : Execute(line.Trim())); }
+            try
+            {
+                string command = line.Trim();
+                done.SetResult(command.StartsWith("shot ", StringComparison.Ordinal) ? await Shot(command[5..].Trim())
+                    : command == "reentrancy" ? await Reentrancy()
+                    : command == "memory" ? await Memory()
+                    : Execute(command));
+            }
             catch (Exception ex) { Log.Write($"[e2e] {line}: {ex}"); done.SetResult("error: " + ex.Message); }
         });
         return done.Task;
@@ -168,8 +273,6 @@ internal static class E2EChannel
             "bounds" => W?.Content is UIElement broot ? string.Join(Separator, Named().Where(x => Matches(x.Name, arg)).Select(x =>
                 { var r = x.Element.TransformToVisual(broot).TransformBounds(new Windows.Foundation.Rect(0, 0, x.Element.ActualWidth, x.Element.ActualHeight));
                   return FormattableString.Invariant($"{x.Name} [{x.Element.GetType().Name}] {r.X:0.#},{r.Y:0.#} {r.Width:0.#}x{r.Height:0.#}"); })) : "error: no window",
-            // managed memory after a full collection, in KB (pages left behind must not pile up)
-            "memory" => Done(() => { GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); }) is var _ ? (GC.GetTotalMemory(true) / 1024).ToString(System.Globalization.CultureInfo.InvariantCulture) : "",
             "ws" => (Environment.WorkingSet / (1024 * 1024)).ToString(System.Globalization.CultureInfo.InvariantCulture), // MB
             "elements" => W?.Content is UIElement el ? Descend(el).Count().ToString(System.Globalization.CultureInfo.InvariantCulture) : "0",
             "window" => W is { } ww ? FormattableString.Invariant($"{ww.AppWindow.Size.Width} {ww.AppWindow.Size.Height} {ww.Title}") : "error: no window",
@@ -177,6 +280,9 @@ internal static class E2EChannel
             "insets" => W is { } wi && wi.Content is FrameworkElement ri ? FormattableString.Invariant($"left {wi.AppWindow.TitleBar.LeftInset} right {wi.AppWindow.TitleBar.RightInset} scale {ri.XamlRoot.RasterizationScale} width {ri.ActualWidth}") : "error: no window",
             // where the window buttons begin, the top bar's clickable parts and where its end's buttons are (window pixels)
             "titlebar" => W?.TitleBarState() ?? "error: no window",
+            // by hand only: the UI thread waits 1.5 s for a lock another thread holds, so UiSynchronizationContext logs its
+            // "[ui] waited … without pumping" line and pumps (acceptance fails on that line, by design)
+            "longwait" => LongWait(),
             "close" => W is { } wc && PostMessage(WinRT.Interop.WindowNative.GetWindowHandle(wc), 0x0010, IntPtr.Zero, IntPtr.Zero) ? "closing" : "error: no window",
             _ => "error: unknown command " + command,
         };
@@ -190,6 +296,7 @@ internal static class E2EChannel
         var m = M;
         return JsonSerializer.Serialize(new
         {
+            syncContext = SynchronizationContext.Current?.GetType().Name, // UiSynchronizationContext, also after signing in again
             ready = W?.Ready == true, route = W?.Route, title = W?.Title, view = W?.CurrentView?.GetType().Name,
             track = m?.Queue.Current, trackTitle = m?.Current?.Title, state = m?.State.ToString(), error = m?.Error, position = m?.Position, duration = m?.Duration,
             engine = m?.Engine.State.ToString(), engineTrack = m?.Engine.CurrentId, engineNext = m?.Engine.NextId, enginePosition = m?.Engine.Position, engineDuration = m?.Engine.Duration, volume = m?.Engine.Volume,

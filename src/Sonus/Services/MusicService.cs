@@ -123,22 +123,22 @@ public sealed class MusicService : IDisposable
         }
     }
 
-    private readonly List<JsonElement> _unknown = [];
+    private readonly System.Collections.Concurrent.ConcurrentQueue<JsonElement> _unknown = new(); // no lock: the UI thread takes them (UiSynchronizationContext)
 
     /// <summary>A song from a playlist, the play queue or a radio: called by the client on any thread. Songs the library does
     /// not have are kept aside and added by <see cref="MergeUnknown"/> on the UI thread, all at once.</summary>
     private string Remember(JsonElement song)
     {
         string id = song.GetProperty("id").GetString()!;
-        if (!Library.TrackById.ContainsKey(id)) lock (_unknown) _unknown.Add(song.Clone());
+        if (!Library.TrackById.ContainsKey(id)) _unknown.Enqueue(song.Clone());
         return id;
     }
 
     /// <summary>Adds the songs <see cref="Remember"/> kept aside to the library (one regrouping, on the UI thread).</summary>
     private void MergeUnknown()
     {
-        List<JsonElement> songs;
-        lock (_unknown) { songs = [.. _unknown]; _unknown.Clear(); }
+        List<JsonElement> songs = [];
+        while (_unknown.TryDequeue(out var song)) songs.Add(song);
         // songs set aside while the library was still loading are mostly in it now: only the rest are read
         songs = songs.Where(s => !Library.TrackById.ContainsKey(s.GetProperty("id").GetString()!)).ToList();
         if (songs.Count == 0) return;

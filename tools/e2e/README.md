@@ -5,7 +5,7 @@ Sonus 自己的三套客户端测试默认对着演示服务器（`tools/demo-se
 | 测试 | 命令 |
 |---|---|
 | 单元测试和集成测试（xUnit） | `dotnet test tests/Sonus.Core.Tests` |
-| Windows 程序的验收（14 轮，静默） | `node tools/e2e/acceptance.mjs --arch=ARM64` |
+| Windows 程序的验收（14 轮，静默；失败时保留日志和崩溃转储，见下文） | `node tools/e2e/acceptance.mjs --arch=ARM64` |
 | 网页版的验收 | `node tools/check-web.mjs` |
 
 ## 选择服务器
@@ -62,6 +62,14 @@ dotnet test tests/Sonus.Core.Tests; node tools/e2e/acceptance.mjs --arch=ARM64; 
 - 演示服务器上：所有断言和以前一样，包括确切的数目（293 首、34 张专辑、17 位艺人、5 个歌单）、名字、歌词第一行在 8 秒、电台只出相近的流派、艺人简介里的“演示数据”、DSD64 的位深、`type` 是 navidrome、串流是 WAV。
 - 别的服务器上：同样的行为，用那台服务器自己报告的东西来比：数目和 `search3`/`getAlbumList2`/`getPlaylists` 对得上；歌词和服务器给的第一行时间（减去 offset）一致；电台里的歌都是服务器说相似的（服务器一首都不给时，程序用同一艺人或流派的歌）；有简介就显示、没有就不显示；回放增益按这首歌的增益（没有增益时音量不变）。
 - 服务器的曲库给不出数据的检查报告为“跳过”，写明原因（没有 DSD、清单里没有丢失文件的歌、没有别人的公开歌单、没有同步歌词、没有流派；专辑太少，每张的大封面在前几轮都已取过）。演示服务器上不会跳过任何一项。
+
+## 测试实例退出时留下什么
+
+- 测试实例在 node 的作业对象之外启动（`detached`）。原因是 libuv 的那个作业会给其中的进程设置 SEM_NOGPFAULTERRORBOX：进程崩溃时只留下异常码，没有 Windows 错误报告，没有“应用程序错误”事件，也没有转储。在作业之外，崩溃和普通程序一样交给 Windows 错误报告处理。这台电脑上它还会在 `%LOCALAPPDATA%\CrashDumps` 留一份转储。
+- 原来是作业保证实例随 node 一起结束，现在由程序自己做：它从 `SONUS_E2E_PARENT` 知道测试进程是哪一个，那个进程结束时它也退出。node 正常退出时也会结束还没停的实例。
+- 每个实例的退出码都会记下来。没让它停却退出了，接下来失败的检查会写“测试实例意外退出，退出码 0x…”。
+- 有检查失败时，所有实例的 `app.log` 会复制到 `.work/acceptance/kept-<这次运行开始的时间>/<序号>-<轮次>/`；意外退出的实例如果有崩溃转储，也一并复制。之后的运行不会清掉这些文件。报告最后列出每个实例怎么结束的。
+- 程序日志会记下进程的开始（`[process]`）、窗口关闭（`[window] closing`）和退出（`[exit]`），干净的关闭因此也会留下一行。
 
 ## 记录代理（`proxy.mjs`）
 

@@ -206,16 +206,17 @@ public static class Hero
 {
     public static Grid Build(string kind, string title, IEnumerable<UIElement> meta, Artwork? art, string? description = null)
     {
-        var g = new Grid { ColumnSpacing = 24, Margin = new Thickness(0, 24, 0, 4) };
-        g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        // only reserve the art column and gap when there is art; otherwise the title aligns flush left with the actions below
+        var g = new Grid { ColumnSpacing = art is not null ? 24 : 0, Margin = new Thickness(0, 24, 0, 4) };
         if (art is not null)
         {
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             art.Shadow = new ThemeShadow();
             art.Translation = new System.Numerics.Vector3(0, 0, 24);
             Motion.ScaleIn(art, 0.9f); // the cover comes forward as the page fades in
             g.Children.Add(art);
         }
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         var text = new StackPanel { VerticalAlignment = VerticalAlignment.Bottom, Spacing = 8 };
         text.Children.Add(Ui.Text(kind, size: 13, foreground: Ui.Brush("TextPrimaryBrush"), bold: true));
         var heading = Ui.Text(title, "HeroTitleStyle");
@@ -230,7 +231,7 @@ public static class Hero
             line.Children.Add(m); first = false;
         }
         text.Children.Add(line);
-        Grid.SetColumn(text, 1);
+        Grid.SetColumn(text, art is not null ? 1 : 0);
         g.Children.Add(text);
         return g;
     }

@@ -43,28 +43,41 @@ public sealed class SearchPage : View
         AutomationProperties.SetHeadingLevel(heading, AutomationHeadingLevel.Level1);
         body.Children.Add(heading);
         body.Children.Add(Ui.Row(8, Ui.Icon(Glyphs.Info, 14), Ui.Text("在媒体库中搜索标题、艺人和专辑。", "MutedTextStyle")));
-        var wrap = new VariableSizedWrapGrid { Orientation = Orientation.Horizontal, ItemWidth = 200, ItemHeight = 120 };
-        var genres = Music.Library.Albums.GroupBy(a => a.Genre).OrderByDescending(g => g.Count());
-        foreach (var g in genres)
-        {
-            var tile = new Button
+        var genres = Music.Library.Albums.GroupBy(a => a.Genre).OrderByDescending(g => g.Count()).ToList();
+        var tiles = Ui.Repeater<IGrouping<string, Album>>(
+            new UniformGridLayout { MinItemWidth = 188, MinItemHeight = 108, MinColumnSpacing = 12, MinRowSpacing = 12, ItemsStretch = UniformGridLayoutItemsStretch.Fill },
+            g =>
             {
-                Width = 188, Height = 108, CornerRadius = new CornerRadius(8), Padding = new Thickness(14), BorderThickness = new Thickness(0),
-                Background = new SolidColorBrush(Ui.Shade(ColorFor(g.Key), -0.2)), HorizontalContentAlignment = HorizontalAlignment.Left, VerticalContentAlignment = VerticalAlignment.Top,
-            };
-            var grid = new Grid { Width = 160, Height = 80 };
-            var name = Ui.Text(g.Key, size: 18, foreground: new SolidColorBrush(Microsoft.UI.Colors.White), bold: true);
-            var art = new Artwork(64, false, Glyphs.Album, 4) { Url = Music.CoverUrl(g.First().Id, 128), HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, -22, -24) };
-            art.RenderTransform = new RotateTransform { Angle = 25 };
-            grid.Children.Add(art); grid.Children.Add(name);
-            tile.Content = grid;
-            AutomationProperties.SetName(tile, g.Key);
-            tile.Click += (_, _) => Shell.Navigate($"genre:{g.Key}");
-            wrap.Children.Add(tile);
-            _ = Recolor(tile, g.First().Id);
-        }
-        AutomationProperties.SetName(wrap, "按流派浏览");
-        body.Children.Add(wrap);
+                var tile = new Button
+                {
+                    HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch,
+                    HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch,
+                    CornerRadius = new CornerRadius(8), Padding = new Thickness(14), BorderThickness = new Thickness(0),
+                    Background = new SolidColorBrush(Ui.Shade(ColorFor(g.Key), -0.2)),
+                };
+                var grid = new Grid();
+                var name = Ui.Text(g.Key, size: 18, foreground: new SolidColorBrush(Microsoft.UI.Colors.White), bold: true);
+                name.HorizontalAlignment = HorizontalAlignment.Left; name.VerticalAlignment = VerticalAlignment.Top;
+                var art = new Artwork(64, false, Glyphs.Album, 4) { Url = Music.CoverUrl(g.First().Id, 128), HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, -22, -24) };
+                art.CenterPoint = new System.Numerics.Vector3(32, 32, 0);
+                art.Rotation = 25;
+                if (Motion.Enabled)
+                {
+                    art.RotationTransition = new ScalarTransition { Duration = Motion.Control };
+                    art.ScaleTransition = new Vector3Transition { Duration = Motion.Control };
+                    tile.PointerEntered += (_, _) => { art.Rotation = 20; art.Scale = new System.Numerics.Vector3(1.04f, 1.04f, 1); };
+                    tile.PointerExited += (_, _) => { art.Rotation = 25; art.Scale = System.Numerics.Vector3.One; };
+                }
+                grid.Children.Add(art); grid.Children.Add(name);
+                tile.Content = grid;
+                AutomationProperties.SetName(tile, g.Key);
+                tile.Click += (_, _) => Shell.Navigate($"genre:{g.Key}");
+                _ = Recolor(tile, g.First().Id);
+                return tile;
+            }, stagger: true);
+        tiles.ItemsSource = genres;
+        AutomationProperties.SetName(tiles, "按流派浏览");
+        body.Children.Add(tiles);
     }
 
     private static Windows.UI.Color ColorFor(string key)
@@ -133,7 +146,10 @@ public sealed class SearchPage : View
     {
         var (title, subtitle, cover, circle, glyph) = Cards.Describe(Music, best);
         var card = new Grid { Background = Ui.Brush("HoverBrush"), CornerRadius = new CornerRadius(8), Padding = new Thickness(20), MinHeight = 220 };
-        var art = new Artwork(96, circle, glyph, 6) { Url = cover };
+        Motion.BrushFade(card);
+        card.PointerEntered += (_, _) => card.Background = Ui.Brush("SurfaceHoverBrush");
+        card.PointerExited += (_, _) => card.Background = Ui.Brush("HoverBrush");
+        var art = new Artwork(96, circle, glyph, 6) { Url = cover, HorizontalAlignment = HorizontalAlignment.Left, Shadow = new ThemeShadow(), Translation = new System.Numerics.Vector3(0, 0, 16) };
         if (best.Type == "playlist") Cards.Decorate(art, Music.Playlist(best.Id));
         var name = Ui.Link(title, () => Shell.Navigate(Cards.RouteOf(best)), 28, Ui.Brush("TextPrimaryBrush"), bold: true);
         var kind = best.Type == "artist" ? "艺人" : best.Type == "album" ? $"专辑 · {Music.Library.Album(best.Id)?.Artist}" : "歌单";
@@ -190,6 +206,7 @@ public sealed class CollectionPage : View
 public sealed class LyricsPage : View
 {
     public override string Title => "歌词";
+    private readonly StackPanel _head = new() { Spacing = 2, Margin = new Thickness(0, 0, 0, 12) };
     private readonly StackPanel _lines = new() { Spacing = 14 };
     private readonly ScrollViewer _scroller;
     private IReadOnlyList<LyricLine>? _lyrics;
@@ -202,6 +219,7 @@ public sealed class LyricsPage : View
         _scroller = scroller;
         tint.Height = 2000;
         TintFrom(tint, music.Current?.AlbumId);
+        body.Children.Add(_head);
         body.Children.Add(_lines);
         On(() => music.PlayerChanged += Reload, () => music.PlayerChanged -= Reload);
         On(() => music.PositionChanged += Follow, () => music.PositionChanged -= Follow);
@@ -213,8 +231,16 @@ public sealed class LyricsPage : View
         var t = Music.Current;
         if (t?.Id == _for) return;
         _for = t?.Id; _current = -2; _lyrics = null;
+        _head.Children.Clear();
         _lines.Children.Clear();
-        if (t is null) { _lines.Children.Add(Ui.Text("没有正在播放的歌曲", "PageTitleStyle")); return; }
+        if (t is null) { _head.Visibility = Visibility.Collapsed; _lines.Children.Add(Ui.Text("没有正在播放的歌曲", "PageTitleStyle")); return; }
+        // song title and artist at the top (foobar2k's .f2k-lyrics-head), so the page still names what plays when the right panel is closed
+        var songTitle = Ui.Link(t.Title, () => Shell.Navigate($"album:{t.AlbumId}"), 22, Ui.Brush("TextPrimaryBrush"), bold: true);
+        if (songTitle.Content is TextBlock tb) tb.FontFamily = (FontFamily)Application.Current.Resources["AppDisplayFont"];
+        var artist = Ui.Link(t.Artist, () => Shell.Navigate($"artist:{t.ArtistId}"), 14, Ui.Brush("TextSecondaryBrush"));
+        _head.Children.Add(songTitle);
+        _head.Children.Add(artist);
+        _head.Visibility = Visibility.Visible;
         try { _lyrics = await Music.LyricsAsync(t); } catch (Exception ex) { Log.Write($"lyrics: {ex.Message}"); }
         if (_for != t.Id) return;
         if (_lyrics is not { Count: > 0 }) { _lines.Children.Add(Ui.Text("这首歌没有歌词", "PageTitleStyle")); return; }
@@ -260,7 +286,7 @@ public sealed class LyricsPage : View
         {
             _scroller.UpdateLayout();
             var p = el.TransformToVisual(_lines).TransformPoint(new Windows.Foundation.Point(0, 0));
-            _scroller.ChangeView(null, Math.Max(0, p.Y - _scroller.ViewportHeight / 3), null);
+            _scroller.ChangeView(null, Math.Max(0, p.Y - _scroller.ViewportHeight / 3), null, disableAnimation: !Motion.Enabled);
         }
     }
 }
@@ -289,32 +315,63 @@ public sealed class SettingsPage : View
             return s;
         }
 
+        // WinUI's RadioButtons fills column-first and gives each item a wide MinWidth, which wrapped "90%" under "80%"
+        // while "100% / 110% / 125%" stayed on row 1. Row-major grids / rows keep options in natural reading order.
+        bool syncingPlay = false;
+        var orderButtons = new Dictionary<PlaybackOrder, RadioButton>();
+        var orderGrid = new Grid { ColumnSpacing = 16, RowSpacing = 4 };
+        for (int c = 0; c < 4; c++) orderGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var orders = Enum.GetValues<PlaybackOrder>();
+        for (int r = 0; r < (orders.Length + 3) / 4; r++) orderGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        for (int i = 0; i < orders.Length; i++)
+        {
+            var o = orders[i];
+            var rb = new RadioButton { Content = Formats.Order(o), GroupName = "PlaybackOrder", MinWidth = 0, IsChecked = o == music.Queue.Order };
+            rb.Checked += (_, _) => { if (!syncingPlay && o != music.Queue.Order) music.SetOrder(o); };
+            Grid.SetRow(rb, i / 4); Grid.SetColumn(rb, i % 4);
+            orderGrid.Children.Add(rb);
+            orderButtons[o] = rb;
+        }
+        var orderBox = Ui.Column(6, Ui.Text("播放顺序", size: 14, foreground: Ui.Brush("TextPrimaryBrush")), orderGrid);
+        AutomationProperties.SetName(orderBox, "播放顺序");
         var play = Section("播放");
-        var order = new RadioButtons { Header = "播放顺序", MaxColumns = 4 };
-        foreach (var o in Enum.GetValues<PlaybackOrder>()) order.Items.Add(new RadioButton { Content = Formats.Order(o), Tag = o });
-        order.SelectedIndex = (int)music.Queue.Order;
-        order.SelectionChanged += (_, _) => { if (order.SelectedItem is RadioButton { Tag: PlaybackOrder o } && o != music.Queue.Order) music.SetOrder(o); };
-        play.Children.Add(order);
+        play.Children.Add(orderBox);
         var stop = new ToggleSwitch { Header = "播完当前歌曲后停止", IsOn = music.Queue.StopAfterCurrent };
         stop.Toggled += (_, _) => music.SetStopAfterCurrent(stop.IsOn);
         play.Children.Add(stop);
-        var rg = new RadioButtons { Header = "回放增益", MaxColumns = 3 };
-        foreach (var (mode, label) in new[] { (ReplayGainMode.Album, "按专辑"), (ReplayGainMode.Track, "按音轨"), (ReplayGainMode.Off, "不使用") }) rg.Items.Add(new RadioButton { Content = label, Tag = mode });
-        rg.SelectedIndex = music.ReplayGain switch { ReplayGainMode.Album => 0, ReplayGainMode.Track => 1, _ => 2 };
-        rg.SelectionChanged += (_, _) => { if (rg.SelectedItem is RadioButton { Tag: ReplayGainMode m }) music.SetReplayGain(m); };
-        play.Children.Add(rg);
+        var rgRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 20 };
+        foreach (var (mode, label) in new[] { (ReplayGainMode.Album, "按专辑"), (ReplayGainMode.Track, "按音轨"), (ReplayGainMode.Off, "不使用") })
+        {
+            var rb = new RadioButton { Content = label, GroupName = "ReplayGain", MinWidth = 0, IsChecked = mode == music.ReplayGain };
+            rb.Checked += (_, _) => { if (!syncingPlay) music.SetReplayGain(mode); };
+            rgRow.Children.Add(rb);
+        }
+        var rgBox = Ui.Column(6, Ui.Text("回放增益", size: 14, foreground: Ui.Brush("TextPrimaryBrush")), rgRow);
+        AutomationProperties.SetName(rgBox, "回放增益");
+        play.Children.Add(rgBox);
         var rgNote = Ui.Text("回放增益只降低音量，不会提高（Windows 播放器的音量上限是 100%）。", "MutedTextStyle"); rgNote.TextWrapping = TextWrapping.Wrap;
         play.Children.Add(rgNote);
-        void SyncPlay() { order.SelectedIndex = (int)music.Queue.Order; stop.IsOn = music.Queue.StopAfterCurrent; }
+        void SyncPlay()
+        {
+            syncingPlay = true;
+            if (orderButtons.TryGetValue(music.Queue.Order, out var rb)) rb.IsChecked = true;
+            stop.IsOn = music.Queue.StopAfterCurrent;
+            syncingPlay = false;
+        }
         On(() => music.PlayerChanged += SyncPlay, () => music.PlayerChanged -= SyncPlay);
 
         var look = Section("显示", "整个窗口一起缩放，像浏览器的缩放一样；也可以按 Ctrl + = 和 Ctrl + -，Ctrl + 0 恢复 100%。");
-        var zoom = new RadioButtons { Header = "界面缩放", MaxColumns = 5 };
-        foreach (var z in Zooms) zoom.Items.Add(new RadioButton { Content = $"{z * 100:0}%", Tag = z });
-        void SyncZoom() => zoom.SelectedIndex = Array.FindIndex(Zooms, z => Math.Abs(z - shell.Zoom) < 0.001);
-        SyncZoom();
-        zoom.SelectionChanged += (_, _) => { if (zoom.SelectedItem is RadioButton { Tag: double z } && Math.Abs(z - shell.Zoom) > 0.001) shell.SetZoom(z); };
-        look.Children.Add(zoom);
+        bool syncingZoom = false;
+        var zoomRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 20 };
+        foreach (var z in Zooms)
+        {
+            var rb = new RadioButton { Content = $"{z * 100:0}%", GroupName = "UiZoom", MinWidth = 0, IsChecked = Math.Abs(z - shell.Zoom) < 0.001 };
+            rb.Checked += (_, _) => { if (!syncingZoom && Math.Abs(z - shell.Zoom) > 0.001) shell.SetZoom(z); };
+            zoomRow.Children.Add(rb);
+        }
+        var zoomBox = Ui.Column(6, Ui.Text("界面缩放", size: 14, foreground: Ui.Brush("TextPrimaryBrush")), zoomRow);
+        AutomationProperties.SetName(zoomBox, "界面缩放");
+        look.Children.Add(zoomBox);
 
         var output = Section("输出设备", "这台电脑上的音频输出设备。选“系统默认设备”时跟随 Windows 的设置。");
         var devices = new ComboBox { Header = "输出设备", MinWidth = 360 };

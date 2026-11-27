@@ -125,7 +125,7 @@ public sealed class AlbumPage : View
         more.Items.Add(Ui.Item("加入播放队列", Glyphs.Queue, () => { music.QueueAdd(a.TrackIds); shell.ShowToast(new($"已将 {a.TrackIds.Count} 首加入播放队列")); }));
         more.Items.Add(Ui.Item("查看艺人", Glyphs.Artist, () => shell.Navigate($"artist:{a.ArtistId}")));
         body.Children.Add(Hero.Actions(music, "album", a.Id, a.Title, more, sync => On(() => music.PlayerChanged += sync, () => music.PlayerChanged -= sync)));
-        if (first is not null) body.Children.Add(Ui.Text(Formats.Quality(first) + (first.IsHiRes ? " · Hi-Res" : ""), "FigureTextStyle"));
+        if (first is not null) body.Children.Add(QualityBadges(first));
         TextBlock? label = null;
         if (a.Label.Length > 0 || a.Year > 0)
         {
@@ -133,6 +133,26 @@ public sealed class AlbumPage : View
             label.Margin = new Thickness(0, 18, 0, 0);
         }
         ShowList(new TrackList(music, shell, "album", a.Id, a.TrackIds, showAlbum: false, label: $"{a.Title} 的歌曲"), body, tint, label);
+    }
+
+    /// <summary>Audio format badges (foobar2k's .f2k-badge): monospace pills for codec and resolution, with Hi-Res in the
+    /// amber accent.</summary>
+    private static StackPanel QualityBadges(Track t)
+    {
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+        static Border Pill(string text, bool accent = false) => new()
+        {
+            CornerRadius = new CornerRadius(4),
+            Padding = new Thickness(7, 2, 7, 2),
+            BorderThickness = new Thickness(1),
+            BorderBrush = accent ? Ui.Brush("AccentBrush") : Ui.Brush("LineBrush"),
+            Background = accent ? Ui.Brush("AccentBrush") : Ui.Brush("RaisedBrush"),
+            Child = Ui.Text(text, "FigureTextStyle", size: 11.5, foreground: accent ? Ui.Brush("OnAccentBrush") : Ui.Brush("TextSecondaryBrush"), bold: accent),
+        };
+        foreach (string part in Formats.Quality(t).Split(" · ", StringSplitOptions.RemoveEmptyEntries))
+            row.Children.Add(Pill(part));
+        if (t.IsHiRes) row.Children.Add(Pill("Hi-Res", accent: true));
+        return row;
     }
 }
 

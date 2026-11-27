@@ -181,7 +181,7 @@ the one exception is `remove`, below.
 | `toggle` | — | play or pause |
 | `seek` | `positionMs` | move within the current song |
 | `next` | — | `PlayQueue.Next()` (manual songs first) |
-| `previous` | — | more than 3 s into the song: back to its start; otherwise `PlayQueue.Previous()` |
+| `previous` | `force?` | more than 3 s into the song (unless `force: true`): back to its start; otherwise `PlayQueue.Previous()` |
 | `playContext` | `context`, `ids`, `startId?`, `shuffle?`, `order?`, `positionMs?` | `PlayQueue.Start`: a new context (an album, a playlist, search results…), the manual songs kept. `order`: the context already arranged by the sender, required for `shuffleAlbums`/`shuffleFolders` (the server may not know albums and folders); otherwise the server arranges. With an arranged `order` and no `startId` the first song of `order` plays (the sender puts the one to start with there). Starts playing; with no active device the sender becomes it (`error cannotPlay` if it can't play, and nothing changes) |
 | `jump` | `entry` | play that queue entry (`PlayQueue.Jump`) |
 | `add` | `ids`, `next` | queue by hand, at the end or first (`PlayQueue.Add`) |

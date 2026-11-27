@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -61,6 +62,7 @@ import com.creeperux.sonus.ui.components.pressable
 import com.creeperux.sonus.ui.components.px
 import com.creeperux.sonus.ui.components.rememberCoverColor
 import com.creeperux.sonus.ui.components.shade
+import com.creeperux.sonus.ui.StatusBarScrim
 import com.creeperux.sonus.ui.icons.KitIcon
 import com.creeperux.sonus.ui.pageTop
 import com.creeperux.sonus.ui.theme.Shapes
@@ -120,67 +122,71 @@ fun SearchScreen() {
         searching = false
     }
     val lib = session.lib
-    LazyColumn(Modifier.fillMaxSize().testTag("search"), contentPadding = PaddingValues(bottom = 32.dp)) {
-        item {
-            Column(Modifier.fillMaxWidth().pageTint(Tints.Search, 240.dp).pageTop().padding(16.dp)) {
-                if (phone) {
-                    Text("搜索", style = Sonus.type.pageTitle, color = c.text)
-                    Spacer(Modifier.height(12.dp))
-                    SearchField(Modifier.fillMaxWidth())
-                    Spacer(Modifier.height(12.dp))
-                }
-                if (query.isNotEmpty()) {
-                    val r = result
-                    Text(
-                        if (r == null) "正在搜索…" else "找到 ${r.count + session.searchPlaylists(query).size} 项",
-                        style = Sonus.type.muted, color = c.textMuted,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf("" to "全部", "song" to "歌曲", "artist" to "艺人", "album" to "专辑", "playlist" to "歌单").forEach { (k, label) ->
-                            Chip(label, chip == k, { chip = k })
+    val list = rememberLazyListState()
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.fillMaxSize().testTag("search"), state = list, contentPadding = PaddingValues(bottom = 32.dp)) {
+            item {
+                Column(Modifier.fillMaxWidth().pageTint(Tints.Search, 240.dp).pageTop().padding(16.dp)) {
+                    if (phone) {
+                        Text("搜索", style = Sonus.type.pageTitle, color = c.text)
+                        Spacer(Modifier.height(12.dp))
+                        SearchField(Modifier.fillMaxWidth())
+                        Spacer(Modifier.height(12.dp))
+                    }
+                    if (query.isNotEmpty()) {
+                        val r = result
+                        Text(
+                            if (r == null) "正在搜索…" else "找到 ${r.count + session.searchPlaylists(query).size} 项",
+                            style = Sonus.type.muted, color = c.textMuted,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf("" to "全部", "song" to "歌曲", "artist" to "艺人", "album" to "专辑", "playlist" to "歌单").forEach { (k, label) ->
+                                Chip(label, chip == k, { chip = k })
+                            }
                         }
                     }
                 }
             }
-        }
-        if (query.isEmpty()) {
-            item { Browse() }
-            return@LazyColumn
-        }
-        val r = result ?: return@LazyColumn
-        val playlists = session.searchPlaylists(query)
-        if (r.count == 0 && playlists.isEmpty()) {
-            item { EmptyState("没有找到“$query”", "换个关键词，或检查拼写。", icon = "search") }
-            return@LazyColumn
-        }
-        val songs = r.tracks.mapNotNull(lib::track)
-        if (chip == "" || chip == "song") {
-            if (chip == "") {
-                item { BestResult(r) }
-                item { SectionHeader("歌曲", Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) }
+            if (query.isEmpty()) {
+                item { Browse() }
+                return@LazyColumn
             }
-            val shown = if (chip == "") songs.take(4) else songs
-            items(shown.size, key = { "s${shown[it].id}" }) { i ->
-                val player = LocalPlayer.current
-                TrackRow(shown[i], i + 1, true, { session.contextOf("search", query, r.tracks).let { (ctx, ids) -> player.play(ctx, ids, shown[i].id) } }, Modifier.padding(horizontal = 8.dp))
+            val r = result ?: return@LazyColumn
+            val playlists = session.searchPlaylists(query)
+            if (r.count == 0 && playlists.isEmpty()) {
+                item { EmptyState("没有找到“$query”", "换个关键词，或检查拼写。", icon = "search") }
+                return@LazyColumn
             }
-        }
-        fun shelf(key: String, title: String, ids: List<String>, type: String) {
-            if (ids.isEmpty() || (chip != "" && chip != key)) return
-            item(key) {
-                Column(Modifier.padding(top = 16.dp)) {
-                    SectionHeader(title, Modifier.padding(horizontal = 16.dp))
-                    Spacer(Modifier.height(8.dp))
-                    LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        items(ids, key = { it }) { CardFor(type, it, cardWidth()) }
+            val songs = r.tracks.mapNotNull(lib::track)
+            if (chip == "" || chip == "song") {
+                if (chip == "") {
+                    item { BestResult(r) }
+                    item { SectionHeader("歌曲", Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) }
+                }
+                val shown = if (chip == "") songs.take(4) else songs
+                items(shown.size, key = { "s${shown[it].id}" }) { i ->
+                    val player = LocalPlayer.current
+                    TrackRow(shown[i], i + 1, true, { session.contextOf("search", query, r.tracks).let { (ctx, ids) -> player.play(ctx, ids, shown[i].id) } }, Modifier.padding(horizontal = 8.dp))
+                }
+            }
+            fun shelf(key: String, title: String, ids: List<String>, type: String) {
+                if (ids.isEmpty() || (chip != "" && chip != key)) return
+                item(key) {
+                    Column(Modifier.padding(top = 16.dp)) {
+                        SectionHeader(title, Modifier.padding(horizontal = 16.dp))
+                        Spacer(Modifier.height(8.dp))
+                        LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            items(ids, key = { it }) { CardFor(type, it, cardWidth()) }
+                        }
                     }
                 }
             }
+            shelf("artist", "艺人", r.artists, "artist")
+            shelf("album", "专辑", r.albums, "album")
+            shelf("playlist", "歌单", playlists.map { it.id }, "playlist")
         }
-        shelf("artist", "艺人", r.artists, "artist")
-        shelf("album", "专辑", r.albums, "album")
-        shelf("playlist", "歌单", playlists.map { it.id }, "playlist")
+        StatusBarScrim(list)
     }
 }
 

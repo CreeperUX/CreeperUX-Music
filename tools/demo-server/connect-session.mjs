@@ -458,7 +458,7 @@ export class ConnectSession {
       }
       case 'previous': {
         need();
-        if (this.positionAt(t) > 3000) { this.positionMs = 0; this.at = t; break; }
+        if (c.force !== true && this.positionAt(t) > 3000) { this.positionMs = 0; this.at = t; break; }
         const song = this.queue.previous();
         if (song != null) moved(song); else { this.positionMs = 0; this.at = t; }
         break;

@@ -10,25 +10,29 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsTopHeight
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.NavigationBar
@@ -44,12 +48,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
@@ -91,8 +97,8 @@ fun SonusRoot(graph: AppGraph) {
     val c = Sonus.colors
     // test tags double as resource ids, so UiAutomator (instrumented tests, adb) finds the same elements
     Box(Modifier.fillMaxSize().background(c.window).semantics { testTagsAsResourceId = true }) {
-        AnimatedContent(state::class, transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(120)) }, label = "app") { _ ->
-            when (val s = graph.state.collectAsState().value) {
+        SonusRootTransition(state) { s ->
+            when (s) {
                 AppState.Starting -> Box(Modifier.fillMaxSize())
                 is AppState.SignedOut -> SignInScreen(graph, s.message)
                 is AppState.Connecting -> Waiting("正在载入媒体库…")
@@ -101,6 +107,21 @@ fun SonusRoot(graph: AppGraph) {
             }
         }
     }
+}
+
+/**
+ * Transitions between root states while rendering each slot from its own target state `s`, so the exiting Connecting
+ * slot never recomposes as a second Main while fading out.
+ */
+@Composable
+internal fun SonusRootTransition(state: AppState, content: @Composable (AppState) -> Unit) {
+    AnimatedContent(
+        targetState = state,
+        contentKey = { if (it is AppState.Ready) it.session else it::class },
+        transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(120)) },
+        label = "app",
+        content = { s -> content(s) },
+    )
 }
 
 @Composable
@@ -265,3 +286,29 @@ fun OnlineDot(online: Boolean) {
 /** Pages put this at their top on the phone (the status bar), nothing on the tablet. */
 @Composable
 fun Modifier.pageTop(): Modifier = if (LocalLayout.current == Layout.Phone) this.statusBarsPadding() else this
+
+/**
+ * On the phone, tinted pages let their header gradient run behind the status bar at scroll 0, then raise an opaque
+ * panel strip behind the status bar once scrolled so content never overlaps the clock and system icons.
+ */
+@Composable
+fun BoxScope.StatusBarScrim(listState: LazyListState) {
+    if (LocalLayout.current != Layout.Phone) return
+    val c = Sonus.colors
+    val ramp = with(LocalDensity.current) { 48.dp.toPx() }
+    val alpha by remember(listState, ramp) {
+        derivedStateOf {
+            if (listState.firstVisibleItemIndex > 0) 1f
+            else (listState.firstVisibleItemScrollOffset / ramp).coerceIn(0f, 1f)
+        }
+    }
+    if (alpha > 0f) {
+        Box(
+            Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .windowInsetsTopHeight(WindowInsets.statusBars)
+                .background(c.panel.copy(alpha = alpha)),
+        )
+    }
+}

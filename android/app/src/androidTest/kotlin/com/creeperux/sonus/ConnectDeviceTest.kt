@@ -11,6 +11,9 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextReplacement
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeLeft
+import androidx.compose.ui.test.swipeRight
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -191,6 +194,17 @@ class ConnectDeviceTest {
         bringToFront()
         compose.onNodeWithTag(if (exists("mini-play")) "mini-play" else "play-pause").performClick()
         runBlocking { withTimeout(10_000) { other.session.first { !it.playing } } }
+
+        // swiping in remote mode sends next and forced previous (even past 3 s) to the active computer
+        val swipeTarget = if (exists("mini-player")) "mini-player" else "panel-cover"
+        compose.onNodeWithTag(swipeTarget).performTouchInput { swipeLeft() }
+        runBlocking { withTimeout(10_000) { other.session.first { it.current?.trackId == album.trackIds[1] } } }
+        waitFor(what = "app shows second track from computer") { graph.playback.state.value.trackId == album.trackIds[1] }
+        runBlocking { assertThat(other.command("seek", buildJsonObject { put("positionMs", 15_000) }).ok).isTrue() }
+        runBlocking { withTimeout(10_000) { other.session.first { it.positionMs >= 15_000 } } }
+        compose.onNodeWithTag(swipeTarget).performTouchInput { swipeRight() }
+        runBlocking { withTimeout(10_000) { other.session.first { it.current?.trackId == album.trackIds[0] } } }
+        waitFor(what = "app shows first track from computer") { graph.playback.state.value.trackId == album.trackIds[0] }
 
         // the device list moves playback here (rule 4): this device plays, the computer is left (on the phone the list is
         // in the full player; on the tablet in the playback bar)

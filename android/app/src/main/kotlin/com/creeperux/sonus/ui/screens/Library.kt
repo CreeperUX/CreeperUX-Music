@@ -128,9 +128,9 @@ fun LibraryList(pane: Boolean) {
             ),
         )
 
-    LazyColumn(Modifier.fillMaxSize().testTag("library"), contentPadding = PaddingValues(bottom = 16.dp)) {
+    LazyColumn(Modifier.fillMaxSize().then(if (pane) Modifier else Modifier.pageTop()).testTag("library"), contentPadding = PaddingValues(bottom = 16.dp)) {
         item {
-            Column(Modifier.then(if (pane) Modifier else Modifier.pageTop()).padding(horizontal = if (pane) 12.dp else 16.dp).padding(top = if (pane) 12.dp else 16.dp)) {
+            Column(Modifier.padding(horizontal = if (pane) 12.dp else 16.dp).padding(top = if (pane) 12.dp else 16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     KitIcon("library", size = 18.dp, tint = c.textMuted)
                     Spacer(Modifier.width(10.dp))

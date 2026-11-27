@@ -84,6 +84,11 @@ import com.creeperux.sonus.ui.OnlineDot
 import com.creeperux.sonus.ui.PanelView
 import com.creeperux.sonus.ui.PlayerView
 import com.creeperux.sonus.ui.Route
+import com.creeperux.sonus.ui.SwipeableCover
+import com.creeperux.sonus.ui.SwipeableMiniTrack
+import com.creeperux.sonus.ui.VerticalDragHandler
+import com.creeperux.sonus.ui.directionalDrag
+import com.creeperux.sonus.ui.rememberTrackSwipe
 import com.creeperux.sonus.ui.components.AudioFacts
 import com.creeperux.sonus.ui.components.Cover
 import com.creeperux.sonus.ui.components.EmptyState
@@ -231,9 +236,15 @@ private fun Heart(t: Track, light: Boolean = false, size: Dp = 40.dp) {
 
 // ---------------------------------------------------------------- the phone
 
-/** The bar above the phone's tabs: the song, play/pause, and a thin line of progress. Tapping it opens the player. */
+/** The bar above the phone's tabs: the song, play/pause, and a thin line of progress. Tapping it opens the player,
+ *  dragging up opens it with the finger, and swiping left or right skips between songs. */
 @Composable
-fun MiniPlayer(open: () -> Unit, modifier: Modifier = Modifier, coverModifier: Modifier = Modifier) {
+fun MiniPlayer(
+    open: () -> Unit,
+    modifier: Modifier = Modifier,
+    coverModifier: Modifier = Modifier,
+    verticalDrag: VerticalDragHandler? = null,
+) {
     val c = Sonus.colors
     val session = LocalSession.current
     val player = LocalPlayer.current
@@ -244,25 +255,20 @@ fun MiniPlayer(open: () -> Unit, modifier: Modifier = Modifier, coverModifier: M
     val back by animateColorAsState(tint?.let { if (c.isDark) lerp(c.raised, it.shade(0.35f), 0.7f) else lerp(c.raised, it, 0.18f) } ?: c.raised, tween(Motion.TINT), label = "mini")
     val haptics = rememberHaptics()
     val source = remember { MutableInteractionSource() }
-    Box(modifier.fillMaxWidth().background(c.panel).padding(horizontal = 8.dp, vertical = 6.dp)) {
+    val swipe = rememberTrackSwipe()
+    Box(
+        modifier
+            .fillMaxWidth()
+            .background(c.panel)
+            .directionalDrag(key = "mini-player", vertical = verticalDrag, horizontal = swipe)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+    ) {
         Column(
             Modifier.fillMaxWidth().pressScale(source, pressed = 0.98f).clip(RoundedCornerShape(Shapes.panel)).background(back)
                 .clickable(interactionSource = source, indication = null, onClick = open).testTag("mini-player"),
         ) {
             Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(coverModifier.size(44.dp)) { Cover(session.trackCoverUrl(t, 44.dp.px()), 44.dp, Modifier.fillMaxSize(), follows = true) }
-                Spacer(Modifier.width(10.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(t.title, style = Sonus.type.cardTitle, color = c.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (showsWhereLine()) {
-                        WhereLine() // where it played last (where it plays now: the strip below)
-                    } else {
-                        Text(
-                            if (state.status == PlayerStatus.Error) state.error.orEmpty() else t.artist,
-                            style = Sonus.type.caption, color = if (state.status == PlayerStatus.Error) c.bad else c.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
+                SwipeableMiniTrack(t, swipe, coverModifier, Modifier.weight(1f))
                 Heart(t, size = 40.dp)
                 Box(
                     Modifier.size(44.dp).clip(CircleShape).pressable({ haptics.tap(); player.togglePlay() }, if (state.isActive) "暂停" else "播放").testTag("mini-play"),
@@ -284,7 +290,11 @@ fun MiniPlayer(open: () -> Unit, modifier: Modifier = Modifier, coverModifier: M
  * and the controls, on the cover's colour.
  */
 @Composable
-fun FullPlayer(dragModifier: Modifier = Modifier, coverModifier: Modifier = Modifier) {
+fun FullPlayer(
+    dragModifier: Modifier = Modifier,
+    verticalDrag: VerticalDragHandler? = null,
+    coverModifier: Modifier = Modifier,
+) {
     val c = Sonus.colors
     val session = LocalSession.current
     val nav = LocalNav.current
@@ -295,6 +305,7 @@ fun FullPlayer(dragModifier: Modifier = Modifier, coverModifier: Modifier = Modi
     val top by animateColorAsState(tint?.let { lerp(Color(0xFF151B1F), it, 0.85f) } ?: Color(0xFF20272C), tween(Motion.TINT), label = "top")
     val view = nav.playerView.value
     var menu by remember { mutableStateOf(false) }
+    val pad = Modifier.padding(horizontal = 24.dp)
     Column(
         Modifier
             .fillMaxSize()
@@ -302,10 +313,9 @@ fun FullPlayer(dragModifier: Modifier = Modifier, coverModifier: Modifier = Modi
             .clickable(enabled = false) {}
             .statusBarsPadding()
             .navigationBarsPadding()
-            .padding(horizontal = 24.dp)
             .testTag("full-player"),
     ) {
-        Row(Modifier.fillMaxWidth().then(dragModifier).padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().then(pad).then(dragModifier).padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             RoundButton("chevron-down", "收起", { nav.playerOpen.value = false }, tint = Color.White)
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                 if (rememberLink()?.where != null) WhereLine(light = true) else Text("正在播放", style = Sonus.type.caption, color = Color.White.copy(alpha = 0.7f))
@@ -318,31 +328,37 @@ fun FullPlayer(dragModifier: Modifier = Modifier, coverModifier: Modifier = Modi
         }
         Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
             when (view) {
-                PlayerView.Cover -> BoxWithConstraints(Modifier.fillMaxSize().then(dragModifier), contentAlignment = Alignment.Center) {
-                    val side = minOf(maxWidth, maxHeight)
-                    Box(coverModifier.size(side).shadow(28.dp, RoundedCornerShape(Shapes.panel))) {
-                        Cover(t?.let { session.trackCoverUrl(it, side.px()) }, side, Modifier.fillMaxSize(), shape = RoundedCornerShape(Shapes.panel), follows = true)
-                    }
-                }
-                PlayerView.Lyrics -> if (t != null) LyricsView(t, LyricsStyle.Full, light = true)
-                PlayerView.Queue -> QueueView(light = true)
+                // edge-to-edge so adjacent covers slide cleanly from the screen edges; vertical drag shares one pointerInput
+                PlayerView.Cover -> SwipeableCover(
+                    track = t,
+                    modifier = Modifier.fillMaxSize(),
+                    coverModifier = coverModifier,
+                    verticalDrag = verticalDrag,
+                    horizontalInset = 24.dp,
+                    pageGap = 20.dp,
+                    shadowElevation = 28.dp,
+                    clip = false,
+                    tag = "player-cover",
+                )
+                PlayerView.Lyrics -> if (t != null) LyricsView(t, LyricsStyle.Full, pad, light = true)
+                PlayerView.Queue -> QueueView(pad, light = true)
             }
         }
         if (t != null) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(pad, verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(t.title, style = Sonus.type.nowPlaying, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { nav.go(Route.Album(t.albumId)) }.testTag("now-title"))
                     Text(t.artist, style = Sonus.type.body, color = Color.White.copy(alpha = 0.7f), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { nav.go(Route.Artist(t.artistId)) })
                 }
                 Heart(t, light = true)
             }
-            if (state.status == PlayerStatus.Error) Text(state.error.orEmpty(), style = Sonus.type.caption, color = c.bad)
+            if (state.status == PlayerStatus.Error) Text(state.error.orEmpty(), style = Sonus.type.caption, color = c.bad, modifier = pad)
         }
         Spacer(Modifier.height(12.dp))
-        SeekBar(light = true)
+        SeekBar(pad, light = true)
         Spacer(Modifier.height(8.dp))
-        Controls(big = true, Modifier.fillMaxWidth(), light = true)
-        Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+        Controls(big = true, Modifier.fillMaxWidth().then(pad), light = true)
+        Row(Modifier.fillMaxWidth().then(pad).padding(vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             RoundButton("lyrics", "歌词", { nav.playerView.value = if (view == PlayerView.Lyrics) PlayerView.Cover else PlayerView.Lyrics }, Modifier.testTag("show-lyrics"), on = view == PlayerView.Lyrics, tint = if (view == PlayerView.Lyrics) c.accent else Color.White)
             DevicesButton(light = true)
             RoundButton("queue", "播放队列", { nav.playerView.value = if (view == PlayerView.Queue) PlayerView.Cover else PlayerView.Queue }, Modifier.testTag("show-queue"), on = view == PlayerView.Queue, tint = if (view == PlayerView.Queue) c.accent else Color.White)
@@ -606,9 +622,14 @@ private fun NowPlayingPanel() {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(state.context?.label?.ifEmpty { null } ?: "正在播放", style = Sonus.type.panelHeading, color = c.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
         WhereLine()
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
-            Cover(session.trackCoverUrl(t, maxWidth.px()), maxWidth, Modifier.aspectRatio(1f), shape = RoundedCornerShape(Shapes.panel))
-        }
+        SwipeableCover(
+            track = t,
+            modifier = Modifier.fillMaxWidth().aspectRatio(1f),
+            verticalDrag = null,
+            pageGap = 12.dp,
+            clip = true,
+            tag = "panel-cover",
+        )
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(t.title, style = Sonus.type.nowPlaying, color = c.text, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { nav.go(Route.Album(t.albumId)) })

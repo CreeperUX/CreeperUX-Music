@@ -104,6 +104,41 @@ class PlayQueue(private val lookup: (String) -> Track?, private val random: Rand
         return if ((order == PlaybackOrder.RepeatPlaylist || shuffled(order)) && context.isNotEmpty()) context[0] else null
     }
 
+    /**
+     * The song [next] (ended = false) will move to when the user skips forward, without moving — unlike [peek], repeat
+     * one and stop-after-current still move on when skipped manually. Null at the end of a non-repeating list, or in
+     * [PlaybackOrder.Random] when the manual queue is empty (the next song is chosen on the skip).
+     */
+    fun peekNext(): String? {
+        if (manual.isNotEmpty()) return manual[0].second
+        if (order == PlaybackOrder.Random) return null
+        if (context.isEmpty()) return null
+        if (pointerAt + 1 < context.size) return context[pointerAt + 1]
+        return if (order == PlaybackOrder.RepeatPlaylist || shuffled(order)) context[0] else null
+    }
+
+    /**
+     * The song [previous] will move to, without moving: while a hand-queued song plays, the context song before it;
+     * otherwise the previous song in the context (wrapping for repeat-all and shuffled orders). Null at the start of a
+     * non-repeating list, or in [PlaybackOrder.Random] when not returning from a hand-queued song.
+     */
+    fun peekPrevious(): String? {
+        val c = current
+        if (c != null && pointerAt >= 0 && pointerAt < context.size && context[pointerAt] != c) {
+            return context[pointerAt]
+        }
+        if (order == PlaybackOrder.Random) return null
+        if (context.isEmpty()) return null
+        if (pointerAt - 1 >= 0) return context[pointerAt - 1]
+        return if (order == PlaybackOrder.RepeatPlaylist || shuffled(order)) context.last() else null
+    }
+
+    /** Whether [next] (ended = false) can move to a song (including [PlaybackOrder.Random] while context is non-empty). */
+    fun hasNext(): Boolean = peekNext() != null || (order == PlaybackOrder.Random && context.isNotEmpty())
+
+    /** Whether [previous] can move to a song (including [PlaybackOrder.Random] while context is non-empty). */
+    fun hasPrevious(): Boolean = peekPrevious() != null || (order == PlaybackOrder.Random && context.isNotEmpty())
+
     /** Moves to the next song (hand-queued first). Null: the end, playback stops. */
     fun next(ended: Boolean = false): String? {
         if (ended && stopAfterCurrent) {

@@ -1,6 +1,10 @@
 package com.creeperux.sonus.ui
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.activity.compose.PredictiveBackHandler
+import androidx.core.view.WindowCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
@@ -25,6 +29,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -43,6 +48,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import com.creeperux.sonus.ui.screens.FullPlayer
 import com.creeperux.sonus.ui.screens.MiniPlayer
@@ -69,6 +75,17 @@ internal fun PhoneShell(nav: Navigator) {
     val player = LocalPlayer.current
     val state by player.state.collectAsState()
     val open = nav.playerOpen.value
+    // the full player is always drawn on a dark cover gradient, so its status bar icons stay light even in Light theme
+    val view = LocalView.current
+    DisposableEffect(open, c.isDark) {
+        val window = view.context.findActivity()?.window
+        if (window != null) {
+            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !c.isDark && !open
+        }
+        onDispose {
+            if (window != null) WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !c.isDark
+        }
+    }
     val sheet = remember { SeekableTransitionState(open) }
     val transition = rememberTransition(sheet, label = "player")
     val scope = rememberCoroutineScope()
@@ -139,8 +156,9 @@ internal fun PhoneShell(nav: Navigator) {
                         transition.AnimatedVisibility({ !it }, enter = fadeIn(tween(Motion.ENTER)), exit = fadeOut(tween(Motion.EXIT))) {
                             MiniPlayer(
                                 open = { nav.playerOpen.value = true },
-                                modifier = Modifier.onSizeChanged { miniHeight = it.height }.then(drag.modifier(opening = true)),
+                                modifier = Modifier.onSizeChanged { miniHeight = it.height },
                                 coverModifier = sharedCover(this@AnimatedVisibility, above = false, coverConfig),
+                                verticalDrag = drag.handler(opening = true),
                             )
                         }
                     }
@@ -156,7 +174,11 @@ internal fun PhoneShell(nav: Navigator) {
                     fadeIn(tween(Motion.SHEET / 6, easing = LinearEasing)),
                 exit = slideOutVertically(tween(Motion.SHEET, easing = LinearEasing)) { it },
             ) {
-                FullPlayer(dragModifier = drag.modifier(opening = false), coverModifier = sharedCover(this@AnimatedVisibility, above = true, coverConfig))
+                FullPlayer(
+                    dragModifier = drag.modifier(opening = false),
+                    verticalDrag = drag.handler(opening = false),
+                    coverModifier = sharedCover(this@AnimatedVisibility, above = true, coverConfig),
+                )
             }
         }
     }
@@ -209,36 +231,61 @@ private class SheetDrag(
     private val haptics: Haptics,
     private val settle: (Boolean, Float) -> Unit,
 ) {
+    /** Vertical-only sheet drag (used on the full player's top bar). */
     fun modifier(opening: Boolean): Modifier {
         var where: LayoutCoordinates? = null
         return Modifier.onGloballyPositioned { where = it }.pointerInput(opening) {
             val tracker = VelocityTracker()
-            var start = 0f
-            var fraction = 0f
+            val h = handler(opening)
             fun onScreen(change: PointerInputChange): Float = where?.takeIf { it.isAttached }?.localToRoot(change.position)?.y ?: change.position.y
             detectVerticalDragGestures(
                 onDragStart = { at ->
                     tracker.resetTracking()
-                    start = where?.takeIf { it.isAttached }?.localToRoot(at)?.y ?: at.y
-                    fraction = 0f
+                    h.onStart(where?.takeIf { it.isAttached }?.localToRoot(at)?.y ?: at.y)
                 },
                 onVerticalDrag = { change, _ ->
                     val y = onScreen(change)
                     tracker.addPosition(change.uptimeMillis, Offset(0f, y))
-                    fraction = ((if (opening) start - y else y - start) / travel(opening).coerceAtLeast(1)).coerceIn(0f, 1f)
-                    val f = fraction
-                    scope.launch { sheet.seekTo(f, targetState = opening) }
+                    h.onDrag(y)
                     change.consume()
                 },
-                onDragEnd = {
-                    val v = tracker.calculateVelocity().y // down is positive
-                    val towards = if (opening) -v else v
-                    val done = (fraction > 0.33f && towards > -flick) || towards > flick
-                    if (done) haptics.dragEnd()
-                    settle(if (done) opening else !opening, if (done) towards.coerceAtLeast(0f) else (-towards).coerceAtLeast(0f))
-                },
-                onDragCancel = { settle(!opening, 0f) },
+                onDragEnd = { h.onEnd(tracker.calculateVelocity().y) },
+                onDragCancel = { h.onCancel() },
             )
         }
     }
+
+    /** Vertical half of a combined [directionalDrag] (used on the mini player and the full player's cover). */
+    fun handler(opening: Boolean): VerticalDragHandler = object : VerticalDragHandler {
+        private var start = 0f
+        private var fraction = 0f
+
+        override fun onStart(screenY: Float) {
+            start = screenY
+            fraction = 0f
+        }
+
+        override fun onDrag(screenY: Float) {
+            fraction = ((if (opening) start - screenY else screenY - start) / travel(opening).coerceAtLeast(1)).coerceIn(0f, 1f)
+            val f = fraction
+            scope.launch { sheet.seekTo(f, targetState = opening) }
+        }
+
+        override fun onEnd(velocityY: Float) {
+            val towards = if (opening) -velocityY else velocityY
+            val done = (fraction > 0.33f && towards > -flick) || towards > flick
+            if (done) haptics.dragEnd()
+            settle(if (done) opening else !opening, if (done) towards.coerceAtLeast(0f) else (-towards).coerceAtLeast(0f))
+        }
+
+        override fun onCancel() {
+            settle(!opening, 0f)
+        }
+    }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }

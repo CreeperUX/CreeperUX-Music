@@ -103,6 +103,10 @@ class LocalPlayback(
     override val state: StateFlow<PlayerState> = stateFlow.asStateFlow()
     override val position: StateFlow<Double> = positionFlow.asStateFlow()
     override val queueEntries: List<QueueEntry> get() = queue.entries
+    override val nextTrackId: String? get() = queue.peekNext() ?: if (linkFlow.value != null) remote?.next else null
+    override val previousTrackId: String? get() = queue.peekPrevious()
+    override val canSkipNext: Boolean get() = queue.hasNext() || (linkFlow.value != null && remote?.next != null)
+    override val canSkipPrevious: Boolean get() = queue.hasPrevious()
 
     /** Sonus Connect version 2, when the server offers it. */
     val link: StateFlow<SessionLink?> = linkFlow.asStateFlow()
@@ -245,6 +249,13 @@ class LocalPlayback(
             seek(0.0)
             return
         }
+        failures = 0
+        val id = queue.previous()
+        if (id != null) load(id, autoplay = true) else seek(0.0)
+    }
+
+    override fun previousTrack() {
+        if (command("previous", buildJsonObject { put("force", true) })) return
         failures = 0
         val id = queue.previous()
         if (id != null) load(id, autoplay = true) else seek(0.0)

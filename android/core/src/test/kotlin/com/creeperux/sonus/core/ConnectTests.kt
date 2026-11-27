@@ -122,7 +122,7 @@ class ConnectVectorsTest {
                 var position = reported + if (b(bf, "playing")) maxOf(0, at - J.num(bf, "at").toLong()) else 0
                 val duration = J.num(bf, "durationMs").toLong()
                 if (duration > 0) position = minOf(position, maxOf(duration, reported)) // the session's own rule
-                if (position <= 3000) q.previous() // more than 3 s in: back to the start of the same song
+                if (b(msg, "force") || position <= 3000) q.previous() // more than 3 s in (unless forced): back to the start of the same song
             }
             "jump" -> q.jump(s(msg, "entry")!!)
             "add" -> q.add(ids(msg, "ids"), b(msg, "next"))
@@ -213,6 +213,17 @@ class ConnectDemoTest {
             phone.until("playing") { it.playing }
             assertThat(phone.command("next").ok).isTrue()
             pc.until("the PC follows next") { it.current?.trackId == album.trackIds[1] }
+            // past 3 s: plain previous restarts the song; previous(force = true) skips straight to the previous song
+            assertThat(phone.command("seek", buildJsonObject { put("positionMs", 30_000) }).ok).isTrue()
+            pc.until("seeked past 3 s") { it.positionMs >= 30_000 }
+            assertThat(phone.command("previous").ok).isTrue()
+            pc.until("plain previous restarts") { it.current?.trackId == album.trackIds[1] && it.positionMs == 0L }
+            assertThat(phone.command("seek", buildJsonObject { put("positionMs", 30_000) }).ok).isTrue()
+            pc.until("seeked past 3 s again") { it.positionMs >= 30_000 }
+            assertThat(phone.command("previous", buildJsonObject { put("force", true) }).ok).isTrue()
+            pc.until("forced previous skips back") { it.current?.trackId == album.trackIds[0] }
+            assertThat(phone.command("next").ok).isTrue()
+            pc.until("back to second song") { it.current?.trackId == album.trackIds[1] }
             assertThat(phone.command("pause").ok).isTrue()
             pc.until("paused") { !it.playing }
 

@@ -10,6 +10,9 @@ import android.content.pm.Signature
 import android.provider.Settings as SystemSettings
 import android.util.Log
 import androidx.core.net.toUri
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.creeperux.sonus.core.AppRelease
 import com.creeperux.sonus.core.AppVersion
 import com.creeperux.sonus.core.GitHubUpdates
@@ -37,8 +40,15 @@ sealed interface UpdateStep {
     /** Downloaded and checked; the system lets Sonus install apps only once its owner allows it (once). */
     data class NeedsPermission(val file: File) : UpdateStep
 
-    /** Handed to the system's installer: its confirmation, then the new version replaces this one (which closes). */
+    /** Being handed to the system's installer. */
     data object Installing : UpdateStep
+
+    /**
+     * The installer waits for its owner to confirm, on its own page ([confirm]): opened at once while Sonus is in
+     * front, or as soon as it is again (Android does not let an app in the background open a page: left during the
+     * download, the page would never have come). Confirmed, the new version replaces this one (which closes).
+     */
+    data class Confirming(val confirm: Intent) : UpdateStep
 
     /** Something went wrong, or the installation was cancelled: [message] says which; trying again starts over (a
      *  downloaded file that checks out is not downloaded again). */
@@ -55,7 +65,13 @@ sealed interface UpdateStep {
  * one the device tests run) checks only when asked, so no test reaches the real GitHub and no update shows up in the
  * middle of one. The state is read on the main thread.
  */
-class Updater(private val app: Context, private val settings: Settings, private val scope: CoroutineScope) {
+class Updater(
+    private val app: Context,
+    private val settings: Settings,
+    private val scope: CoroutineScope,
+    // whether Sonus is in front (a page of it visible): only then may it open the installer's confirmation
+    private val inFront: () -> Boolean = { ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) },
+) {
     val channel: UpdateChannel = if (app.packageName.endsWith(".debug")) UpdateChannel.Test else UpdateChannel.Release
     private val installed = app.packageManager.getPackageInfo(app.packageName, 0)
 
@@ -79,6 +95,7 @@ class Updater(private val app: Context, private val settings: Settings, private 
     val announce: StateFlow<AppRelease?> = announceFlow.asStateFlow()
 
     private var installing: Job? = null
+    private var confirmationOpened = false
 
     /** Asks GitHub for the newest release this app should move to (null: up to date). */
     suspend fun check(): AppRelease? {
@@ -97,6 +114,8 @@ class Updater(private val app: Context, private val settings: Settings, private 
      * when it can't check.
      */
     fun start() {
+        // back in front: a confirmation that came while Sonus was away opens now
+        ProcessLifecycleOwner.get().lifecycle.addObserver(LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) onForeground() })
         scope.launch(Dispatchers.IO) {
             if (settings.lastVersionCode != versionCode) {
                 File(app.cacheDir, FOLDER).deleteRecursively() // an update that has been installed, or an older one
@@ -180,6 +199,35 @@ class Updater(private val app: Context, private val settings: Settings, private 
                 log("install: $e")
                 stepFlow.value = UpdateStep.Failed("无法开始安装：${e.message}")
             }
+        }
+    }
+
+    /** The system's installer asks its owner to confirm ([InstallReceiver]): its page opens now if Sonus is in front, else
+     *  when it is again ([onForeground]); the sheet also offers it ([openConfirmation]). */
+    fun onConfirmationNeeded(confirm: Intent) {
+        stepFlow.value = UpdateStep.Confirming(confirm)
+        confirmationOpened = false
+        if (inFront()) openConfirmation(app) else log("the installer's confirmation waits until Sonus is in front again")
+    }
+
+    /** Opens the installer's confirmation (from [context]: the sheet's activity, or the app when Sonus is in front). */
+    fun openConfirmation(context: Context) {
+        val s = stepFlow.value as? UpdateStep.Confirming ?: return
+        try {
+            context.startActivity(Intent(s.confirm).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            confirmationOpened = true
+        } catch (e: Exception) {
+            log("confirmation: $e")
+            stepFlow.value = UpdateStep.Failed("无法打开系统的安装确认：${e.message}")
+        }
+    }
+
+    /** Sonus is in front again: a confirmation it could not open while away opens now (once: one its owner has seen and
+     *  left open stays theirs to come back to, through the sheet). */
+    fun onForeground() {
+        if (stepFlow.value is UpdateStep.Confirming && !confirmationOpened) {
+            log("in front again: opening the installer's confirmation")
+            openConfirmation(app)
         }
     }
 

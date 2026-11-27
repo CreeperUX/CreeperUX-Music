@@ -13,8 +13,8 @@ android {
         applicationId = "com.creeperux.sonus"
         minSdk = 33 // Android 13
         targetSdk = 37
-        versionCode = 6
-        versionName = "0.4.0"
+        versionCode = 7
+        versionName = "0.4.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // the demo server the device tests sign in to: the PC's port 4633, which tools/test-device.ps1 forwards with adb reverse
         // (the preview ARM64 emulator's apps cannot reach 10.0.2.2); -Psonus.testServer=… for another

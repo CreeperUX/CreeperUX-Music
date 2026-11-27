@@ -469,8 +469,80 @@ class PlayQueueTests {
         q.start(ctx, all, "t3")
         q.add(listOf("t8"), next = true)
         assertThat(q.next()).isEqualTo("t8")
+        assertThat(q.peekPrevious()).isEqualTo("t3")
         assertThat(q.previous()).isEqualTo("t3")
+        assertThat(q.peekPrevious()).isEqualTo("t2")
         assertThat(q.previous()).isEqualTo("t2")
+    }
+
+    @Test
+    fun peekNextAndPreviousMatchManualSkipsAcrossOrders() {
+        // empty queue
+        val empty = queue()
+        assertThat(empty.peekNext()).isNull()
+        assertThat(empty.peekPrevious()).isNull()
+        assertThat(empty.hasNext()).isFalse()
+        assertThat(empty.hasPrevious()).isFalse()
+
+        // default: boundaries stop, middle peeks both ways
+        val q = queue()
+        q.start(ctx, all, "t0")
+        assertThat(q.peekPrevious()).isNull()
+        assertThat(q.hasPrevious()).isFalse()
+        assertThat(q.peekNext()).isEqualTo("t1")
+        assertThat(q.hasNext()).isTrue()
+
+        q.start(ctx, all, "t9")
+        assertThat(q.peekNext()).isNull()
+        assertThat(q.hasNext()).isFalse()
+        assertThat(q.peekPrevious()).isEqualTo("t8")
+        assertThat(q.hasPrevious()).isTrue()
+
+        // manual queue overrides peekNext even at the end of a non-repeating list
+        q.add(listOf("t2"))
+        assertThat(q.peekNext()).isEqualTo("t2")
+        assertThat(q.hasNext()).isTrue()
+        assertThat(q.next()).isEqualTo("t2")
+        assertThat(q.peekPrevious()).isEqualTo("t9")
+        assertThat(q.peekNext()).isNull()
+
+        // repeat playlist and shuffled orders wrap both ways
+        for (order in listOf(PlaybackOrder.RepeatPlaylist, PlaybackOrder.ShuffleTracks)) {
+            val w = queue(4)
+            w.changeOrder(order)
+            w.start(ctx, all, "t0")
+            val first = w.contextIds.first()
+            val last = w.contextIds.last()
+            assertThat(w.peekPrevious()).isEqualTo(last)
+            assertThat(w.previous()).isEqualTo(last)
+            assertThat(w.peekNext()).isEqualTo(first)
+            assertThat(w.next()).isEqualTo(first)
+        }
+
+        // repeat one and stop-after-current: auto-advance peek() is null, manual peekNext() still matches next()
+        val r = queue()
+        r.start(ctx, all, "t3")
+        r.changeOrder(PlaybackOrder.RepeatTrack)
+        assertThat(r.peek()).isNull()
+        assertThat(r.peekNext()).isEqualTo("t4")
+        assertThat(r.peekPrevious()).isEqualTo("t2")
+        r.changeOrder(PlaybackOrder.Default)
+        r.stopAfterCurrent = true
+        assertThat(r.peek()).isNull()
+        assertThat(r.peekNext()).isEqualTo("t4")
+
+        // random: next/previous song is unknown ahead of time, yet skipping is still possible
+        val rnd = queue(2)
+        rnd.start(ctx, all, "t3")
+        rnd.changeOrder(PlaybackOrder.Random)
+        assertThat(rnd.peekNext()).isNull()
+        assertThat(rnd.peekPrevious()).isNull()
+        assertThat(rnd.hasNext()).isTrue()
+        assertThat(rnd.hasPrevious()).isTrue()
+        rnd.add(listOf("t7"), next = true)
+        assertThat(rnd.peekNext()).isEqualTo("t7")
+        assertThat(rnd.next()).isEqualTo("t7")
+        assertThat(rnd.peekPrevious()).isEqualTo("t3")
     }
 
     @Test

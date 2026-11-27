@@ -39,6 +39,18 @@ interface Playback {
     /** Hand-queued songs first, then the rest of the context (read again when [PlayerState.queueVersion] changes). */
     val queueEntries: List<QueueEntry>
 
+    /** The song [next] will move to (read again when [PlayerState.queueVersion] or [PlayerState.trackId] changes), or null. */
+    val nextTrackId: String?
+
+    /** The song [previousTrack] will move to, or null at the start of a non-repeating list or in Random order. */
+    val previousTrackId: String?
+
+    /** Whether skipping forward can move to a song (true in Random order while context is non-empty). */
+    val canSkipNext: Boolean
+
+    /** Whether skipping backward can move to a song (true in Random order while context is non-empty). */
+    val canSkipPrevious: Boolean
+
     /** Plays a context (an album, a playlist, a list of songs) from [startId], or its first song. */
     fun play(context: PlayContext, ids: List<String>, startId: String? = null, shuffle: Boolean = false)
 
@@ -47,6 +59,8 @@ interface Playback {
     fun pause()
     fun next()
     fun previous()
+    /** Skips straight to the previous song without the 3-second restart rule (used by swipe gestures). */
+    fun previousTrack()
     fun seek(seconds: Double)
     fun setOrder(order: PlaybackOrder)
     fun setStopAfterCurrent(on: Boolean)

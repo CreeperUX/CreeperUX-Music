@@ -8,8 +8,8 @@ import com.creeperux.sonus.SonusApp
 
 /**
  * What the system's installer says about an update [Updater] handed it (not exported: only the installer, through the
- * pending intent Updater gave it, reaches it). First that its owner has to confirm: the installer's confirmation is
- * opened (Sonus is in front, having just been asked to install); then how it went.
+ * pending intent Updater gave it, reaches it). First that its owner has to confirm, with the page to do it on, which
+ * Updater opens when Sonus is in front; then how it went.
  */
 class InstallReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -21,11 +21,7 @@ class InstallReceiver : BroadcastReceiver() {
                 updater.onInstallStatus(PackageInstaller.STATUS_FAILURE, "系统没有给出确认页面")
                 return
             }
-            try {
-                context.startActivity(confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            } catch (e: Exception) {
-                updater.onInstallStatus(PackageInstaller.STATUS_FAILURE, "无法打开系统的安装确认：${e.message}")
-            }
+            updater.onConfirmationNeeded(confirm)
             return
         }
         updater.onInstallStatus(status, intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE))

@@ -1,6 +1,8 @@
 package com.creeperux.sonus
 
+import android.app.Application
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageInstaller
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -22,6 +24,7 @@ import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Shadows.shadowOf
 import java.io.File
 import java.net.InetSocketAddress
 import java.security.MessageDigest
@@ -103,6 +106,40 @@ class UpdaterTest {
         assertThat((updater.step.value as UpdateStep.Failed).message).isEqualTo("系统拒绝了这个安装包：INSTALL_FAILED_UPDATE_INCOMPATIBLE")
         updater.onInstallStatus(PackageInstaller.STATUS_SUCCESS, null)
         assertThat(updater.step.value).isEqualTo(UpdateStep.Idle)
+    }
+
+    private val confirm = Intent("android.content.pm.action.CONFIRM_INSTALL").setPackage("com.android.packageinstaller")
+
+    @Test
+    fun aConfirmationThatComesWhileSonusIsAwayOpensWhenItIsBack() {
+        // left during the download: Android would not let Sonus open the installer's page (and would say nothing)
+        var front = false
+        val updater = Updater(context, settings, scope, inFront = { front })
+        val started = shadowOf(context as Application)
+        updater.onConfirmationNeeded(confirm)
+        assertThat(updater.step.value).isEqualTo(UpdateStep.Confirming(confirm))
+        assertThat(started.nextStartedActivity).isNull()
+
+        front = true
+        updater.onForeground()
+        assertThat(started.nextStartedActivity?.action).isEqualTo("android.content.pm.action.CONFIRM_INSTALL")
+        // once: back again later (the page seen and left open), the sheet's button brings it back instead
+        updater.onForeground()
+        assertThat(started.nextStartedActivity).isNull()
+        updater.openConfirmation(context)
+        assertThat(started.nextStartedActivity?.action).isEqualTo("android.content.pm.action.CONFIRM_INSTALL")
+        // the owner's answer ends the wait
+        updater.onInstallStatus(PackageInstaller.STATUS_FAILURE_ABORTED, null)
+        updater.onForeground()
+        assertThat(started.nextStartedActivity).isNull()
+    }
+
+    @Test
+    fun inFrontTheConfirmationOpensAtOnce() {
+        val updater = Updater(context, settings, scope, inFront = { true })
+        updater.onConfirmationNeeded(confirm)
+        assertThat(shadowOf(context as Application).nextStartedActivity?.action).isEqualTo("android.content.pm.action.CONFIRM_INSTALL")
+        assertThat(updater.step.value).isInstanceOf(UpdateStep.Confirming::class.java)
     }
 
     @Test

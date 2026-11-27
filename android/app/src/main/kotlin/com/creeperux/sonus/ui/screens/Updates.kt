@@ -174,8 +174,16 @@ private fun UpdateSheet(updater: Updater, release: AppRelease, onDismiss: () -> 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(color = c.accent, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(10.dp))
-                        Text("已交给系统安装。确认后 Sonus 会关闭并更新；没有自动重新打开的话，从桌面打开它。", style = Sonus.type.body, color = c.text, modifier = Modifier.testTag("update-installing"))
+                        Text("正在交给系统安装…", style = Sonus.type.body, color = c.text, modifier = Modifier.testTag("update-installing"))
                     }
+                }
+                is UpdateStep.Confirming -> {
+                    Text(
+                        "等你在系统的确认框里点“更新”。确认后 Sonus 会关闭并更新；没有自动重新打开的话，从桌面打开它。",
+                        style = Sonus.type.body, color = c.text, modifier = Modifier.testTag("update-confirming"),
+                    )
+                    // the page opens by itself; this brings it back if it was closed some other way, or never came
+                    PillButton("打开安装确认", { updater.openConfirmation(context) }, Modifier.testTag("open-confirmation"), primary = true, icon = "download")
                 }
                 UpdateStep.Idle, is UpdateStep.Failed -> {
                     if (s is UpdateStep.Failed) Text(s.message, style = Sonus.type.body, color = c.bad, modifier = Modifier.testTag("update-error"))

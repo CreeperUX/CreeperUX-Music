@@ -39,7 +39,8 @@ internal static class E2EChannel
         int cloak = 1;
         DwmSetWindowAttribute(hwnd, DwmwaCloak, ref cloak, sizeof(int));
         SetWindowLongPtr(hwnd, GwlExStyle, new IntPtr(GetWindowLongPtr(hwnd, GwlExStyle).ToInt64() | WsExNoActivate));
-        window.AppWindow.IsShownInSwitchers = false;
+        // desktops without Explorer (no taskbar / Alt-Tab switcher) return E_NOTIMPL for IsShownInSwitchers
+        try { window.AppWindow.IsShownInSwitchers = false; } catch (NotImplementedException) { }
         window.AppWindow.Show(activateWindow: false);
     }
 

@@ -265,7 +265,7 @@ public sealed partial class MainWindow : Window, IShell
         _bar.DevicesToggled += open => { SetPanel(true); _panel.Show(open ? "devices" : "now"); };
         BarHost.Child = _bar;
         BarHost.Visibility = Visibility.Visible;
-        SetPanel(_settings.PanelOpen);
+        SetPanel(_settings.PanelOpen, animate: false);
 
         // the top bar
         TopCenter.Children.Clear(); TopEnd.Children.Clear(); _updatePill = null;
@@ -354,7 +354,7 @@ public sealed partial class MainWindow : Window, IShell
 
         music.Toast += ShowToast;
         music.PlayerChanged += () => { if (_route == "lyrics") SyncBarPanel(lyrics: true); };
-        Fit();
+        Fit(animate: false);
         UiThread.Post(DispatcherQueue, "fitting the top bar", FitTopBar, Microsoft.UI.Dispatching.DispatcherQueuePriority.Low); // once the new parts are measured
     }
 
@@ -422,14 +422,51 @@ public sealed partial class MainWindow : Window, IShell
         ToolTipService.SetToolTip(_connection, name);
     }
 
-    private void SetPanel(bool open, bool byUser = true)
+    private const float PanelSlide = 40; // px the right panel moves as it comes and goes
+    private bool _panelLeaving;
+    private int _panelMoves;
+
+    /// <summary>Opens or closes the right panel. The page beside it takes its new width at once; the panel itself slides in
+    /// from the right as it fades in (--cx-motion-sheet), or slides out and fades away over the page that has already
+    /// widened, then leaves the layout. <paramref name="animate"/> false: it just is (building the window).</summary>
+    private void SetPanel(bool open, bool byUser = true, bool animate = true)
     {
-        if (open && PanelColumn.Width.Value == 0) Motion.Enter(PanelHost, rise: 0, slide: 16); // it comes in from the side
+        bool wasOpen = PanelColumn.Width.Value > 0;
         PanelColumn.Width = new GridLength(open ? 340 : 0);
-        PanelHost.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+        if (open)
+        {
+            bool leaving = _panelLeaving;
+            if (leaving) { _panelMoves++; DockPanel(); } // reopened before it had gone: the pending removal is off
+            PanelHost.Visibility = Visibility.Visible;
+            if (leaving) Motion.SlideBack(PanelHost); // already on its way out: back from there
+            else if (animate && !wasOpen) Motion.Enter(PanelHost, rise: 0, slide: PanelSlide, move: Motion.Sheet);
+        }
+        else if (wasOpen)
+        {
+            int move = ++_panelMoves;
+            if (animate && Motion.Enabled)
+            {
+                // while it goes, over the end of the page (its column is gone already), where it was, untouchable
+                Grid.SetColumn(PanelHost, 1); Grid.SetColumnSpan(PanelHost, 2);
+                PanelHost.Width = 340; PanelHost.HorizontalAlignment = HorizontalAlignment.Right;
+                PanelHost.IsHitTestVisible = false;
+                _panelLeaving = true;
+                Motion.SlideOut(PanelHost, PanelSlide, () => { if (move == _panelMoves) { PanelHost.Visibility = Visibility.Collapsed; DockPanel(); } });
+            }
+            else { PanelHost.Visibility = Visibility.Collapsed; DockPanel(); }
+        }
         if (_panelToggle is not null) _panelToggle.IsChecked = open;
         if (byUser) { _settings.PanelOpen = open; _settings.Save(); }
         SyncBarPanel();
+    }
+
+    /// <summary>The right panel back in its own column, as laid out in MainWindow.xaml.</summary>
+    private void DockPanel()
+    {
+        _panelLeaving = false;
+        Grid.SetColumn(PanelHost, 2); Grid.SetColumnSpan(PanelHost, 1);
+        PanelHost.Width = double.NaN; PanelHost.HorizontalAlignment = HorizontalAlignment.Stretch;
+        PanelHost.IsHitTestVisible = true;
     }
 
     /// <summary>The bar's queue, lyrics and devices buttons say what the right panel and the page show.</summary>
@@ -559,7 +596,7 @@ public sealed partial class MainWindow : Window, IShell
 
     /// <summary>Narrow windows: the panel closes below 1100 px, the library becomes a rail below 860 px, the brand shrinks to
     /// its icon and the search field to what is left. Widening puts back what the person chose; none of it is saved.</summary>
-    private void Fit()
+    private void Fit(bool animate = true)
     {
         double w = RootGrid.ActualWidth;
         BrandName.Visibility = w < 1000 ? Visibility.Collapsed : Visibility.Visible;
@@ -567,8 +604,8 @@ public sealed partial class MainWindow : Window, IShell
         FitTopBar();
         if (_connection?.Tag is ValueTuple<Microsoft.UI.Xaml.Shapes.Ellipse, TextBlock> parts) parts.Item2.Visibility = w < 760 ? Visibility.Collapsed : Visibility.Visible;
         if (_music is null) return;
-        if (w < 1100 && PanelColumn.Width.Value > 0) { _narrowPanel = true; SetPanel(false, byUser: false); }
-        else if (w >= 1100 && _narrowPanel) { _narrowPanel = false; SetPanel(_settings.PanelOpen, byUser: false); }
+        if (w < 1100 && PanelColumn.Width.Value > 0) { _narrowPanel = true; SetPanel(false, byUser: false, animate); }
+        else if (w >= 1100 && _narrowPanel) { _narrowPanel = false; SetPanel(_settings.PanelOpen, byUser: false, animate); }
         if (w < 860 && _library is { IsRail: false }) { _narrowLibrary = true; _library.SetRail(true, byUser: false); }
         else if (w >= 860 && _narrowLibrary && _library is not null) { _narrowLibrary = false; _library.SetRail(!_settings.LibraryOpen, byUser: false); }
     }

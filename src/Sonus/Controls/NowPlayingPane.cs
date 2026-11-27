@@ -20,6 +20,7 @@ public sealed class NowPlayingPane : UserControl
     private readonly TextBlock _heading = Ui.Text("正在播放", size: 15, foreground: Ui.Brush("TextPrimaryBrush"), bold: true);
     // Sonus Connect version 2: where the session played last, when no device plays it
     private readonly TextBlock _whereLine = Ui.Text("", size: 12, foreground: Ui.Brush("AccentTextBrush"));
+    private readonly StackPanel _titles;
     private readonly ContentControl _body = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch, IsTabStop = false };
     private string _mode = "now";
     private string? _shownTrack;
@@ -33,10 +34,10 @@ public sealed class NowPlayingPane : UserControl
         _music = music; _shell = shell; _connect = connect; _session = session;
         // the same head as the library's: a 36 px line 12 px down (so both titles sit on one line), the button 16 px in
         var head = new Grid { Padding = new Thickness(16, 12, 16, 8), MinHeight = 56 };
-        var titles = Ui.Column(0, _heading, _whereLine);
-        titles.VerticalAlignment = VerticalAlignment.Center;
+        _titles = Ui.Column(0, _heading, _whereLine);
+        _titles.VerticalAlignment = VerticalAlignment.Center;
         _whereLine.Visibility = Visibility.Collapsed;
-        head.Children.Add(titles);
+        head.Children.Add(_titles);
         var close = Ui.IconButton(Glyphs.Close, "关闭右侧面板", (_, _) => CloseRequested?.Invoke(), 32, 12);
         close.HorizontalAlignment = HorizontalAlignment.Right; close.VerticalAlignment = VerticalAlignment.Center;
         close.Resources["ButtonForegroundPointerOver"] = Ui.Brush("TextPrimaryBrush");
@@ -61,11 +62,13 @@ public sealed class NowPlayingPane : UserControl
 
     public void Show(string mode)
     {
+        bool swap = mode != _mode;
         _mode = mode;
         if (mode == "queue") RenderQueue();
         else if (mode == "devices") { _body.Content = _devices ??= new DevicesView(_music, _connect, _session); _devices.Refresh(force: true); }
         else RenderNow(force: true);
         UpdateHeading();
+        if (swap) { Motion.Swap(_titles); Motion.Swap(_body); } // another view: it fades in where the last one was
         ModeChanged?.Invoke();
     }
 

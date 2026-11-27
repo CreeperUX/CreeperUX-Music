@@ -24,6 +24,7 @@ public static class Motion
     public static readonly TimeSpan EnterTime = TimeSpan.FromMilliseconds(140);   // --cx-motion-enter
     public static readonly TimeSpan ExitTime = TimeSpan.FromMilliseconds(90);     // --cx-motion-exit
     public static readonly TimeSpan Control = TimeSpan.FromMilliseconds(200);     // --cx-motion-control
+    public static readonly TimeSpan View = TimeSpan.FromMilliseconds(150);        // --cx-motion-view: content swapped in place
     public static readonly TimeSpan Push = TimeSpan.FromMilliseconds(220);        // --cx-motion-push
     public static readonly TimeSpan Sheet = TimeSpan.FromMilliseconds(320);       // --cx-motion-sheet: bigger moves
     public static readonly TimeSpan Tint = TimeSpan.FromMilliseconds(600);        // foobar2k's page colour change
@@ -62,6 +63,9 @@ public static class Motion
 
     /// <summary>foobar2k's ease-out (--cx-ease-out: cubic-bezier(.2, .8, .2, 1)): quick, then settling.</summary>
     private static CompositionEasingFunction EaseOut(Compositor c) => c.CreateCubicBezierEasingFunction(new Vector2(0.2f, 0.8f), new Vector2(0.2f, 1f));
+
+    /// <summary>foobar2k's exit curve (--cx-motion-exit: cubic-bezier(.4, 0, .9, .55)): slow to start, then away.</summary>
+    private static CompositionEasingFunction EaseIn(Compositor c) => c.CreateCubicBezierEasingFunction(new Vector2(0.4f, 0f), new Vector2(0.9f, 0.55f));
 
     /// <summary>
     /// Fades <paramref name="e"/> in while it moves <paramref name="rise"/> px up (or <paramref name="slide"/> px left) into
@@ -112,6 +116,63 @@ public static class Motion
             void Go() { e.Opacity = 1; e.Translation = new Vector3(0, 0, z); }
             if (delay > TimeSpan.Zero) After(delay, Go); else Go();
         });
+    }
+
+    /// <summary>Content swapped in place (the right panel: now playing, the queue, the devices): the new content fades in,
+    /// opacity only; the old one has left at once (--cx-motion-view, --cx-motion-viewExit).</summary>
+    public static void Swap(UIElement e)
+    {
+        if (!Enabled) return;
+        var visual = ElementCompositionPreview.GetElementVisual(e);
+        visual.Opacity = 0;
+        OnNextFrame(c =>
+        {
+            var fade = c.CreateScalarKeyFrameAnimation();
+            fade.InsertKeyFrame(0, 0);
+            fade.InsertKeyFrame(1, 1, EaseOut(c));
+            fade.Duration = View;
+            visual.StartAnimation("Opacity", fade);
+        });
+    }
+
+    /// <summary>A side panel closing: it moves <paramref name="slide"/> px to the right as it fades out, from wherever it is
+    /// (one closed while it was still coming in leaves from there), then <paramref name="done"/>.</summary>
+    public static void SlideOut(UIElement e, float slide, Action done)
+    {
+        if (!Enabled) { done(); return; }
+        var visual = ElementCompositionPreview.GetElementVisual(e);
+        ElementCompositionPreview.SetIsTranslationEnabled(e, true);
+        var c = visual.Compositor;
+        var fade = c.CreateScalarKeyFrameAnimation();
+        fade.InsertExpressionKeyFrame(0, "this.StartingValue");
+        fade.InsertKeyFrame(1, 0, c.CreateLinearEasingFunction());
+        fade.Duration = Control;
+        var away = c.CreateVector3KeyFrameAnimation();
+        away.InsertExpressionKeyFrame(0, "this.StartingValue");
+        away.InsertKeyFrame(1, new Vector3(slide, 0, 0), EaseIn(c));
+        away.Duration = Control;
+        visual.StartAnimation("Opacity", fade);
+        visual.StartAnimation("Translation", away);
+        After(Control + TimeSpan.FromMilliseconds(40), done);
+    }
+
+    /// <summary>A side panel opened again before it had gone: back into place from where it is.</summary>
+    public static void SlideBack(UIElement e)
+    {
+        if (!Enabled) return;
+        var visual = ElementCompositionPreview.GetElementVisual(e);
+        ElementCompositionPreview.SetIsTranslationEnabled(e, true);
+        var c = visual.Compositor;
+        var fade = c.CreateScalarKeyFrameAnimation();
+        fade.InsertExpressionKeyFrame(0, "this.StartingValue");
+        fade.InsertKeyFrame(1, 1, c.CreateLinearEasingFunction());
+        fade.Duration = TimeSpan.FromMilliseconds(180);
+        var back = c.CreateVector3KeyFrameAnimation();
+        back.InsertExpressionKeyFrame(0, "this.StartingValue");
+        back.InsertKeyFrame(1, Vector3.Zero, EaseOut(c));
+        back.Duration = Sheet;
+        visual.StartAnimation("Opacity", fade);
+        visual.StartAnimation("Translation", back);
     }
 
     /// <summary>The <paramref name="index"/>th of a list's first rows or cards coming in, each a little after the one before

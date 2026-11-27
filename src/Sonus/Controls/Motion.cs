@@ -89,7 +89,7 @@ public static class Motion
             var fade = c.CreateScalarKeyFrameAnimation();
             fade.InsertKeyFrame(0, 0);
             fade.InsertKeyFrame(1, 1, c.CreateLinearEasingFunction());
-            fade.Duration = TimeSpan.FromMilliseconds(180);
+            fade.Duration = moving > Push ? TimeSpan.FromMilliseconds(200) : TimeSpan.FromMilliseconds(180);
             var slideIn = c.CreateVector3KeyFrameAnimation();
             slideIn.InsertKeyFrame(0, from);
             slideIn.InsertKeyFrame(1, Vector3.Zero, EaseOut(c));
@@ -158,7 +158,7 @@ public static class Motion
     }
 
     /// <summary>A panel or a sheet opened again before it had gone: back into place from where it is.</summary>
-    public static void SlideBack(UIElement e)
+    public static void SlideBack(UIElement e, TimeSpan? move = null)
     {
         if (!Enabled) return;
         var visual = ElementCompositionPreview.GetElementVisual(e);
@@ -171,7 +171,7 @@ public static class Motion
         var back = c.CreateVector3KeyFrameAnimation();
         back.InsertExpressionKeyFrame(0, "this.StartingValue");
         back.InsertKeyFrame(1, Vector3.Zero, EaseOut(c));
-        back.Duration = Sheet;
+        back.Duration = move ?? Sheet;
         visual.StartAnimation("Opacity", fade);
         visual.StartAnimation("Translation", back);
     }
@@ -231,18 +231,28 @@ public static class Motion
 
     /// <summary>A quick swell and settle (a like; <paramref name="amount"/> smaller for a changing Play / Pause icon): one
     /// key-frame animation, so it never stays swollen waiting for the UI thread.</summary>
+    /// <remarks>Animates the element's composition visual. Never on an element that has <see cref="Press"/> (or any other
+    /// use of UIElement.Scale / CenterPoint): once those are set, touching the visual's Scale throws
+    /// UnauthorizedAccessException. Pop the icon inside instead (<see cref="PopIcon"/>).</remarks>
     public static void Pop(UIElement e, float amount = 1.28f)
     {
         if (!Enabled || e is not FrameworkElement fe) return;
         var visual = ElementCompositionPreview.GetElementVisual(e);
         var c = visual.Compositor;
-        visual.CenterPoint = new Vector3((float)fe.ActualWidth / 2, (float)fe.ActualHeight / 2, 0);
+        visual.CenterPoint = CenterOf(fe);
         var pop = c.CreateVector3KeyFrameAnimation();
         pop.InsertKeyFrame(0, Vector3.One);
         pop.InsertKeyFrame(0.35f, new Vector3(amount, amount, 1), EaseOut(c));
         pop.InsertKeyFrame(1, Vector3.One, EaseOut(c));
         pop.Duration = TimeSpan.FromMilliseconds(280);
         visual.StartAnimation("Scale", pop);
+    }
+
+    /// <summary>A restrained swell on the icon inside a toggle or button (shuffle, repeat, panel toggles).</summary>
+    public static void PopIcon(Microsoft.UI.Xaml.Controls.ContentControl c, float amount = 1.15f)
+    {
+        var icon = c.Content as KitIcon ?? (c.Content as Microsoft.UI.Xaml.Controls.Panel)?.Children.OfType<KitIcon>().FirstOrDefault();
+        if (icon is not null) Pop(icon, amount);
     }
 
     /// <summary>Grows a little under the pointer and gives when pressed (round Play and Home buttons: foobar2k's 1.04 and
@@ -271,9 +281,17 @@ public static class Motion
     /// <summary>Changes of <paramref name="e"/>'s scale (a lyric line coming forward) are animated.</summary>
     public static void ScaleFade(UIElement e) { if (Enabled) e.ScaleTransition = new Vector3Transition { Duration = Sheet }; }
 
+    private static Vector3 CenterOf(FrameworkElement fe)
+    {
+        // fall back to explicit Width/Height before the first layout pass so animations never scale around (0, 0)
+        float w = fe.ActualWidth > 0 ? (float)fe.ActualWidth : double.IsNaN(fe.Width) ? 0 : (float)fe.Width;
+        float h = fe.ActualHeight > 0 ? (float)fe.ActualHeight : double.IsNaN(fe.Height) ? 0 : (float)fe.Height;
+        return new Vector3(w / 2, h / 2, 0);
+    }
+
     private static void Center(UIElement e)
     {
-        if (e is FrameworkElement fe) e.CenterPoint = new Vector3((float)fe.ActualWidth / 2, (float)fe.ActualHeight / 2, 0);
+        if (e is FrameworkElement fe) e.CenterPoint = CenterOf(fe);
     }
 
     internal static void After(TimeSpan delay, Action action)

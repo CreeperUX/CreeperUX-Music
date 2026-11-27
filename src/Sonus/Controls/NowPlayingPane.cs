@@ -86,9 +86,9 @@ public sealed class NowPlayingPane : UserControl
         }
         else
         {
-            if (mode == "queue") RenderQueue(); else RenderNow(force: true);
+            if (mode == "queue") RenderQueue(animate); else RenderNow(force: true);
             if (was == "devices") CloseSheet(animate); // it sinks away from what is under it
-            else if (animate) Motion.Enter(_body, rise: 12); // now playing and the queue: one rises in where the other was
+            else if (animate) Motion.Enter(_body, rise: 14, move: TimeSpan.FromMilliseconds(240)); // now playing and the queue: one rises in where the other was
         }
         UpdateHeading();
         if (animate) Motion.Swap(_titles);
@@ -145,8 +145,16 @@ public sealed class NowPlayingPane : UserControl
         _lyrics = null; _lyricLines = null; _lyricAt = -2; CurrentLyric = null;
         if (t is null)
         {
-            _body.Content = Ui.Column(8, Ui.Text("还没有播放任何歌曲", "SectionTitleStyle"), Ui.Text("双击任意歌曲开始播放。", "MutedTextStyle"));
-            ((FrameworkElement)_body.Content).Margin = new Thickness(16);
+            var icon = Ui.Icon(Glyphs.Music, 32, Ui.Brush("TextTertiaryBrush"));
+            var heading = Ui.Text("还没有播放任何歌曲", size: 15, foreground: Ui.Brush("TextPrimaryBrush"), bold: true);
+            heading.HorizontalAlignment = HorizontalAlignment.Center;
+            var hint = Ui.Text("双击任意歌曲开始播放。", "MutedTextStyle");
+            hint.HorizontalAlignment = HorizontalAlignment.Center;
+            var empty = Ui.Column(8, icon, heading, hint);
+            empty.HorizontalAlignment = HorizontalAlignment.Center;
+            empty.VerticalAlignment = VerticalAlignment.Center;
+            empty.Margin = new Thickness(24, 0, 24, 48);
+            _body.Content = empty;
             return;
         }
         var body = new StackPanel { Spacing = 16, Padding = new Thickness(16, 0, 16, 24) };
@@ -174,15 +182,21 @@ public sealed class NowPlayingPane : UserControl
         _ = LoadLyrics(t);
 
         var facts = new StackPanel { Spacing = 6 };
-        void Fact(string k, string v) { var g = new Grid(); g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(80) }); g.ColumnDefinitions.Add(new ColumnDefinition()); g.Children.Add(Ui.Text(k, "MutedTextStyle")); var val = Ui.Text(v, size: 13, foreground: Ui.Brush("TextPrimaryBrush")); val.TextWrapping = TextWrapping.Wrap; Grid.SetColumn(val, 1); g.Children.Add(val); facts.Children.Add(g); }
+        void Fact(string k, string v, bool mono = false, bool quiet = false)
+        {
+            var g = new Grid(); g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(80) }); g.ColumnDefinitions.Add(new ColumnDefinition());
+            g.Children.Add(Ui.Text(k, "MutedTextStyle"));
+            var val = Ui.Text(v, mono ? "FigureTextStyle" : null, size: mono ? 12.5 : 13, foreground: Ui.Brush(quiet ? "TextSecondaryBrush" : "TextPrimaryBrush"));
+            val.TextWrapping = TextWrapping.Wrap; Grid.SetColumn(val, 1); g.Children.Add(val); facts.Children.Add(g);
+        }
         Fact("编码", t.Codec + (t.IsLossless ? "（无损）" : t.Codec.StartsWith("DSD", StringComparison.Ordinal) ? "" : "（有损）"));
-        if (t.SampleRate > 0) Fact("采样率", t.SampleRate >= 1_000_000 ? $"{t.SampleRate / 1_000_000.0:0.###} MHz" : $"{t.SampleRate / 1000.0:0.#} kHz");
-        if (t.BitDepth > 1) Fact("位深", $"{t.BitDepth} bit");
-        if (t.Bitrate > 0) Fact("比特率", $"{t.Bitrate} kbps");
-        Fact("回放增益", t.TrackGain is null && t.AlbumGain is null ? "无" : $"音轨 {t.TrackGain:+0.00;-0.00} dB · 专辑 {t.AlbumGain:+0.00;-0.00} dB");
-        if (t.Size > 0) Fact("文件大小", Formats.Size(t.Size));
+        if (t.SampleRate > 0) Fact("采样率", t.SampleRate >= 1_000_000 ? $"{t.SampleRate / 1_000_000.0:0.###} MHz" : $"{t.SampleRate / 1000.0:0.#} kHz", mono: true);
+        if (t.BitDepth > 1) Fact("位深", $"{t.BitDepth} bit", mono: true);
+        if (t.Bitrate > 0) Fact("比特率", $"{t.Bitrate} kbps", mono: true);
+        Fact("回放增益", t.TrackGain is null && t.AlbumGain is null ? "无" : $"音轨 {t.TrackGain:+0.00;-0.00} dB · 专辑 {t.AlbumGain:+0.00;-0.00} dB", mono: t.TrackGain is not null || t.AlbumGain is not null);
+        if (t.Size > 0) Fact("文件大小", Formats.Size(t.Size), mono: true);
         Fact("播放次数", $"{t.PlayCount} 次 · 上次 {Formats.Relative(t.LastPlayed)}");
-        if (t.Path.Length > 0) Fact("位置", t.Path);
+        if (t.Path.Length > 0) Fact("位置", t.Path, mono: true, quiet: true);
         body.Children.Add(Card("音频信息", facts, null));
 
         if (_music.Library.Artist(t.ArtistId) is { } a)
@@ -193,8 +207,7 @@ public sealed class NowPlayingPane : UserControl
         }
 
         _nextBox = new StackPanel();
-        var openQueue = new HyperlinkButton { Content = "打开播放队列", Padding = new Thickness(0) };
-        openQueue.Click += (_, _) => Show("queue");
+        var openQueue = Ui.Link("打开播放队列", () => Show("queue"), 13);
         body.Children.Add(Card("接下来播放", _nextBox, openQueue));
         RenderNext();
         _body.Content = new ScrollViewer { Content = body, HorizontalScrollMode = ScrollMode.Disabled };
@@ -264,14 +277,16 @@ public sealed class NowPlayingPane : UserControl
     public string? CurrentLyric { get; private set; }
 
     // ---------------------------------------------------------------- Queue
-    private void RenderQueue()
+    private void RenderQueue(bool animate = false)
     {
         var body = new StackPanel { Spacing = 8, Padding = new Thickness(8, 0, 8, 24) };
+        int rowIndex = 0;
+        void AddRow(Grid row) { if (animate && rowIndex < 8) Motion.Stagger(row, rowIndex, rise: 12); rowIndex++; body.Children.Add(row); }
         var current = _music.Current;
         if (current is not null)
         {
             body.Children.Add(Section("正在播放", null));
-            body.Children.Add(Row(current, null, playing: true));
+            AddRow(Row(current, null, playing: true));
         }
         var entries = _music.Queue.Entries;
         var manual = entries.Where(e => e.Manual).ToList();
@@ -279,12 +294,12 @@ public sealed class NowPlayingPane : UserControl
         if (manual.Count > 0)
         {
             body.Children.Add(Section("接下来播放", () => _music.QueueClear(manual: true)));
-            foreach (var e in manual) if (_music.Library.Track(e.TrackId) is { } t) body.Children.Add(Row(t, e));
+            foreach (var e in manual) if (_music.Library.Track(e.TrackId) is { } t) AddRow(Row(t, e));
         }
         if (rest.Count > 0)
         {
             body.Children.Add(Section($"接下来：{_music.Queue.Context?.Label}", () => _music.QueueClear(manual: false)));
-            foreach (var e in rest) if (_music.Library.Track(e.TrackId) is { } t) body.Children.Add(Row(t, e));
+            foreach (var e in rest) if (_music.Library.Track(e.TrackId) is { } t) AddRow(Row(t, e));
         }
         if (current is null && entries.Count == 0) body.Children.Add(Ui.Text("队列里没有歌曲", "MutedTextStyle"));
         AutomationProperties.SetName(body, "播放队列");

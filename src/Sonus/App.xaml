@@ -47,6 +47,8 @@
             <Color x:Key="OnAccentColor">#FF111416</Color>
             <SolidColorBrush x:Key="OnAccentBrush" Color="{StaticResource OnAccentColor}" />  <!-- cx-on-accent -->
             <SolidColorBrush x:Key="BadBrush" Color="#FFC1877C" />                          <!-- cx-bad -->
+            <SolidColorBrush x:Key="OfflineBrush" Color="#38C1877C" />                      <!-- cx-bad at 22 %: offline connection pill -->
+            <SolidColorBrush x:Key="OfflineHoverBrush" Color="#4DC1877C" />                 <!-- … at 30 % under the pointer -->
             <SolidColorBrush x:Key="GoodBrush" Color="#FF80AB9E" />                         <!-- cx-good -->
             <SolidColorBrush x:Key="WarnBrush" Color="#FFD9A441" />                         <!-- cx-warn -->
             <SolidColorBrush x:Key="InfoBrush" Color="#FF6497A7" />                         <!-- cx-info -->

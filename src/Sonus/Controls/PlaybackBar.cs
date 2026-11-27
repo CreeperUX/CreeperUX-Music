@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Media;
 
 namespace Sonus.Controls;
@@ -24,12 +25,13 @@ public sealed class PlaybackBar : UserControl
     private readonly SessionService? _session;
     private readonly IShell _shell;
     private readonly Artwork _art = new(56, false, Glyphs.Music, 4);
+    private readonly StackPanel _songText;
     private readonly HyperlinkButton _title, _artist;
     private readonly Button _like, _play, _prev, _next;
     private readonly ToggleButton _shuffle, _repeat, _lyrics, _queue, _devices;
     private readonly Slider _progress = new() { Minimum = 0, Maximum = 1, StepFrequency = 0.1, IsThumbToolTipEnabled = false, VerticalAlignment = VerticalAlignment.Center };
     private readonly TextBlock _at = Ui.Text("0:00", "FigureTextStyle"), _length = Ui.Text("0:00", "FigureTextStyle");
-    private readonly Slider _volume = new() { Minimum = 0, Maximum = 100, Width = 110, StepFrequency = 1, VerticalAlignment = VerticalAlignment.Center };
+    private readonly Slider _volume = new() { Minimum = 0, Maximum = 100, Width = 110, StepFrequency = 1, IsThumbToolTipEnabled = false, VerticalAlignment = VerticalAlignment.Center };
     private readonly Button _mute;
     private readonly TextBlock _error = Ui.Text("", size: 12, foreground: Ui.Brush("BadBrush"));
     private readonly TextBlock _where = Ui.Text("", size: 12, foreground: Ui.Brush("AccentTextBrush"));
@@ -38,6 +40,9 @@ public sealed class PlaybackBar : UserControl
     private readonly Button _elsewhere = new() { HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Right, Height = 26, Margin = new Thickness(8, 0, 8, 6), Padding = new Thickness(12, 0, 12, 0), CornerRadius = new CornerRadius(4), BorderThickness = new Thickness(0), Visibility = Visibility.Collapsed };
     private readonly DispatcherTimer _volumeSend = new() { Interval = TimeSpan.FromMilliseconds(120) };
     private bool _seeking, _syncing;
+    private string? _shownTrackKey;
+    private bool _elsewhereShown, _elsewhereLeaving;
+    private int _elsewhereMoves;
 
     // The position between the service's updates (four a second), carried on frame by frame while playing, so the bar
     // glides instead of stepping. A little ahead of the engine, it waits for it rather than stepping back.
@@ -98,10 +103,12 @@ public sealed class PlaybackBar : UserControl
         // left: the song
         _title = Ui.Link("", () => { if (Shown is { } t) shell.Navigate($"album:{t.AlbumId}"); }, 14, Ui.Brush("TextPrimaryBrush"), bold: true);
         _artist = Ui.Link("", () => { if (Shown is { } t) shell.Navigate($"artist:{t.ArtistId}"); }, 12.5);
-        _like = Ui.IconButton(Glyphs.Heart, "喜欢", async (_, _) => { if (Shown is { } t) { Motion.Pop(_like!); await shell.Run(() => music.SetLikedAsync(t.Id, !t.Liked)); } }, 32, 15);
+        // the heart swells inside the button: Press scales the button itself, so Pop on the button would throw (see Motion.Pop)
+        _like = Ui.IconButton(Glyphs.Heart, "喜欢", async (_, _) => { if (Shown is { } t) { Motion.PopIcon(_like!, 1.28f); await shell.Run(() => music.SetLikedAsync(t.Id, !t.Liked)); } }, 32, 15);
+        Motion.Press(_like);
         _where.Visibility = Visibility.Collapsed;
         AutomationProperties.SetLiveSetting(_where, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
-        var songText = Ui.Column(0, _title, _artist, _error, _where);
+        var songText = _songText = Ui.Column(0, _title, _artist, _error, _where);
         songText.VerticalAlignment = VerticalAlignment.Center;
         songText.MaxWidth = 240;
         // the heart sits right after the title, as in foobar2k (not at the far end of the column)
@@ -116,8 +123,10 @@ public sealed class PlaybackBar : UserControl
 
         // middle: the transport and the progress
         _shuffle = Ui.IconToggle(Glyphs.Shuffle, "随机播放", 32, dot: true);
-        _shuffle.Click += (_, _) => music.SetOrder(_shuffle.IsChecked == true ? PlaybackOrder.ShuffleTracks : PlaybackOrder.Default);
+        Motion.Press(_shuffle);
+        _shuffle.Click += (_, _) => { Motion.PopIcon(_shuffle); music.SetOrder(_shuffle.IsChecked == true ? PlaybackOrder.ShuffleTracks : PlaybackOrder.Default); };
         _prev = Ui.IconButton(Glyphs.Previous, "上一首", (_, _) => { if (Remote is not null) Send(ConnectCommand.Previous); else music.Previous(); }, 32, 15);
+        Motion.Press(_prev);
         _play = new Button { Width = 40, Height = 40, CornerRadius = new CornerRadius(20), Padding = new Thickness(0), Background = Ui.Brush("TextPrimaryBrush"), Foreground = Ui.Brush("OnAccentBrush"), BorderThickness = new Thickness(0), FontSize = 16, Content = new KitIcon(Glyphs.Play, 16) };
         _play.Resources["ButtonBackgroundPointerOver"] = Ui.Brush("TextPrimaryBrush");
         _play.Resources["ButtonBackgroundPressed"] = Ui.Brush("TextPrimaryBrush");
@@ -132,18 +141,23 @@ public sealed class PlaybackBar : UserControl
             else music.TogglePlay();
         };
         _next = Ui.IconButton(Glyphs.Next, "下一首", (_, _) => { if (Remote is not null) Send(ConnectCommand.Next); else music.Next(); }, 32, 15);
+        Motion.Press(_next);
         _repeat = Ui.IconToggle(Glyphs.Repeat, "循环播放", 32, dot: true);
-        _repeat.Click += (_, _) => music.SetOrder(music.Queue.Order switch { PlaybackOrder.RepeatPlaylist => PlaybackOrder.RepeatTrack, PlaybackOrder.RepeatTrack => PlaybackOrder.Default, _ => PlaybackOrder.RepeatPlaylist });
+        Motion.Press(_repeat);
+        _repeat.Click += (_, _) => { Motion.PopIcon(_repeat); music.SetOrder(music.Queue.Order switch { PlaybackOrder.RepeatPlaylist => PlaybackOrder.RepeatTrack, PlaybackOrder.RepeatTrack => PlaybackOrder.Default, _ => PlaybackOrder.RepeatPlaylist }); };
         var transport = Ui.Row(12, _shuffle, _prev, _play, _next, _repeat);
         transport.HorizontalAlignment = HorizontalAlignment.Center;
         AutomationProperties.SetName(_progress, "播放进度");
+        StyleSlimSlider(_progress, whiteAtRest: true);
         _progress.ValueChanged += (_, e) => { if (!_syncing) { _seeking = true; _at.Text = Formats.Duration(e.NewValue); } };
         _progress.PointerCaptureLost += (_, _) => Commit();
         _progress.KeyUp += (_, _) => Commit();
+        var atCol = new ColumnDefinition { Width = new GridLength(48) };
+        var lenCol = new ColumnDefinition { Width = new GridLength(48) };
         var progress = new Grid { ColumnSpacing = 8, MaxWidth = 720 };
-        progress.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(48) });
+        progress.ColumnDefinitions.Add(atCol);
         progress.ColumnDefinitions.Add(new ColumnDefinition());
-        progress.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(48) });
+        progress.ColumnDefinitions.Add(lenCol);
         _at.HorizontalAlignment = HorizontalAlignment.Right; _at.VerticalAlignment = VerticalAlignment.Center; _length.VerticalAlignment = VerticalAlignment.Center;
         progress.Children.Add(_at);
         Grid.SetColumn(_progress, 1); progress.Children.Add(_progress);
@@ -153,16 +167,22 @@ public sealed class PlaybackBar : UserControl
 
         // right: lyrics, queue, devices, output, volume
         _lyrics = Ui.IconToggle(Glyphs.Lyrics, "歌词", 32, dot: true);
-        _lyrics.Click += (_, _) => { shell.Navigate(_lyrics.IsChecked == true ? "lyrics" : "back"); };
+        Motion.Press(_lyrics);
+        _lyrics.Click += (_, _) => { Motion.PopIcon(_lyrics); shell.Navigate(_lyrics.IsChecked == true ? "lyrics" : "back"); };
         _queue = Ui.IconToggle(Glyphs.Queue, "播放队列", 32, dot: true);
-        _queue.Click += (_, _) => QueueToggled?.Invoke(_queue.IsChecked == true);
+        Motion.Press(_queue);
+        _queue.Click += (_, _) => { Motion.PopIcon(_queue); QueueToggled?.Invoke(_queue.IsChecked == true); };
         _devices = Ui.IconToggle(Glyphs.Devices, "在其他设备上播放", 32, dot: true);
         _devices.Visibility = connect.IsAvailable || session is not null ? Visibility.Visible : Visibility.Collapsed;
-        _devices.Click += (_, _) => DevicesToggled?.Invoke(_devices.IsChecked == true);
+        Motion.Press(_devices);
+        _devices.Click += (_, _) => { Motion.PopIcon(_devices); DevicesToggled?.Invoke(_devices.IsChecked == true); };
         var output = Ui.IconButton(Glyphs.Speaker, "输出设备", null, 32, 15);
+        Motion.Press(output);
         output.Flyout = OutputMenu();
-        _mute = Ui.IconButton(Glyphs.Volume, "静音", (_, _) => { if (VolumeTarget is { } d) _session!.SetVolume(d.Id, null, !d.Muted); else music.SetMuted(!music.Muted); }, 32, 15);
+        _mute = Ui.IconButton(Glyphs.Volume, "静音", (_, _) => { Motion.PopIcon(_mute!); if (VolumeTarget is { } d) _session!.SetVolume(d.Id, null, !d.Muted); else music.SetMuted(!music.Muted); }, 32, 15);
+        Motion.Press(_mute);
         AutomationProperties.SetName(_volume, "音量");
+        StyleSlimSlider(_volume, whiteAtRest: false);
         _volume.ValueChanged += (_, e) =>
         {
             if (_syncing) return;
@@ -183,10 +203,12 @@ public sealed class PlaybackBar : UserControl
         right.HorizontalAlignment = HorizontalAlignment.Right; right.VerticalAlignment = VerticalAlignment.Center;
 
         // the sides are equal (foobar2k's 1 : 2 : 1), so the transport sits on the window's middle line
+        var leftCol = new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MinWidth = 240 };
+        var rightCol = new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MinWidth = 240 };
         var root = new Grid { Padding = new Thickness(16, 8, 16, 8), ColumnSpacing = 12, Height = 88 }; // the transport (40) and the progress row (32) between 8 px paddings
-        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MinWidth = 240 });
+        root.ColumnDefinitions.Add(leftCol);
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2, GridUnitType.Star) });
-        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MinWidth = 240 });
+        root.ColumnDefinitions.Add(rightCol);
         root.Children.Add(song);
         Grid.SetColumn(middle, 1); root.Children.Add(middle);
         Grid.SetColumn(right, 2); root.Children.Add(right);
@@ -197,9 +219,24 @@ public sealed class PlaybackBar : UserControl
         _elsewhere.Resources["ButtonBackgroundPressed"] = Ui.Brush("AccentHiBrush");
         _elsewhere.Content = Ui.Row(6, Ui.Icon(Glyphs.Devices, 14, Ui.Brush("OnAccentBrush")), _elsewhereText);
         _elsewhere.Click += (_, _) => { _devices.IsChecked = true; DevicesToggled?.Invoke(true); };
-        Content = Ui.Column(0, root, _elsewhere);
-        // a narrow window: a shorter volume slider, so the end's buttons stay in their column
-        SizeChanged += (_, e) => _volume.Width = e.NewSize.Width < 900 ? 72 : 110;
+        // clipped so the amber strip rises cleanly from the bottom edge
+        var elsewhereHost = new Grid { Children = { _elsewhere } };
+        var elsewhereVisual = ElementCompositionPreview.GetElementVisual(elsewhereHost);
+        elsewhereVisual.Clip = elsewhereVisual.Compositor.CreateInsetClip();
+        Content = Ui.Column(0, root, elsewhereHost);
+        // narrow windows: tighten both ends so the seek bar keeps comfortable room instead of collapsing to a stub
+        SizeChanged += (_, e) =>
+        {
+            bool narrow = e.NewSize.Width < 900;
+            _volume.Width = narrow ? 58 : 110;
+            right.Spacing = narrow ? 1 : 4;
+            leftCol.MinWidth = narrow ? 172 : 240;
+            rightCol.MinWidth = narrow ? 222 : 240;
+            songText.MaxWidth = narrow ? 116 : 240;
+            atCol.Width = lenCol.Width = new GridLength(narrow ? 38 : 48);
+            progress.ColumnSpacing = narrow ? 6 : 8;
+            root.ColumnSpacing = narrow ? 8 : 12;
+        };
 
         music.PlayerChanged += Sync;
         music.TrackChanged += t => { if (t.Id == Shown?.Id) Sync(); };
@@ -214,6 +251,26 @@ public sealed class PlaybackBar : UserControl
         Loaded += (_, _) => Glide(Remote?.State?.Playing ?? _music.State == PlayerState.Playing);
         Unloaded += (_, _) => Glide(false);
         Sync();
+    }
+
+    /// <summary>Matches DevicesView's slim 3 px track / 12 px thumb geometry; the seek bar sits in white at rest and
+    /// lights up in amber on hover or drag (foobar2k's .ui-seek).</summary>
+    private static void StyleSlimSlider(Slider s, bool whiteAtRest)
+    {
+        s.Resources["SliderHorizontalHeight"] = 24.0;
+        s.Resources["SliderTrackThemeHeight"] = 3.0;
+        s.Resources["SliderHorizontalThumbWidth"] = 12.0;
+        s.Resources["SliderHorizontalThumbHeight"] = 12.0;
+        s.Resources["SliderInnerThumbWidth"] = 6.0;
+        s.Resources["SliderInnerThumbHeight"] = 6.0;
+        s.Resources["SliderThumbCornerRadius"] = new CornerRadius(6);
+        if (!whiteAtRest) return;
+        s.Resources["SliderTrackValueFill"] = Ui.Brush("TextPrimaryBrush");
+        s.Resources["SliderTrackValueFillPointerOver"] = Ui.Brush("AccentBrush");
+        s.Resources["SliderTrackValueFillPressed"] = Ui.Brush("AccentBrush");
+        s.Resources["SliderThumbBackground"] = Ui.Brush("TextPrimaryBrush");
+        s.Resources["SliderThumbBackgroundPointerOver"] = Ui.Brush("AccentHiBrush");
+        s.Resources["SliderThumbBackgroundPressed"] = Ui.Brush("AccentBrush");
     }
 
     public event Action<bool>? QueueToggled;
@@ -324,6 +381,9 @@ public sealed class PlaybackBar : UserControl
 
     private void ShowSong(Track? t, string? cover, string? title, string? artist)
     {
+        string? key = t?.Id ?? (title is null ? null : $"{title}|{artist}");
+        bool changed = key is not null && key != _shownTrackKey && IsLoaded;
+        _shownTrackKey = key;
         _art.Url = cover;
         ((TextBlock)_title.Content).Text = title ?? "";
         ((TextBlock)_artist.Content).Text = artist ?? "";
@@ -334,6 +394,11 @@ public sealed class PlaybackBar : UserControl
         Ui.SetIcon(_like, t?.Liked == true ? Glyphs.HeartFill : Glyphs.Heart);
         _like.Foreground = t?.Liked == true ? Ui.Brush("AccentBrush") : Ui.Brush("TextSecondaryBrush");
         AutomationProperties.SetName(_like, t?.Liked == true ? "取消喜欢" : "喜欢");
+        if (changed)
+        {
+            Motion.ScaleIn(_art, 0.88f);
+            Motion.Enter(_songText, rise: 0, slide: -10, move: TimeSpan.FromMilliseconds(240));
+        }
     }
 
     private void ShowPlay(string glyph, string name)
@@ -352,6 +417,37 @@ public sealed class PlaybackBar : UserControl
         ToolTipService.SetToolTip(_devices, label);
         _elsewhereText.Text = elsewhere is null ? "" : $"正在「{elsewhere}」上播放";
         AutomationProperties.SetName(_elsewhere, _elsewhereText.Text);
-        _elsewhere.Visibility = elsewhere is null ? Visibility.Collapsed : Visibility.Visible;
+        bool show = elsewhere is not null;
+        if (show)
+        {
+            bool wasLeaving = _elsewhereLeaving;
+            bool wasShown = _elsewhereShown;
+            _elsewhereShown = true;
+            _elsewhere.Visibility = Visibility.Visible;
+            _elsewhere.IsHitTestVisible = true;
+            if (wasLeaving)
+            {
+                _elsewhereMoves++;
+                _elsewhereLeaving = false;
+                Motion.SlideBack(_elsewhere, TimeSpan.FromMilliseconds(240));
+            }
+            else if (!wasShown && IsLoaded)
+            {
+                Motion.Enter(_elsewhere, rise: 18, move: TimeSpan.FromMilliseconds(240));
+                Motion.PopIcon(_devices, 1.16f);
+            }
+        }
+        else if (_elsewhereShown)
+        {
+            _elsewhereShown = false;
+            int move = ++_elsewhereMoves;
+            if (IsLoaded && Motion.Enabled)
+            {
+                _elsewhereLeaving = true;
+                _elsewhere.IsHitTestVisible = false;
+                Motion.SlideOut(_elsewhere, () => { if (move == _elsewhereMoves) { _elsewhereLeaving = false; _elsewhere.Visibility = Visibility.Collapsed; } }, drop: 18);
+            }
+            else _elsewhere.Visibility = Visibility.Collapsed;
+        }
     }
 }

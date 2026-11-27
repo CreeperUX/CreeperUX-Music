@@ -21,6 +21,7 @@ public sealed class DevicesView : UserControl
     private readonly SessionService? _session;
     private readonly StackPanel _list = new() { Spacing = 2 };
     private string _shown = "";
+    private string? _lastActiveId;
     private Slider? _cardLevel;               // the card's volume slider, kept in step while not being dragged
     private DispatcherTimer? _cardSend;
 
@@ -82,8 +83,11 @@ public sealed class DevicesView : UserControl
         // the card: the device that plays; when none does, this one (pressing play plays here, rule 6)
         var current = devices.FirstOrDefault(d => d.Id == now.ActiveDevice) ?? devices[0];
         string status = now.ActiveDevice is null ? "没有设备在播放" : now.Playing ? "正在播放" : "已暂停";
-        _list.Children.Add(Card(current.Id, current.Name, Glyph(current.Kind), status, now.ActiveDevice is not null && now.Playing,
-            Volume(current.Id, current.Name, current.Volume, current.Muted, session)));
+        var card = Card(current.Id, current.Name, Glyph(current.Kind), status, now.ActiveDevice is not null && now.Playing,
+            Volume(current.Id, current.Name, current.Volume, current.Muted, session));
+        if (_lastActiveId is not null && _lastActiveId != current.Id && IsLoaded) Motion.Enter(card, rise: 10, move: Motion.Push);
+        _lastActiveId = current.Id;
+        _list.Children.Add(card);
         foreach (var d in devices.Where(d => d.Id != current.Id))
         {
             var row = Row(d.Name, Glyph(d.Kind), d.CanPlay ? null : "只能遥控", d.CanPlay, () => session.Transfer(d.Id), VolumeButton(d.Id, d.Name, session));

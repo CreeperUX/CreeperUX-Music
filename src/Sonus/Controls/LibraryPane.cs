@@ -19,11 +19,12 @@ public sealed class LibraryPane : UserControl
     private readonly ItemsRepeater _items;
     private readonly HashSet<Button> _shown = []; // the items' buttons that exist now (those in view and around)
     private readonly TextBox _find = new() { PlaceholderText = "在音乐库中搜索", MinWidth = 0 };
-    private readonly ComboBox _sort = new() { MinWidth = 120 };
+    private readonly ComboBox _sort = new() { MinWidth = 0 };
     private readonly Chips _chips;
     private readonly StackPanel _tools;
     private readonly TextBlock _title;
     private bool _rail;
+    private string _currentRoute = "";
     private Grid? _head;
     private Button? _titleButton, _create;
 
@@ -59,6 +60,7 @@ public sealed class LibraryPane : UserControl
         create.Resources["ButtonBackgroundPointerOver"] = Ui.Brush("RaisedHiBrush");
         create.Resources["ButtonBackgroundPressed"] = Ui.Brush("RaisedHiBrush");
         create.Resources["ButtonForegroundPointerOver"] = Ui.Brush("TextPrimaryBrush");
+        Motion.Press(create);
         head.Children.Add(titleButton); head.Children.Add(create);
         _titleButton = titleButton; _create = create;
 
@@ -130,6 +132,17 @@ public sealed class LibraryPane : UserControl
         _title.Visibility = rail ? Visibility.Collapsed : Visibility.Visible;
         RailChanged?.Invoke(rail, byUser);
         Render();
+        // layout snaps to 80 / 300 px at once; the visual settle runs on the compositor (no per-frame width animation)
+        if (IsLoaded && Motion.Enabled)
+        {
+            Motion.Swap(_head);
+            if (!rail)
+            {
+                Motion.Enter(_tools, rise: 0, slide: -18, move: Motion.Push);
+                Motion.Enter(_items, rise: 0, slide: -14, move: Motion.Push);
+            }
+            else Motion.Enter(_items, rise: 0, slide: 12, move: Motion.Control);
+        }
     }
 
     private IEnumerable<Entry> Entries()
@@ -196,9 +209,10 @@ public sealed class LibraryPane : UserControl
         if (_rail) { text.Visibility = Visibility.Collapsed; }
         var b = new Button
         {
-            Content = row, Tag = (e, name, playing), Padding = new Thickness(8), HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            Content = row, Padding = new Thickness(8), HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch,
             Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0), CornerRadius = new CornerRadius(6),
         };
+        b.Tag = (e, name, playing, Ui.OwnBrush(b, "HoverBrush", "ButtonBackgroundPointerOver")); // Mark recolours the hover
         AutomationProperties.SetName(b, $"{e.Name}，{e.Sub}");
         ToolTipService.SetToolTip(b, e.Name);
         b.Click += (_, _) => _shell.Navigate(e.Route);
@@ -215,15 +229,26 @@ public sealed class LibraryPane : UserControl
         return b;
     }
 
-    /// <summary>Marks the playing context: amber name and a speaker.</summary>
+    /// <summary>Highlights the currently viewed route in the library, distinct from the playing context.</summary>
+    public void SetCurrentRoute(string route)
+    {
+        if (_currentRoute == route) return;
+        _currentRoute = route;
+        Mark();
+    }
+
+    /// <summary>Marks the playing context (amber name and level bars) and the currently viewed route (quiet plate).</summary>
     private void Mark() { foreach (var b in _shown) Mark(b); }
 
     private void Mark(Button b)
     {
-        if (b.Tag is not ValueTuple<Entry, TextBlock, Border> tag) return;
-        var (e, name, host) = tag;
+        if (b.Tag is not ValueTuple<Entry, TextBlock, Border, SolidColorBrush> tag) return;
+        var (e, name, host, hover) = tag;
         bool current = _music.IsContext(e.Type, e.Id);
+        bool viewing = e.Route == _currentRoute;
         name.Foreground = current ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextPrimaryBrush");
+        b.Background = viewing ? Ui.Brush("HoverBrush") : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        Ui.Recolor(hover, viewing ? "SurfaceHoverBrush" : "HoverBrush");
         string state = current && !_rail ? _music.IsActive ? "playing" : "paused" : "";
         if (Equals(host.Tag, state)) return; // new bars only when it changes, so the moving ones keep moving
         host.Tag = state;

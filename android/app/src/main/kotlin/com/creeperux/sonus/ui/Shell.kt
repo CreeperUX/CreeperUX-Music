@@ -81,6 +81,7 @@ import com.creeperux.sonus.ui.screens.SignInScreen
 import com.creeperux.sonus.ui.screens.TabletTopBar
 import com.creeperux.sonus.ui.theme.Shapes
 import com.creeperux.sonus.ui.theme.Sonus
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 
 /** The app: signing in, connecting, or the music. */
@@ -140,6 +141,16 @@ private fun Main(graph: AppGraph, session: MusicSession) {
     val scope = rememberCoroutineScope()
     LaunchedEffect(session) {
         session.toast.collect { t -> scope.launch { show(snackbar, t) } }
+    }
+    // the daily check found a newer version: said once (the dot on 设置 stays while it waits), by this shell itself and
+    // taken as said once it has been on screen: a shell that goes away while saying it (the one fading out as the app
+    // connects, as both are composed for a moment) leaves it to the one that stays
+    LaunchedEffect(session) {
+        graph.updater.announce.filterNotNull().collect { r ->
+            val result = snackbar.showSnackbar("Sonus ${r.displayVersion.substringBefore('-')} 可以更新了", "查看", duration = SnackbarDuration.Long)
+            graph.updater.announced(r)
+            if (result == SnackbarResult.ActionPerformed) nav.go(Route.Settings)
+        }
     }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { scope.launch { session.onActivated() } }
     CompositionLocalProvider(LocalGraph provides graph, LocalSession provides session, LocalPlayer provides graph.playback, LocalNav provides nav, LocalMotion provides rememberMotionEnabled()) {

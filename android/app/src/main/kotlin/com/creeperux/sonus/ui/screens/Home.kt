@@ -37,6 +37,7 @@ import com.creeperux.sonus.core.CardRef
 import com.creeperux.sonus.core.Formats
 import com.creeperux.sonus.core.HomeShelves
 import com.creeperux.sonus.ui.Layout
+import com.creeperux.sonus.ui.LocalGraph
 import com.creeperux.sonus.ui.LocalLayout
 import com.creeperux.sonus.ui.LocalNav
 import com.creeperux.sonus.ui.LocalPlayer
@@ -127,7 +128,8 @@ fun HomeScreen() {
                                 Text("未连接到服务器", style = Sonus.type.caption, color = c.text)
                             }
                         }
-                        RoundButton("settings", "设置", { nav.go(Route.Settings) }, Modifier.testTag("open-settings"))
+                        val update by LocalGraph.current.updater.available.collectAsState()
+                        RoundButton("settings", if (update != null) "设置（有新版本）" else "设置", { nav.go(Route.Settings) }, Modifier.testTag("open-settings"), badge = update != null)
                     }
                 }
                 Spacer(Modifier.height(12.dp))

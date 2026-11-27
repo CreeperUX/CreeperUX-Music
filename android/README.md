@@ -19,6 +19,7 @@ Sonus 的安卓客户端：连接你自己的 Sonus／Navidrome 服务器，浏�
 | 封面 | 按屏幕实际像素向上取整到 64、128、256、512 或 1024 来请求，和 Windows 版相同；系统媒体控件用 512。<br>封面在内存缓存 64 MB，在磁盘缓存 256 MB。 |
 | 歌词 | 优先使用 OpenSubsonic 的同步歌词，`offset` 为正数时歌词提前显示；没有时退回 `getLyrics`，按 LRC 解析。<br>当前行高亮并保持在视野内，点一行可以跳到那里。 |
 | Scrobble | 歌曲真正开始播放时发送"正在播放"；播过一半或 4 分钟（取较早者）时记一次播放，和 Windows 版相同。 |
+| 更新 | 和 Windows 版一样从 GitHub 上 Sonus 公开仓库的发布版更新，不用登录：启动后每天检查一次（有新版本时设置按钮上有个点，并提示一次），也可以在 设置 › 更新 里检查。安装时下载 APK，按 GitHub 记录的 SHA-256 校验，再确认它是这个 App（包名）、比已安装的新（versionCode）、签名和已安装的相同，然后交给系统安装：第一次需要允许 Sonus"安装未知应用"，系统还会请你确认。见下面的"更新和发布"。 |
 | 接着听 | 和 Windows 版一样用 `savePlayQueue` 保存队列：改动后 1.5 秒保存，暂停或换歌时立即保存，播放中每 30 秒保存一次。<br>启动时取回上次（或另一台设备）的队列，暂停在原来的位置，并提示"接着上次听"。 |
 
 ## 多设备同步（Sonus Connect v2）
@@ -53,9 +54,10 @@ Sonus 的安卓客户端：连接你自己的 Sonus／Navidrome 服务器，浏�
 
 ```
 android/
-  core/   纯 Kotlin：SubsonicClient、LibraryBuilder、PlayQueue、LyricsParser、DeviceLogin、Formats、HomeShelves
+  core/   纯 Kotlin：SubsonicClient、LibraryBuilder、PlayQueue、LyricsParser、DeviceLogin、Formats、HomeShelves、Updates
           （Sonus.Core 的移植；测试在电脑的 JVM 上运行，其中一组连接仓库里的演示服务器）
-  app/    安卓 App：data（Keystore 加密保存登录、设置）、session（媒体库会话）、playback（Media3）、ui（Compose 界面）
+  app/    安卓 App：data（Keystore 加密保存登录、设置）、session（媒体库会话）、playback（Media3）、update（应用内更新）、
+          ui（Compose 界面）
   tools/  kit-icons.mjs（从 Windows 版生成图标）、test-device.ps1（一键运行设备测试）、
           server-library.mjs（在本机搭一个带长歌测试曲库的 Sonus 服务器，给设备测试用）
 ```
@@ -238,6 +240,26 @@ node tools\server-library.mjs stop <目录>
 ```powershell
 & "$env:ANDROID_HOME\platform-tools\adb.exe" uninstall com.creeperux.sonus.debug
 ```
+
+## 更新和发布
+
+App 读 `https://api.github.com/repos/CreeperUX/Sonus/releases`（`core/.../Updates.kt`，和 Windows 版的 `GitHubUpdates.cs` 一样）。Windows 版的发布叫 `v0.6.2`，安卓版的叫 `android-v…`，互不干扰。
+
+- **测试版**（`com.creeperux.sonus.debug`，「Sonus 测试版」，这台电脑的调试密钥签名）只接收**预发布**的 `android-vX.Y.Z-test.N`。
+- **正式版**（`com.creeperux.sonus`，正式密钥签名）只接收**正式发布**的 `android-vX.Y.Z`。
+- 两者包名和签名都不同，互相不能覆盖安装，所以不会串。
+- 只比较版本号的数字：同一个 0.4.0 再发 `-test.2` 不会被当成新版本，发新版要升 `versionName` 和 `versionCode`。
+- 每个发布带一个 `.apk` 附件（名字随意，比如 `Sonus-Android-0.4.0-test.apk`），GitHub 会自动记下它的 SHA-256。测试版发 `app/build/outputs/apk/preview/app-preview.apk`。
+- 调试构建（设备测试用的那种）不会自己检查，只有点"检查更新"才查，所以测试不会碰到真的 GitHub。
+
+在模拟器上试整个流程时，可以让测试版改读一个假的 GitHub：把地址写进 App 的外部文件夹（只有 adb 能写，其他 App 不能），只对测试版有效：
+
+```powershell
+& "$env:ANDROID_HOME\platform-tools\adb.exe" shell mkdir -p /sdcard/Android/data/com.creeperux.sonus.debug/files
+& "$env:ANDROID_HOME\platform-tools\adb.exe" shell "echo http://127.0.0.1:4651/ > /sdcard/Android/data/com.creeperux.sonus.debug/files/github-api.txt"
+```
+
+不管指向哪里，下载的 APK 都要通过上面的检查，系统也只接受同一个签名的更新。
 
 ## 动效和手感
 

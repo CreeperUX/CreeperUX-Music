@@ -75,6 +75,7 @@ import com.creeperux.sonus.core.PlayQueue
 import com.creeperux.sonus.core.PlaybackOrder
 import com.creeperux.sonus.core.Track
 import com.creeperux.sonus.playback.PlayerStatus
+import com.creeperux.sonus.ui.LocalGraph
 import com.creeperux.sonus.ui.LocalNav
 import com.creeperux.sonus.ui.LocalPlayer
 import com.creeperux.sonus.ui.LocalSession
@@ -519,7 +520,8 @@ fun TabletTopBar() {
                 Text(if (online) server.name else "未连接到服务器", style = Sonus.type.caption, color = c.text)
             }
             Spacer(Modifier.width(4.dp))
-            RoundButton("settings", "设置", { nav.go(Route.Settings) })
+            val update by LocalGraph.current.updater.available.collectAsState()
+            RoundButton("settings", if (update != null) "设置（有新版本）" else "设置", { nav.go(Route.Settings) }, badge = update != null)
             RoundButton("panel-right", "右侧面板", { nav.panelOpen.value = !nav.panelOpen.value }, on = nav.panelOpen.value)
         }
     }

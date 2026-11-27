@@ -42,6 +42,31 @@ class Settings(private val prefs: SharedPreferences) {
         get() = prefs.getString("librarySort", "recent").orEmpty()
         set(v) = prefs.edit { putString("librarySort", v) }
 
+    /** 设置 › 更新 › 启动时自动检查（每天一次）. */
+    var autoCheckUpdates: Boolean
+        get() = prefs.getBoolean("autoCheckUpdates", true)
+        set(v) = prefs.edit { putBoolean("autoCheckUpdates", v) }
+
+    /** When GitHub was last asked for a newer version (epoch ms; 0: never). */
+    var lastUpdateCheck: Long
+        get() = prefs.getLong("lastUpdateCheck", 0L)
+        set(v) = prefs.edit { putLong("lastUpdateCheck", v) }
+
+    /** The newer version that check found ("android-v0.4.0-test.1"; empty: none). */
+    var knownUpdate: String
+        get() = prefs.getString("knownUpdate", "").orEmpty()
+        set(v) = prefs.edit { putString("knownUpdate", v) }
+
+    /** The newer version the app last said was there, so that it says so once per version. */
+    var announcedUpdate: String
+        get() = prefs.getString("announcedUpdate", "").orEmpty()
+        set(v) = prefs.edit { putString("announcedUpdate", v) }
+
+    /** The version code that ran last: a new one has been installed when it differs (its download can go). */
+    var lastVersionCode: Long
+        get() = prefs.getLong("lastVersionCode", 0L)
+        set(v) = prefs.edit { putLong("lastVersionCode", v) }
+
     /**
      * This installation's own device id for Sonus Connect v2 (docs/protocol/connect.md: a random id made once per
      * installation, [A-Za-z0-9_-]{8,64}).

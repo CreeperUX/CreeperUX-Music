@@ -3,6 +3,7 @@ using Sonus.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Media;
 
 namespace Sonus.Controls;
@@ -20,7 +21,13 @@ public sealed class NowPlayingPane : UserControl
     private readonly TextBlock _heading = Ui.Text("正在播放", size: 15, foreground: Ui.Brush("TextPrimaryBrush"), bold: true);
     // Sonus Connect version 2: where the session played last, when no device plays it
     private readonly TextBlock _whereLine = Ui.Text("", size: 12, foreground: Ui.Brush("AccentTextBrush"));
+    private readonly StackPanel _titles;
     private readonly ContentControl _body = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch, IsTabStop = false };
+    // the devices' sheet: opaque, the panel's colour and bottom corners, over the body
+    private readonly Border _sheet = new() { Background = Ui.Brush("PanelBrush"), CornerRadius = new CornerRadius(0, 0, 8, 8), Visibility = Visibility.Collapsed };
+    private const float SheetRise = 48; // px the devices' sheet rises as it comes and sinks as it goes
+    private bool _sheetLeaving;
+    private int _sheetMoves;
     private string _mode = "now";
     private string? _shownTrack;
     private IReadOnlyList<LyricLine>? _lyrics;
@@ -33,10 +40,10 @@ public sealed class NowPlayingPane : UserControl
         _music = music; _shell = shell; _connect = connect; _session = session;
         // the same head as the library's: a 36 px line 12 px down (so both titles sit on one line), the button 16 px in
         var head = new Grid { Padding = new Thickness(16, 12, 16, 8), MinHeight = 56 };
-        var titles = Ui.Column(0, _heading, _whereLine);
-        titles.VerticalAlignment = VerticalAlignment.Center;
+        _titles = Ui.Column(0, _heading, _whereLine);
+        _titles.VerticalAlignment = VerticalAlignment.Center;
         _whereLine.Visibility = Visibility.Collapsed;
-        head.Children.Add(titles);
+        head.Children.Add(_titles);
         var close = Ui.IconButton(Glyphs.Close, "关闭右侧面板", (_, _) => CloseRequested?.Invoke(), 32, 12);
         close.HorizontalAlignment = HorizontalAlignment.Right; close.VerticalAlignment = VerticalAlignment.Center;
         close.Resources["ButtonForegroundPointerOver"] = Ui.Brush("TextPrimaryBrush");
@@ -45,7 +52,12 @@ public sealed class NowPlayingPane : UserControl
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition());
         root.Children.Add(head);
-        Grid.SetRow(_body, 1); root.Children.Add(_body);
+        // the devices are a sheet over the rest (Spotify's Connect menu): it rises from the panel's bottom edge, toward the
+        // bar's devices button, and sinks back into it; the body's area clips it
+        var bodyArea = new Grid { Children = { _body, _sheet } };
+        Grid.SetRow(bodyArea, 1); root.Children.Add(bodyArea);
+        var area = ElementCompositionPreview.GetElementVisual(bodyArea);
+        area.Clip = area.Compositor.CreateInsetClip();
         Content = root;
         music.PlayerChanged += () => { if (_mode == "now" && music.Queue.Current != _shownTrack) RenderNow(); else if (_mode == "queue") RenderQueue(); UpdateHeading(); };
         music.QueueChanged += () => { if (_mode == "queue") RenderQueue(); else RenderNext(); };
@@ -59,14 +71,57 @@ public sealed class NowPlayingPane : UserControl
     public event Action? ModeChanged;
     public string Mode => _mode;
 
-    public void Show(string mode)
+    /// <summary>Shows now playing, the queue or the devices. <paramref name="animate"/> false: the panel is coming in
+    /// itself, and that is the motion.</summary>
+    public void Show(string mode, bool animate = true)
     {
+        string was = _mode;
         _mode = mode;
-        if (mode == "queue") RenderQueue();
-        else if (mode == "devices") { _body.Content = _devices ??= new DevicesView(_music, _connect, _session); _devices.Refresh(force: true); }
-        else RenderNow(force: true);
+        animate &= was != mode;
+        if (mode == "devices")
+        {
+            _devices ??= new DevicesView(_music, _connect, _session);
+            _devices.Refresh(force: true);
+            OpenSheet(animate);
+        }
+        else
+        {
+            if (mode == "queue") RenderQueue(); else RenderNow(force: true);
+            if (was == "devices") CloseSheet(animate); // it sinks away from what is under it
+            else if (animate) Motion.Enter(_body, rise: 12); // now playing and the queue: one rises in where the other was
+        }
         UpdateHeading();
+        if (animate) Motion.Swap(_titles);
         ModeChanged?.Invoke();
+    }
+
+    /// <summary>The devices' sheet rises over the body and fades in (--cx-motion-sheet); once it is up, the body under it
+    /// leaves the layout (nothing hidden is reachable).</summary>
+    private void OpenSheet(bool animate)
+    {
+        int move = ++_sheetMoves;
+        bool leaving = _sheetLeaving;
+        _sheetLeaving = false;
+        _sheet.Child ??= _devices; // in the window only while shown: it follows the devices then
+        _sheet.Visibility = Visibility.Visible;
+        _sheet.IsHitTestVisible = true;
+        void Covered() { if (move == _sheetMoves) _body.Visibility = Visibility.Collapsed; }
+        if (leaving) Motion.SlideBack(_sheet); // it was sinking: back up from there
+        else if (animate) Motion.Enter(_sheet, rise: SheetRise, move: Motion.Sheet);
+        else { Covered(); return; }
+        if (Motion.Enabled) Motion.After(Motion.Sheet, Covered); else Covered();
+    }
+
+    /// <summary>The devices' sheet sinks and fades out (the exit curve), showing what is under it, then leaves.</summary>
+    private void CloseSheet(bool animate)
+    {
+        int move = ++_sheetMoves;
+        _body.Visibility = Visibility.Visible;
+        void Gone() { if (move != _sheetMoves) return; _sheetLeaving = false; _sheet.Visibility = Visibility.Collapsed; _sheet.Child = null; }
+        if (!animate || !Motion.Enabled) { Gone(); return; }
+        _sheetLeaving = true;
+        _sheet.IsHitTestVisible = false;
+        Motion.SlideOut(_sheet, Gone, drop: SheetRise);
     }
 
     private void UpdateHeading()

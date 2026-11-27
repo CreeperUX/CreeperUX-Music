@@ -51,6 +51,9 @@ class Navigator {
     val stack: List<Route> get() = stacks.getValue(tab.value)
     val current: Route get() = stack.last()
 
+    /** How the page on screen was reached: it slides in from the side it came from (Shell's page transitions). */
+    val move = mutableStateOf(Move.Tab)
+
     fun go(route: Route) {
         playerOpen.value = false
         val s = stacks.getValue(tab.value)
@@ -58,10 +61,14 @@ class Navigator {
             selectTab(Tab.entries.first { it.root == route })
             return
         }
-        if (s.last() != route) s.add(route)
+        if (s.last() != route) {
+            move.value = Move.Forward
+            s.add(route)
+        }
     }
 
     fun selectTab(t: Tab) {
+        move.value = if (tab.value == t) Move.Back else Move.Tab
         if (tab.value == t) {
             val s = stacks.getValue(t)
             while (s.size > 1) s.removeAt(s.lastIndex)
@@ -77,20 +84,28 @@ class Navigator {
         }
         val s = stacks.getValue(tab.value)
         if (s.size > 1) {
+            move.value = Move.Back
             s.removeAt(s.lastIndex)
             return true
         }
         if (tab.value != Tab.Home) {
+            move.value = Move.Tab
             tab.value = Tab.Home
             return true
         }
         return false
     }
 
+    /** Where a back would go: to a page (true), or (closing the player, leaving the app …) somewhere else. */
+    val backIsPage: Boolean get() = !playerOpen.value && stack.size > 1
+
     val canGoBack: Boolean get() = playerOpen.value || stack.size > 1 || tab.value != Tab.Home
 }
 
 enum class PlayerView { Cover, Lyrics, Queue }
+
+/** Forward to a new page, back to the one before, or to another tab. */
+enum class Move { Forward, Back, Tab }
 
 enum class PanelView { NowPlaying, Queue }
 

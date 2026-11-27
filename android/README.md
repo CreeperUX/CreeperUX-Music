@@ -89,10 +89,20 @@ $env:JAVA_HOME = "$env:LOCALAPPDATA\Programs\jdk\jdk-21.0.13.1+2"; $env:ANDROID_
 在 `android` 目录里：
 
 ```powershell
+.\gradlew.bat :app:assemblePreview
+```
+
+**发出去的测试版**用 `preview` 构建：APK 在 `app\build\outputs\apk\preview\app-preview.apk`。
+
+- 它和正式版的构建方式一样：R8 压缩优化、不可调试、带基线配置（`app/src/main/baseline-prof.txt`，加上各个库自带的配置），约 5 MB。
+- 它用调试密钥签名，包名是 `com.creeperux.sonus.debug`，名字是"Sonus 测试版"，所以能覆盖安装已有的测试版，也可以和正式版同时安装，数据互不相干。
+- Compose 在可调试的构建里明显更慢，所以不要把 `assembleDebug` 的 APK 发给人试用。
+
+```powershell
 .\gradlew.bat :app:assembleDebug
 ```
 
-测试版 APK 在 `app\build\outputs\apk\debug\app-debug.apk`。它的包名是 `com.creeperux.sonus.debug`，名字是"Sonus 测试版"，可以和正式版同时安装，数据互不相干。
+调试构建（`app\build\outputs\apk\debug\app-debug.apk`）包名和名字同上，给设备测试和调试用。
 
 ```powershell
 .\gradlew.bat :app:assembleRelease
@@ -228,6 +238,15 @@ node tools\server-library.mjs stop <目录>
 ```powershell
 & "$env:ANDROID_HOME\platform-tools\adb.exe" uninstall com.creeperux.sonus.debug
 ```
+
+## 动效和手感
+
+时长和缓动沿用 Windows 版的 `Motion.cs`，写在 `ui/Motion.kt`：按下 60 ms、松开 120 ms、进入 140 ms、页面推入 220 ms、面板 320 ms，缓动 cubic-bezier(.2, .8, .2, 1)。
+
+- `ui/PlayerSheet.kt`：手机的播放器是一个跟手的面板。迷你播放条上拖打开，播放器下拖收起，预测性返回手势也跟手。封面是两处共享的元素，三种操作都由同一个可拖动的过渡驱动。
+- `ui/PageHost.kt`：页面前进、后退、换标签各有不同的切换动画；预测性返回时页面缩小；返回时保留上一页的状态（比如滚动位置）。
+- `Modifier.entrance(i)`：页面刚出现时，前几行和前几张卡片依次淡入上浮；`Modifier.pressScale`：按压时缩小；`Haptics`：轻微振动。
+- 系统"移除动画"或动画缩放为 0 时，Compose 的动画直接到终点，入场动画和电平条不再出现（`LocalMotion`）。设备测试本来就关掉了动画（`testOptions.animationsDisabled`）。
 
 ## 图标和字体
 

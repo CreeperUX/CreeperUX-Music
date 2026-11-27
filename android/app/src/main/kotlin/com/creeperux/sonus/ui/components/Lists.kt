@@ -2,6 +2,7 @@ package com.creeperux.sonus.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -52,6 +53,7 @@ import com.creeperux.sonus.ui.LocalPlayer
 import com.creeperux.sonus.ui.LocalSession
 import com.creeperux.sonus.ui.Route
 import com.creeperux.sonus.ui.icons.KitIcon
+import com.creeperux.sonus.ui.rememberHaptics
 import com.creeperux.sonus.ui.theme.Shapes
 import com.creeperux.sonus.ui.theme.Sonus
 import kotlinx.coroutines.launch
@@ -78,12 +80,13 @@ fun TrackRow(
     val isCurrent = state.trackId == t.id
     val wide = LocalLayout.current != Layout.Phone
     var menu by remember { mutableStateOf(false) }
+    val haptics = rememberHaptics()
     Row(
         modifier
             .fillMaxWidth()
             .heightIn(min = 56.dp)
             .clip(RoundedCornerShape(Shapes.row))
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = { haptics.longPress(); menu = true }, onLongClickLabel = "更多")
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

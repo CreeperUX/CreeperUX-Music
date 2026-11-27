@@ -14,6 +14,9 @@
 //                                                               the library lists that cannot be played)
 //   node server-library.mjs stop <dir>
 //
+// The song whose file is removed is listed (search3, its album) only until the server starts again, which leaves it
+// out: run the tests that look for it (PlaybackFixesTest) between `users` and the next `start`, or with a new <dir>.
+//
 // The albums are made so that the tests find what they look for: a song that ends into a longer one, songs long enough
 // to take over more than 2 minutes in, and a playable song followed by the one whose file is gone.
 import { spawn } from 'node:child_process';

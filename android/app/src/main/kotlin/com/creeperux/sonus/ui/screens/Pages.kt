@@ -73,6 +73,7 @@ import com.creeperux.sonus.ui.components.TrackRow
 import com.creeperux.sonus.ui.components.pageTint
 import com.creeperux.sonus.ui.components.px
 import com.creeperux.sonus.ui.components.rememberCoverColor
+import com.creeperux.sonus.ui.entrance
 import com.creeperux.sonus.ui.pageTop
 import com.creeperux.sonus.ui.theme.Shapes
 import com.creeperux.sonus.ui.theme.Sonus
@@ -179,7 +180,7 @@ fun LazyListScope.trackItems(tracks: List<Track>, contextKind: String, contextId
         TrackRow(
             t, if (covers || contextKind != "album" || t.number <= 0) i + 1 else t.number, covers,
             onClick = { session.contextOf(contextKind, contextId, ids ?: tracks.map { it.id }).let { (ctx, list) -> player.play(ctx, list, t.id) } },
-            modifier = Modifier.padding(horizontal = 8.dp).testTag("track-row"),
+            modifier = Modifier.entrance(i + 1).padding(horizontal = 8.dp).testTag("track-row"),
             playlistId = playlistId,
             showAlbum = contextKind != "album",
         )

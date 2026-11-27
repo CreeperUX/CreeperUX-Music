@@ -1,0 +1,4 @@
+# Sonus's own code, compiled ahead of time on install (the profile installer hands it to ART; Compose, Material 3,
+# Media3 and the other libraries bring their own profiles, which are merged with this one). Small enough to take whole.
+HSPLcom/creeperux/sonus/**->**(**)**
+Lcom/creeperux/sonus/**;

@@ -48,6 +48,7 @@ import com.creeperux.sonus.ui.LocalSession
 import com.creeperux.sonus.ui.components.LevelBars
 import com.creeperux.sonus.ui.components.RoundButton
 import com.creeperux.sonus.ui.icons.KitIcon
+import com.creeperux.sonus.ui.rememberHaptics
 import com.creeperux.sonus.ui.theme.Shapes
 import com.creeperux.sonus.ui.theme.Sonus
 
@@ -207,12 +208,14 @@ private fun CurrentDeviceCard(link: SessionLink, d: SessionDevice, status: Strin
 private fun OtherDevice(link: SessionLink, d: SessionDevice, done: () -> Unit) {
     val c = Sonus.colors
     var volumeOpen by remember(d.id) { mutableStateOf(false) }
+    val haptics = rememberHaptics()
     Column(Modifier.fillMaxWidth()) {
         Row(
             Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(Shapes.row))
                 .clickable(enabled = d.canPlay) {
+                    haptics.confirm()
                     link.transfer(d.id)
                     done()
                 }

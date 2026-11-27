@@ -236,6 +236,9 @@ public static class Motion
 
     /// <summary>A quick swell and settle (a like; <paramref name="amount"/> smaller for a changing Play / Pause icon): one
     /// key-frame animation, so it never stays swollen waiting for the UI thread.</summary>
+    /// <remarks>Animates the element's composition visual. Never on an element that has <see cref="Press"/> (or any other
+    /// use of UIElement.Scale / CenterPoint): once those are set, touching the visual's Scale throws
+    /// UnauthorizedAccessException. Pop the icon inside instead (<see cref="PopIcon"/>).</remarks>
     public static void Pop(UIElement e, float amount = 1.28f)
     {
         if (!Enabled || e is not FrameworkElement fe) return;

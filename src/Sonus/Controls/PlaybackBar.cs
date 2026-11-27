@@ -103,7 +103,8 @@ public sealed class PlaybackBar : UserControl
         // left: the song
         _title = Ui.Link("", () => { if (Shown is { } t) shell.Navigate($"album:{t.AlbumId}"); }, 14, Ui.Brush("TextPrimaryBrush"), bold: true);
         _artist = Ui.Link("", () => { if (Shown is { } t) shell.Navigate($"artist:{t.ArtistId}"); }, 12.5);
-        _like = Ui.IconButton(Glyphs.Heart, "喜欢", async (_, _) => { if (Shown is { } t) { Motion.Pop(_like!); await shell.Run(() => music.SetLikedAsync(t.Id, !t.Liked)); } }, 32, 15);
+        // the heart swells inside the button: Press scales the button itself, so Pop on the button would throw (see Motion.Pop)
+        _like = Ui.IconButton(Glyphs.Heart, "喜欢", async (_, _) => { if (Shown is { } t) { Motion.PopIcon(_like!, 1.28f); await shell.Run(() => music.SetLikedAsync(t.Id, !t.Liked)); } }, 32, 15);
         Motion.Press(_like);
         _where.Visibility = Visibility.Collapsed;
         AutomationProperties.SetLiveSetting(_where, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);

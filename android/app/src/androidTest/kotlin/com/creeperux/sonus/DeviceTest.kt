@@ -17,6 +17,10 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextReplacement
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeDown
+import androidx.compose.ui.test.swipeLeft
+import androidx.compose.ui.test.swipeRight
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -296,6 +300,62 @@ class DeviceTest {
         shot("09-two-step-browser-signed-in")
         instrumentation.runOnMainSync { graph.signOut() }
         compose.waitUntil(10_000) { exists("signin") }
+    }
+
+    @Test
+    fun swipingCoversAndMiniPlayerSkipsBetweenSongs() {
+        signIn()
+        compose.waitUntil(30_000) { exists("home") }
+        val session = (graph.state.value as AppState.Ready).session
+        val album = TestServer.playableAlbum(session.lib)
+        assertThat(album.trackIds.size).isAtLeast(2)
+        val first = album.trackIds[0]
+        val second = album.trackIds[1]
+        instrumentation.runOnMainSync {
+            val (ctx, ids) = session.contextOf("album", album.id)
+            graph.playback.play(ctx, ids, first)
+        }
+        waitFor(what = "playing first track") { state().trackId == first && state().status == PlayerStatus.Playing }
+
+        if (exists("mini-player")) {
+            // phone mini player: swipe left to next, seek past 3 s, swipe right straight back to previous
+            compose.onNodeWithTag("mini-player").performTouchInput { swipeLeft() }
+            waitFor(what = "mini player swiped next") { state().trackId == second }
+            instrumentation.runOnMainSync { graph.playback.seek(10.0) }
+            waitFor(what = "seeked past 3 s") { graph.playback.position.value >= 5.0 }
+            compose.onNodeWithTag("mini-player").performTouchInput { swipeRight() }
+            waitFor(what = "mini player swiped previous past 3 s") { state().trackId == first }
+
+            // phone full player cover: open, swipe left to next, seek past 3 s, swipe right back to previous
+            compose.onNodeWithTag("mini-player").performClick()
+            compose.waitUntil(5_000) { exists("player-cover") }
+            compose.onNodeWithTag("player-cover", useUnmergedTree = true).performTouchInput { swipeLeft() }
+            waitFor(what = "full player swiped next") { state().trackId == second }
+            instrumentation.runOnMainSync { graph.playback.seek(10.0) }
+            waitFor(what = "seeked past 3 s in full player") { graph.playback.position.value >= 5.0 }
+            compose.onNodeWithTag("player-cover", useUnmergedTree = true).performTouchInput { swipeRight() }
+            waitFor(what = "full player swiped previous past 3 s") { state().trackId == first }
+            // at track 0: swiping right bounces back without changing track
+            compose.onNodeWithTag("player-cover", useUnmergedTree = true).performTouchInput { swipeRight() }
+            compose.waitForIdle()
+            assertThat(state().trackId).isEqualTo(first)
+            // vertical drag down on the cover still dismisses the full player
+            compose.onNodeWithTag("player-cover", useUnmergedTree = true).performTouchInput { swipeDown() }
+            compose.waitUntil(5_000) { exists("mini-player") }
+        } else {
+            // tablet right panel cover: swipe left to next, seek past 3 s, swipe right back to previous
+            compose.waitUntil(5_000) { exists("panel-cover") }
+            compose.onNodeWithTag("panel-cover").performTouchInput { swipeLeft() }
+            waitFor(what = "tablet panel swiped next") { state().trackId == second }
+            instrumentation.runOnMainSync { graph.playback.seek(10.0) }
+            waitFor(what = "seeked past 3 s on tablet") { graph.playback.position.value >= 5.0 }
+            compose.onNodeWithTag("panel-cover").performTouchInput { swipeRight() }
+            waitFor(what = "tablet panel swiped previous past 3 s") { state().trackId == first }
+            compose.onNodeWithTag("panel-cover").performTouchInput { swipeRight() }
+            compose.waitForIdle()
+            assertThat(state().trackId).isEqualTo(first)
+        }
+        instrumentation.runOnMainSync { graph.playback.pause() }
     }
 }
 

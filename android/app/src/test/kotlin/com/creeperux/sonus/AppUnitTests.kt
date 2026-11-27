@@ -1,20 +1,44 @@
 package com.creeperux.sonus
 
 import android.content.Context
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.Snapshot
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextReplacement
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeDown
+import androidx.compose.ui.test.swipeLeft
+import androidx.compose.ui.test.swipeRight
+import androidx.compose.ui.unit.dp
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.creeperux.sonus.core.Login
+import com.creeperux.sonus.core.SubsonicClient
 import com.creeperux.sonus.data.LoginStore
 import com.creeperux.sonus.data.SecretBox
 import com.creeperux.sonus.session.MusicSession
+import com.creeperux.sonus.ui.Haptics
+import com.creeperux.sonus.ui.HorizontalDragHandler
 import com.creeperux.sonus.ui.Navigator
 import com.creeperux.sonus.ui.Route
+import com.creeperux.sonus.ui.SonusRootTransition
 import com.creeperux.sonus.ui.Tab
+import com.creeperux.sonus.ui.TrackSwipeController
+import com.creeperux.sonus.ui.VerticalDragHandler
+import com.creeperux.sonus.ui.directionalDrag
 import com.creeperux.sonus.ui.screens.SignInScreen
 import com.creeperux.sonus.ui.theme.SonusTheme
 import com.google.common.truth.Truth.assertThat
@@ -145,5 +169,153 @@ class SignInScreenTest {
         compose.setContent { SonusTheme { SignInScreen(graph, "这次登录已被撤销，请重新登录。") } }
         compose.onNodeWithTag("signin-error").assertExists() // below the fold on Robolectric's small default screen
         compose.onNodeWithText("这次登录已被撤销，请重新登录。").assertExists()
+    }
+}
+
+@RunWith(AndroidJUnit4::class)
+class TrackSwipeUiTest {
+    @get:Rule
+    val compose = createComposeRule()
+
+    @Test
+    fun directionalDragLocksAxisAndPreservesTap() {
+        var taps = 0
+        var hEnds = 0
+        var vEnds = 0
+        val h = object : HorizontalDragHandler {
+            override fun onStart() {}
+            override fun onDrag(deltaXFromStart: Float) {}
+            override fun onEnd(velocityX: Float) { hEnds++ }
+            override fun onCancel() {}
+        }
+        val v = object : VerticalDragHandler {
+            override fun onStart(screenY: Float) {}
+            override fun onDrag(screenY: Float) {}
+            override fun onEnd(velocityY: Float) { vEnds++ }
+            override fun onCancel() {}
+        }
+        compose.setContent {
+            Box(Modifier.size(200.dp).directionalDrag(vertical = v, horizontal = h).clickable { taps++ }.testTag("pad"))
+        }
+        compose.onNodeWithTag("pad").performClick()
+        assertThat(taps).isEqualTo(1)
+        assertThat(hEnds).isEqualTo(0)
+        assertThat(vEnds).isEqualTo(0)
+
+        compose.onNodeWithTag("pad").performTouchInput { swipeLeft(startX = 180f, endX = 20f) }
+        assertThat(hEnds).isEqualTo(1)
+        assertThat(vEnds).isEqualTo(0)
+        assertThat(taps).isEqualTo(1)
+
+        compose.onNodeWithTag("pad").performTouchInput { swipeDown(startY = 20f, endY = 180f) }
+        assertThat(vEnds).isEqualTo(1)
+        assertThat(hEnds).isEqualTo(1)
+        assertThat(taps).isEqualTo(1)
+    }
+
+    @Test
+    fun trackSwipeSkipsRespectsBoundariesAndHandlesReducedMotion() {
+        var nexts = 0
+        var prevs = 0
+        var track = "t1"
+        var canNext = true
+        var canPrev = false
+        var motion = true
+        lateinit var controller: TrackSwipeController
+        compose.setContent {
+            val scope = rememberCoroutineScope()
+            controller = TrackSwipeController(
+                scope = scope,
+                flickPxPerSec = 700f,
+                haptics = Haptics {},
+                motionEnabled = { motion },
+                canSkipNext = { canNext },
+                canSkipPrevious = { canPrev },
+                currentTrackId = { track },
+                onSkipNext = { nexts++; track = "t2"; canPrev = true },
+                onSkipPrevious = { prevs++; track = "t1"; canPrev = false },
+            ).apply { stridePx = 200f }
+            Box(Modifier.size(200.dp).directionalDrag(horizontal = controller).testTag("swipe"))
+        }
+        // at the first track (canPrev = false): swiping right rubber-bands and does not skip
+        compose.onNodeWithTag("swipe").performTouchInput { swipeRight(startX = 20f, endX = 180f) }
+        compose.waitForIdle()
+        assertThat(prevs).isEqualTo(0)
+        assertThat(controller.offset.value).isWithin(0.5f).of(0f)
+
+        // swiping left advances to next track
+        compose.onNodeWithTag("swipe").performTouchInput { swipeLeft(startX = 180f, endX = 20f) }
+        compose.waitForIdle()
+        assertThat(nexts).isEqualTo(1)
+        assertThat(track).isEqualTo("t2")
+
+        // with animations disabled (Remove animations), swiping right still skips straight back immediately
+        motion = false
+        compose.onNodeWithTag("swipe").performTouchInput { swipeRight(startX = 20f, endX = 180f) }
+        compose.waitForIdle()
+        assertThat(prevs).isEqualTo(1)
+        assertThat(track).isEqualTo("t1")
+        assertThat(controller.offset.value).isWithin(0.5f).of(0f)
+    }
+
+    @Test
+    fun rubberBandIsBoundedAndMonotonic() {
+        val small = TrackSwipeController.rubberBand(20f, 50f)
+        val large = TrackSwipeController.rubberBand(500f, 50f)
+        assertThat(small).isGreaterThan(0f)
+        assertThat(small).isLessThan(large)
+        assertThat(large).isLessThan(50f)
+        assertThat(TrackSwipeController.rubberBand(-500f, 50f)).isEqualTo(-large)
+    }
+
+    @Test
+    fun sonusRootTransitionRendersEachSlotFromItsOwnTargetState() {
+        val login = Login("http://127.0.0.1:4633", "demo", "s", "t")
+        val session = MusicSession(SubsonicClient(login, "Sonus (Test)"))
+        var state by mutableStateOf<AppState>(AppState.Connecting(login))
+        var activeMainCount = 0
+        var maxConcurrentMain = 0
+        var activeWaitingCount = 0
+        compose.mainClock.autoAdvance = false
+        compose.setContent {
+            SonusRootTransition(state) { s ->
+                when (s) {
+                    is AppState.Ready -> {
+                        DisposableEffect(s.session) {
+                            activeMainCount++
+                            if (activeMainCount > maxConcurrentMain) maxConcurrentMain = activeMainCount
+                            onDispose { activeMainCount-- }
+                        }
+                        Box(Modifier.size(10.dp).testTag("main"))
+                    }
+                    else -> {
+                        DisposableEffect(Unit) {
+                            activeWaitingCount++
+                            onDispose { activeWaitingCount-- }
+                        }
+                        Box(Modifier.size(10.dp).testTag("waiting"))
+                    }
+                }
+            }
+        }
+        compose.mainClock.advanceTimeByFrame()
+        assertThat(activeWaitingCount).isEqualTo(1)
+        assertThat(activeMainCount).isEqualTo(0)
+
+        compose.runOnUiThread {
+            state = AppState.Ready(session)
+            Snapshot.sendApplyNotifications()
+        }
+        // mid-transition while both slots are composed: exiting slot stays Waiting and only entering slot is Main
+        compose.mainClock.advanceTimeBy(60)
+        assertThat(activeWaitingCount).isEqualTo(1)
+        assertThat(activeMainCount).isEqualTo(1)
+        assertThat(maxConcurrentMain).isEqualTo(1)
+
+        // after fade completes: only Main remains and never more than one Main existed concurrently
+        compose.mainClock.advanceTimeBy(300)
+        assertThat(activeWaitingCount).isEqualTo(0)
+        assertThat(activeMainCount).isEqualTo(1)
+        assertThat(maxConcurrentMain).isEqualTo(1)
     }
 }

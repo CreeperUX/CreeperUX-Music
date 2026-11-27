@@ -120,6 +120,8 @@ fun Modifier.directionalDrag(
                         val event = awaitPointerEvent()
                         val change = event.changes.firstOrNull { it.id == pointerId } ?: break
                         if (!change.pressed) {
+                            // Compose turns ACTION_CANCEL (e.g. system back pilfering pointers) into a pre-consumed up
+                            if (change.isConsumed) break
                             when (axis) {
                                 DragAxis.Horizontal -> {
                                     finished = true

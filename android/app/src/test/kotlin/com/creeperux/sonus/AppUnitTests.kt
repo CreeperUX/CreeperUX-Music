@@ -11,6 +11,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -211,6 +212,47 @@ class TrackSwipeUiTest {
         assertThat(vEnds).isEqualTo(1)
         assertThat(hEnds).isEqualTo(1)
         assertThat(taps).isEqualTo(1)
+    }
+
+    @Test
+    fun systemCancelAfterHorizontalLockIsACancelNotARelease() {
+        val calls = mutableListOf<String>()
+        val h = object : HorizontalDragHandler {
+            override fun onStart() { calls += "start" }
+            override fun onDrag(deltaXFromStart: Float) {}
+            override fun onEnd(velocityX: Float) { calls += "end(${velocityX.toInt()})" }
+            override fun onCancel() { calls += "cancel" }
+        }
+        compose.setContent { Box(Modifier.size(300.dp).directionalDrag(horizontal = h).testTag("pad")) }
+        // a quick flick from the left edge that the system then claims (pilferPointers -> ACTION_CANCEL)
+        compose.onNodeWithTag("pad").performTouchInput {
+            down(Offset(2f, 150f))
+            moveBy(Offset(40f, 0f), delayMillis = 16)
+            moveBy(Offset(40f, 0f), delayMillis = 16)
+            cancel(delayMillis = 16)
+        }
+        compose.waitForIdle()
+        assertThat(calls).containsExactly("start", "cancel").inOrder()
+    }
+
+    @Test
+    fun systemCancelAfterVerticalLockIsACancelNotARelease() {
+        val calls = mutableListOf<String>()
+        val v = object : VerticalDragHandler {
+            override fun onStart(screenY: Float) { calls += "start" }
+            override fun onDrag(screenY: Float) {}
+            override fun onEnd(velocityY: Float) { calls += "end(${velocityY.toInt()})" }
+            override fun onCancel() { calls += "cancel" }
+        }
+        compose.setContent { Box(Modifier.size(300.dp).directionalDrag(vertical = v).testTag("pad")) }
+        compose.onNodeWithTag("pad").performTouchInput {
+            down(Offset(150f, 20f))
+            moveBy(Offset(0f, 40f), delayMillis = 16)
+            moveBy(Offset(0f, 40f), delayMillis = 16)
+            cancel(delayMillis = 16)
+        }
+        compose.waitForIdle()
+        assertThat(calls).containsExactly("start", "cancel").inOrder()
     }
 
     @Test

@@ -147,3 +147,38 @@ fn a_loaded_with_the_previous_songs_duration_neither_changes_the_duration_nor_ho
     session.message(&mut at!(518_000), "pc-study-01", &seek);
     assert_eq!(session.session()["positionMs"], 285_000);
 }
+
+/// Swiping right in the player skips straight to the previous song even past 3 s (`force: true`), while the previous
+/// button keeps restarting the current song past 3 s.
+#[test]
+fn previous_with_force_skips_past_the_three_second_restart() {
+    let song = |title: &str| Song { title: Some(title.into()), artist: None, album: None, album_id: None, cover_art: None, duration_ms: Some(180_000) };
+    let library = Vectors(HashMap::from([("t1".into(), song("One")), ("t2".into(), song("Two")), ("t3".into(), song("Three"))]));
+    let mut random = |_: usize| 0;
+    let mut session = ConnectSession::new(10_000, MAX_DEVICES);
+    macro_rules! at {
+        ($now:expr) => {
+            Env { now: $now, random: &mut random, library: &library }
+        };
+    }
+    let hello = json!({ "type": "hello", "deviceId": "pc-study-01", "name": "PC", "kind": "desktop", "canPlay": true, "client": "test" });
+    session.hello(&mut at!(0), &hello);
+    let play = json!({ "type": "command", "action": "playContext", "ids": ["t1", "t2", "t3"], "startId": "t3" });
+    session.message(&mut at!(1_000), "pc-study-01", &play);
+    // past 3 s: plain previous restarts the song
+    let prev = json!({ "type": "command", "action": "previous" });
+    session.message(&mut at!(10_000), "pc-study-01", &prev);
+    assert_eq!(session.session()["current"]["trackId"], "t3");
+    assert_eq!(session.session()["positionMs"], 0);
+    // past 3 s with force: true: straight to the previous song
+    let forced = json!({ "type": "command", "action": "previous", "force": true });
+    session.message(&mut at!(20_000), "pc-study-01", &forced);
+    assert_eq!(session.session()["current"]["trackId"], "t2");
+    assert_eq!(session.session()["positionMs"], 0);
+    // still works at the start of the list without panicking (stays on first song at 0)
+    session.message(&mut at!(30_000), "pc-study-01", &forced);
+    assert_eq!(session.session()["current"]["trackId"], "t1");
+    session.message(&mut at!(40_000), "pc-study-01", &forced);
+    assert_eq!(session.session()["current"]["trackId"], "t1");
+    assert_eq!(session.session()["positionMs"], 0);
+}

@@ -801,7 +801,7 @@ impl ConnectSession {
             }
             Some("previous") => {
                 self.need()?;
-                if self.position_at(t) > 3000 {
+                if boolean(c.get("force")) != Some(true) && self.position_at(t) > 3000 {
                     self.position_ms = 0;
                     self.at = t;
                 } else {

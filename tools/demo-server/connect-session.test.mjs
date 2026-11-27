@@ -330,7 +330,7 @@ test('session: a stale remove still removes the rest; a stale move moves nothing
   assert.equal(w.replies(w.cmd(A, 'pause', { rev: w.s.rev - 1 }), 'error')[0].code, 'stale');
 });
 
-test('session: previous more than 3 s into a song goes back to its start', () => {
+test('session: previous more than 3 s into a song goes back to its start; force skips straight to the previous song', () => {
   const w = world();
   w.hello(A);
   w.cmd(A, 'playContext', { ids: all, startId: 't5' });
@@ -339,6 +339,9 @@ test('session: previous more than 3 s into a song goes back to its start', () =>
   assert.deepEqual([w.s.current.trackId, w.s.positionMs], ['t5', 0]);
   w.cmd(A, 'previous');
   assert.equal(w.s.current.trackId, 't4');
+  w.later(10_000);
+  w.cmd(A, 'previous', { force: true });
+  assert.deepEqual([w.s.current.trackId, w.s.positionMs], ['t3', 0]);
 });
 
 test('session: kept across a restart with no active device, paused where it was', () => {

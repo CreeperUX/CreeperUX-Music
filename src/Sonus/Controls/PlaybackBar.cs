@@ -29,7 +29,7 @@ public sealed class PlaybackBar : UserControl
     private readonly ToggleButton _shuffle, _repeat, _lyrics, _queue, _devices;
     private readonly Slider _progress = new() { Minimum = 0, Maximum = 1, StepFrequency = 0.1, IsThumbToolTipEnabled = false, VerticalAlignment = VerticalAlignment.Center };
     private readonly TextBlock _at = Ui.Text("0:00", "FigureTextStyle"), _length = Ui.Text("0:00", "FigureTextStyle");
-    private readonly Slider _volume = new() { Minimum = 0, Maximum = 100, Width = 110, StepFrequency = 1, VerticalAlignment = VerticalAlignment.Center };
+    private readonly Slider _volume = new() { Minimum = 0, Maximum = 100, Width = 110, StepFrequency = 1, IsThumbToolTipEnabled = false, VerticalAlignment = VerticalAlignment.Center };
     private readonly Button _mute;
     private readonly TextBlock _error = Ui.Text("", size: 12, foreground: Ui.Brush("BadBrush"));
     private readonly TextBlock _where = Ui.Text("", size: 12, foreground: Ui.Brush("AccentTextBrush"));
@@ -137,13 +137,16 @@ public sealed class PlaybackBar : UserControl
         var transport = Ui.Row(12, _shuffle, _prev, _play, _next, _repeat);
         transport.HorizontalAlignment = HorizontalAlignment.Center;
         AutomationProperties.SetName(_progress, "播放进度");
+        StyleSlimSlider(_progress, whiteAtRest: true);
         _progress.ValueChanged += (_, e) => { if (!_syncing) { _seeking = true; _at.Text = Formats.Duration(e.NewValue); } };
         _progress.PointerCaptureLost += (_, _) => Commit();
         _progress.KeyUp += (_, _) => Commit();
+        var atCol = new ColumnDefinition { Width = new GridLength(48) };
+        var lenCol = new ColumnDefinition { Width = new GridLength(48) };
         var progress = new Grid { ColumnSpacing = 8, MaxWidth = 720 };
-        progress.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(48) });
+        progress.ColumnDefinitions.Add(atCol);
         progress.ColumnDefinitions.Add(new ColumnDefinition());
-        progress.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(48) });
+        progress.ColumnDefinitions.Add(lenCol);
         _at.HorizontalAlignment = HorizontalAlignment.Right; _at.VerticalAlignment = VerticalAlignment.Center; _length.VerticalAlignment = VerticalAlignment.Center;
         progress.Children.Add(_at);
         Grid.SetColumn(_progress, 1); progress.Children.Add(_progress);
@@ -163,6 +166,7 @@ public sealed class PlaybackBar : UserControl
         output.Flyout = OutputMenu();
         _mute = Ui.IconButton(Glyphs.Volume, "静音", (_, _) => { if (VolumeTarget is { } d) _session!.SetVolume(d.Id, null, !d.Muted); else music.SetMuted(!music.Muted); }, 32, 15);
         AutomationProperties.SetName(_volume, "音量");
+        StyleSlimSlider(_volume, whiteAtRest: false);
         _volume.ValueChanged += (_, e) =>
         {
             if (_syncing) return;
@@ -183,10 +187,12 @@ public sealed class PlaybackBar : UserControl
         right.HorizontalAlignment = HorizontalAlignment.Right; right.VerticalAlignment = VerticalAlignment.Center;
 
         // the sides are equal (foobar2k's 1 : 2 : 1), so the transport sits on the window's middle line
+        var leftCol = new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MinWidth = 240 };
+        var rightCol = new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MinWidth = 240 };
         var root = new Grid { Padding = new Thickness(16, 8, 16, 8), ColumnSpacing = 12, Height = 88 }; // the transport (40) and the progress row (32) between 8 px paddings
-        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MinWidth = 240 });
+        root.ColumnDefinitions.Add(leftCol);
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2, GridUnitType.Star) });
-        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MinWidth = 240 });
+        root.ColumnDefinitions.Add(rightCol);
         root.Children.Add(song);
         Grid.SetColumn(middle, 1); root.Children.Add(middle);
         Grid.SetColumn(right, 2); root.Children.Add(right);
@@ -198,8 +204,19 @@ public sealed class PlaybackBar : UserControl
         _elsewhere.Content = Ui.Row(6, Ui.Icon(Glyphs.Devices, 14, Ui.Brush("OnAccentBrush")), _elsewhereText);
         _elsewhere.Click += (_, _) => { _devices.IsChecked = true; DevicesToggled?.Invoke(true); };
         Content = Ui.Column(0, root, _elsewhere);
-        // a narrow window: a shorter volume slider, so the end's buttons stay in their column
-        SizeChanged += (_, e) => _volume.Width = e.NewSize.Width < 900 ? 72 : 110;
+        // narrow windows: tighten both ends so the seek bar keeps comfortable room instead of collapsing to a stub
+        SizeChanged += (_, e) =>
+        {
+            bool narrow = e.NewSize.Width < 900;
+            _volume.Width = narrow ? 58 : 110;
+            right.Spacing = narrow ? 1 : 4;
+            leftCol.MinWidth = narrow ? 172 : 240;
+            rightCol.MinWidth = narrow ? 222 : 240;
+            songText.MaxWidth = narrow ? 116 : 240;
+            atCol.Width = lenCol.Width = new GridLength(narrow ? 38 : 48);
+            progress.ColumnSpacing = narrow ? 6 : 8;
+            root.ColumnSpacing = narrow ? 8 : 12;
+        };
 
         music.PlayerChanged += Sync;
         music.TrackChanged += t => { if (t.Id == Shown?.Id) Sync(); };
@@ -214,6 +231,26 @@ public sealed class PlaybackBar : UserControl
         Loaded += (_, _) => Glide(Remote?.State?.Playing ?? _music.State == PlayerState.Playing);
         Unloaded += (_, _) => Glide(false);
         Sync();
+    }
+
+    /// <summary>Matches DevicesView's slim 3 px track / 12 px thumb geometry; the seek bar sits in white at rest and
+    /// lights up in amber on hover or drag (foobar2k's .ui-seek).</summary>
+    private static void StyleSlimSlider(Slider s, bool whiteAtRest)
+    {
+        s.Resources["SliderHorizontalHeight"] = 24.0;
+        s.Resources["SliderTrackThemeHeight"] = 3.0;
+        s.Resources["SliderHorizontalThumbWidth"] = 12.0;
+        s.Resources["SliderHorizontalThumbHeight"] = 12.0;
+        s.Resources["SliderInnerThumbWidth"] = 6.0;
+        s.Resources["SliderInnerThumbHeight"] = 6.0;
+        s.Resources["SliderThumbCornerRadius"] = new CornerRadius(6);
+        if (!whiteAtRest) return;
+        s.Resources["SliderTrackValueFill"] = Ui.Brush("TextPrimaryBrush");
+        s.Resources["SliderTrackValueFillPointerOver"] = Ui.Brush("AccentBrush");
+        s.Resources["SliderTrackValueFillPressed"] = Ui.Brush("AccentBrush");
+        s.Resources["SliderThumbBackground"] = Ui.Brush("TextPrimaryBrush");
+        s.Resources["SliderThumbBackgroundPointerOver"] = Ui.Brush("AccentHiBrush");
+        s.Resources["SliderThumbBackgroundPressed"] = Ui.Brush("AccentBrush");
     }
 
     public event Action<bool>? QueueToggled;

@@ -335,6 +335,7 @@ class SubsonicClient(login: Login, val clientName: String, private val http: OkH
         val Shared: OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
+            .addNetworkInterceptor(Redirects.guard) // no redirect to another host, nor from https:// down to http://
             .build()
 
         /** Told about every request that took 500 ms or more ("getPlaylist 812 ms"), for the app's log. */

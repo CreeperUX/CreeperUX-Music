@@ -66,6 +66,7 @@ object DeviceLogin {
         val candidates = mutableListOf(baseUrl)
         if (!server.trim().startsWith("http", ignoreCase = true) && baseUrl.startsWith("http://")) candidates += "https://" + baseUrl.removePrefix("http://")
         var last: Exception? = null
+        var refused: RedirectRefusedException? = null
         for (candidate in candidates) {
             try {
                 val url = "$candidate/rest/getOpenSubsonicExtensions.view?v=${SubsonicClient.API_VERSION}&c=Sonus&f=json"
@@ -84,11 +85,14 @@ object DeviceLogin {
                     return server to J.array(body, "openSubsonicExtensions").any { J.str(it, "name") == EXTENSION }
                 }
             } catch (e: IOException) {
+                if (e is RedirectRefusedException) refused = e
                 last = e
             } catch (e: SerializationException) {
                 last = e
             }
         }
+        // a redirect that was not followed (to another host, or down to http://) says so
+        refused?.let { throw ServerUnreachableException(it.message.orEmpty(), it) }
         throw ServerUnreachableException("连不上 $baseUrl。检查地址和网络。", last)
     }
 

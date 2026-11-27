@@ -74,13 +74,10 @@ public sealed class SubsonicClient
 
     public SubsonicClient(Login login, string clientName, HttpClient? http = null)
     {
-        _login = login; ClientName = clientName; _http = http ?? Shared;
+        Login = login; ClientName = clientName; _http = http ?? Shared;
     }
 
-    /// <summary>The sign-in. Its server is the address the server answers at: when a request is redirected to another
-    /// (http:// to https://, a moved host), that one from then on, for every request, the streams and covers too.</summary>
-    public Login Login { get => Volatile.Read(ref _login); private set => Volatile.Write(ref _login, value); }
-    private Login _login;
+    public Login Login { get; }
     /// <summary>What the server lists this client as (Navidrome: Players, and who saved the play queue).</summary>
     public string ClientName { get; }
     public HashSet<string> Extensions { get; } = [];
@@ -167,7 +164,7 @@ public sealed class SubsonicClient
         try { await client.CallAsync("ping", null, cancel: cancel).ConfigureAwait(false); }
         catch (ServerUnreachableException) { throw new ServerUnreachableException($"连不上 {baseUrl}。检查地址和网络；服务器在外网时需要 HTTPS。"); }
         catch (JsonException) { throw new ServerUnreachableException($"{baseUrl} 不像是 Navidrome（没有 Subsonic API 的回应）。"); }
-        return client.Login; // at the address the server answered at, when it redirected
+        return login;
     }
 
     // ---------------------------------------------------------------- requests
@@ -229,19 +226,16 @@ public sealed class SubsonicClient
     private async Task<JsonElement> CallOnceAsync(string method, IEnumerable<KeyValuePair<string, object?>>? extra, bool post, CancellationToken cancel)
     {
         HttpResponseMessage res;
-        string url;
         var parameters = Params(extra);
         post = post && Extensions.Contains("formPost"); // a server that does not say it reads POSTed forms gets GET
         try
         {
-            url = $"{Login.Server}/rest/{method}.view";
-            // a POST stays a POST through a redirect (HttpClient would send it on as a GET without the form)
+            string url = $"{Login.Server}/rest/{method}.view";
             res = post
-                ? await Redirects.PostAsync(_http, url, () => new FormUrlEncodedContent(parameters), cancel).ConfigureAwait(false)
+                ? await _http.PostAsync(url, new FormUrlEncodedContent(parameters), cancel).ConfigureAwait(false)
                 : await _http.GetAsync($"{url}?{Query(parameters)}", cancel).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancel.IsCancellationRequested) { throw; }
-        catch (RedirectRefusedException ex) { throw new SubsonicException(0, ex.Message); }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
             SetOnline(false);
@@ -252,8 +246,6 @@ public sealed class SubsonicClient
             if (!res.IsSuccessStatusCode) throw new SubsonicException(0, $"服务器返回了 {(int)res.StatusCode} {res.ReasonPhrase}。") { HttpStatus = (int)res.StatusCode };
             using var doc = JsonDocument.Parse(await res.Content.ReadAsStreamAsync(cancel).ConfigureAwait(false));
             if (!doc.RootElement.TryGetProperty("subsonic-response", out var body)) throw new JsonException("not a Subsonic answer");
-            // redirected: the address it led to is the server's from now on
-            if (Redirects.MovedBase(new Uri(url), res.RequestMessage?.RequestUri, $"/rest/{method}.view") is { } moved) Login = Login with { Server = moved };
             SetOnline(true);
             if (Str(body, "status") != "ok")
             {

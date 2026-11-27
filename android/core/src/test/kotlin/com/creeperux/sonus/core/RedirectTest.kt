@@ -7,8 +7,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
+import okhttp3.Response
 import org.junit.AfterClass
+import org.junit.Assert.assertThrows
 import org.junit.Assume.assumeTrue
 import org.junit.BeforeClass
 import org.junit.Test
@@ -30,6 +33,38 @@ class RedirectsTest {
         // not redirected, or redirected to something that is not the API (a sign-in page)
         assertThat(moved("https://h/rest/ping.view", "https://h/rest/ping.view", "/rest/ping.view")).isNull()
         assertThat(moved("http://h/rest/ping.view", "https://h/login", "/rest/ping.view")).isNull()
+    }
+
+    @Test
+    fun anAddressARedirectMayNotGoToIsNotTaken() {
+        // another host: every later request (the token, the API key, the streams) would go there
+        assertThat(moved("https://music.example.com/rest/ping.view", "https://elsewhere.example.net/rest/ping.view", "/rest/ping.view")).isNull()
+        assertThat(moved("http://127.0.0.1:4533/rest/ping.view", "http://localhost:4533/rest/ping.view", "/rest/ping.view")).isNull()
+        // from https:// down to http://
+        assertThat(moved("https://music.example.com/rest/ping.view", "http://music.example.com/rest/ping.view", "/rest/ping.view")).isNull()
+    }
+
+    private fun redirect(from: String, location: String): Response = Response.Builder()
+        .request(Request.Builder().url(from).build()).protocol(Protocol.HTTP_1_1).code(301).message("Moved Permanently")
+        .header("Location", location).build()
+
+    @Test
+    fun theGuardRefusesARedirectDownToHttpOrToAnotherHost() {
+        // what OkHttp would follow on its own (followSslRedirects: also from https down to http), refused on each hop
+        assertThrows(RedirectRefusedException::class.java) { Redirects.check(redirect("https://h/rest/ping.view?u=a", "http://h/rest/ping.view?u=a")) }
+        assertThrows(RedirectRefusedException::class.java) { Redirects.check(redirect("https://h/rest/ping.view", "https://other/rest/ping.view")) }
+        assertThrows(RedirectRefusedException::class.java) { Redirects.check(redirect("http://h/rest/ping.view", "//other/rest/ping.view")) }
+        // up to https, another port or path on the same host: followed
+        assertThat(Redirects.check(redirect("http://h/rest/ping.view", "https://h/rest/ping.view")).code).isEqualTo(301)
+        assertThat(Redirects.check(redirect("http://h/rest/ping.view", "/music/rest/ping.view")).code).isEqualTo(301)
+        // not a redirect
+        val ok = Response.Builder().request(Request.Builder().url("https://h/").build()).protocol(Protocol.HTTP_1_1).code(200).message("OK").build()
+        assertThat(Redirects.check(ok).code).isEqualTo(200)
+    }
+
+    @Test
+    fun theAppsClientHasTheGuard() {
+        assertThat(SubsonicClient.Shared.networkInterceptors).contains(Redirects.guard)
     }
 
     @Test
@@ -149,6 +184,25 @@ class RedirectTest {
         assertThat(id).isNotEmpty()
         assertThat(other.login.server).isEqualTo(base)
         other.deletePlaylist(id!!)
+    }
+
+    @Test
+    fun aGetToAnotherHostIsNotFollowedByTheAppsClientNorTakenByAnyOther() = runBlocking {
+        val elsewhere = front(base.replace("127.0.0.1", "localhost"))
+        // the app's client (with the guard): not followed, and said so
+        val guarded = http.newBuilder().addNetworkInterceptor(Redirects.guard).build()
+        val probe = runCatching { DeviceLogin.probe(elsewhere, guarded) }.exceptionOrNull()
+        assertThat(probe).isInstanceOf(ServerUnreachableException::class.java)
+        assertThat(probe!!.message).contains("没有跟过去")
+        val signIn = runCatching { SubsonicClient.signIn(elsewhere, "demo", "demo", "Sonus (Test)", guarded) }.exceptionOrNull()
+        assertThat(signIn!!.message).contains("没有跟过去")
+        // a client that follows it anyway: its answer is used, but the address is not taken
+        assertThat(DeviceLogin.probe(elsewhere, http).first).isEqualTo(elsewhere)
+        assertThat(SubsonicClient.signIn(elsewhere, "demo", "demo", "Sonus (Test)", http).server).isEqualTo(elsewhere)
+        val kept = SubsonicClient.signIn(base, "demo", "demo", "Sonus (Test)", http).copy(server = elsewhere)
+        val c = SubsonicClient(kept, "Sonus (Test)", http)
+        c.connect()
+        assertThat(c.login.server).isEqualTo(elsewhere)
     }
 
     @Test

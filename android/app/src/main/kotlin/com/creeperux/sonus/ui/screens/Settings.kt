@@ -106,6 +106,8 @@ fun SettingsScreen() {
             PillButton("退出登录", graph::signOut, Modifier.testTag("sign-out"), icon = "user")
         }
 
+        Group("更新") { UpdatesSection() }
+
         Group("关于") {
             Fact("版本", BuildConfigInfo.versionName(context))
             Text("Sonus 是 CreeperUX 的音乐播放器，播放你自己服务器上的音乐。标题字体 Chakra Petch 依 SIL Open Font License 1.1 授权。", style = Sonus.type.bodySmall, color = c.textMuted)

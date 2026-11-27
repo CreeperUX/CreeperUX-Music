@@ -25,6 +25,7 @@ import com.creeperux.sonus.playback.LocalPlayback
 import com.creeperux.sonus.session.MusicSession
 import com.creeperux.sonus.session.SessionLink
 import com.creeperux.sonus.session.Toast
+import com.creeperux.sonus.update.Updater
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
@@ -66,6 +67,7 @@ class AppGraph(private val app: Context, val scope: CoroutineScope = MainScope()
     val settings = Settings(app.getSharedPreferences("settings", Context.MODE_PRIVATE))
     val logins = LoginStore(app.getSharedPreferences("sign-in", Context.MODE_PRIVATE), KeystoreBox())
     val playback = LocalPlayback(app, settings, SubsonicClient.Shared, scope)
+    val updater = Updater(app, settings, scope)
     private val stateFlow = MutableStateFlow<AppState>(AppState.Starting)
     val state: StateFlow<AppState> = stateFlow.asStateFlow()
     val themeMode = MutableStateFlow(settings.theme)
@@ -81,6 +83,7 @@ class AppGraph(private val app: Context, val scope: CoroutineScope = MainScope()
     val deviceName: String get() = Settings.deviceName(app)
 
     fun start() {
+        updater.start()
         val login = logins.load()
         if (login == null) stateFlow.value = AppState.SignedOut() else connect(login)
     }

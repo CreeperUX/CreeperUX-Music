@@ -171,6 +171,7 @@ fun RoundButton(
     on: Boolean = false,
     tint: Color? = null,
     enabled: Boolean = true,
+    badge: Boolean = false, // a dot at the top right: something new there (设置: an update)
 ) {
     val c = Sonus.colors
     Box(
@@ -179,6 +180,7 @@ fun RoundButton(
     ) {
         KitIcon(icon, size = iconSize, tint = tint ?: if (on) c.accentText else if (enabled) c.text else c.textQuiet)
         if (on) Box(Modifier.align(Alignment.BottomCenter).padding(bottom = size * 0.12f).size(4.dp).clip(CircleShape).background(c.accentText))
+        if (badge) Box(Modifier.align(Alignment.TopEnd).padding(top = size * 0.2f, end = size * 0.2f).size(8.dp).clip(CircleShape).background(c.accent))
     }
 }
 

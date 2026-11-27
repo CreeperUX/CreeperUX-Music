@@ -27,12 +27,12 @@
 - **服务器与协议**：
   - 演示服务器 Connect v2 单元测试 25 项全部通过（含 `previous` 的 `force: true` 用例）；`connect-vectors.json` 校验通过（15 组 172 步）。
   - Rust 服务器 `connect_vectors` 集成测试 3 项全部通过（含 `previous_with_force_skips_past_the_three_second_restart`）。
-- **电脑上的 JVM 测试**：核心库 78 项通过（另 1 项手动读真实 GitHub 默认跳过，新增 `peekNext` / `peekPrevious` / `hasNext` / `hasPrevious` 覆盖全部播放顺序与边界，及 Connect 演示服务器 `force: true` 测试）；App 单元测试 19 项通过（新增方向锁定、滑动切歌与边界回弹、无动画模式、以及 `SonusRootTransition` 防双主界面测试）。
+- **电脑上的 JVM 测试**：核心库 78 项通过（另 1 项手动读真实 GitHub 默认跳过，新增 `peekNext` / `peekPrevious` / `hasNext` / `hasPrevious` 覆盖全部播放顺序与边界，及 Connect 演示服务器 `force: true` 测试）；App 单元测试 22 项通过（新增方向锁定、系统取消手势 `ACTION_CANCEL` 的水平/竖直回归、拖动期零重组与切歌同步交接、滑动切歌与边界回弹、无动画模式、以及 `SonusRootTransition` 防双主界面测试）。
 - **构建**：`:app:assembleDebug` 和 `:app:assemblePreview`（R8 压缩 + 基线配置）均通过。
 - **设备测试**（两台模拟器同时对着演示服务器跑）：
   - 手机（`sonus-phone`）：10 项通过、跳过 1 项（二步验证，演示服务器没有），含新增的迷你播放条与全屏封面左右滑动切歌、播放超过 3 秒右滑直切上一首、第一首右滑回弹、封面下滑收起以及 Connect v2 远程滑动测试。
   - 平板（`sonus-tablet`）：10 项通过、跳过 1 项（二步验证），含新增的右侧面板封面左右滑动切歌、播放超过 3 秒右滑直切上一首、边界回弹以及 Connect v2 远程滑动测试。
-- **手感与画面检查**：在手机与平板模拟器上安装 Preview 包实测并截取了静止、拖动途中、松手后、设置页深浅色及滚动状态栏截图。
+- **手感与画面检查**：在手机与平板模拟器上安装 Preview 包实测并截取了静止、拖动途中、松手后、设置页深浅色及滚动状态栏截图；并在手机模拟器上对全屏左滑（158 帧）、全屏右滑（175 帧）和迷你播放条左滑（172 帧）做了逐帧录制核查，确认切歌交接帧零黑屏/灰底闪帧、零错位封面或歌名闪烁。
 - **未验证项**：真机尚未实测；未对着 Rust 服务器跑完整 `server-library.mjs` 设备测试（Rust 协议逻辑已由 `connect_vectors` 测试覆盖）。
 
 ## 已知限制

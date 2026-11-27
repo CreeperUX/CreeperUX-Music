@@ -10,7 +10,7 @@
     <WindowsAppSdkPackageVersion>2.5.1</WindowsAppSdkPackageVersion>
     <RootNamespace>Sonus</RootNamespace>
     <AssemblyName>Sonus</AssemblyName>
-    <Version>0.6.2</Version>
+    <Version>0.7.0</Version>
     <Product>Sonus</Product>
     <Company>CreeperUX</Company>
     <Description>Sonus</Description>

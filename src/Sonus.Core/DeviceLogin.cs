@@ -22,9 +22,14 @@ public static class DeviceLogin
 
     private static HttpClient Http(HttpClient? http) => http ?? SubsonicClient.Shared;
 
+    /// <summary>A JSON POST that stays a POST through a redirect (<see cref="Redirects.PostAsync"/>).</summary>
+    private static Task<HttpResponseMessage> PostAsync<T>(HttpClient? http, string url, T body, CancellationToken cancel) =>
+        Redirects.PostAsync(http, url, () => JsonContent.Create(body), cancel); // by default, a client that leaves redirects to it
+
     /// <summary>The server's address as it answers (a private host typed without a scheme over HTTP, else HTTPS, as
     /// <see cref="SubsonicClient.SignInAsync"/>), and whether it offers the browser sign-in. Asked without signing in:
-    /// getOpenSubsonicExtensions is public.</summary>
+    /// getOpenSubsonicExtensions is public. An address that redirects (http:// → https://) gives the one it leads to: the
+    /// sign-in, and everything after it, talks to that one.</summary>
     public static async Task<(string Server, bool Supported)> ProbeAsync(string server, HttpClient? http = null, CancellationToken cancel = default)
     {
         string baseUrl = SubsonicClient.NormalizeServer(server);
@@ -37,12 +42,13 @@ public static class DeviceLogin
         {
             try
             {
-                using var res = await Http(http).GetAsync($"{candidate}/rest/getOpenSubsonicExtensions.view?v={SubsonicClient.ApiVersion}&c=Sonus&f=json", cancel).ConfigureAwait(false);
+                var url = new Uri($"{candidate}/rest/getOpenSubsonicExtensions.view?v={SubsonicClient.ApiVersion}&c=Sonus&f=json");
+                using var res = await Http(http).GetAsync(url, cancel).ConfigureAwait(false);
                 if (!res.IsSuccessStatusCode) { last = new ServerUnreachableException($"{candidate} 返回了 {(int)res.StatusCode}。"); continue; }
                 using var doc = JsonDocument.Parse(await res.Content.ReadAsStreamAsync(cancel).ConfigureAwait(false));
                 if (!doc.RootElement.TryGetProperty("subsonic-response", out var body)) { last = new ServerUnreachableException($"{candidate} 不像是 Navidrome。"); continue; }
                 bool supported = SubsonicClient.Array(body, "openSubsonicExtensions").Any(x => SubsonicClient.Str(x, "name") == Extension);
-                return (candidate, supported);
+                return (Redirects.MovedBase(url, res.RequestMessage?.RequestUri, "/rest/getOpenSubsonicExtensions.view") ?? candidate, supported);
             }
             catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException && !cancel.IsCancellationRequested)
             {
@@ -52,11 +58,17 @@ public static class DeviceLogin
         throw new ServerUnreachableException($"连不上 {baseUrl}。检查地址和网络。", last);
     }
 
-    /// <summary>Asks the server for a browser sign-in for this app (client "Sonus") on this computer (device).</summary>
+    /// <summary>Asks the server for a browser sign-in for this app (client "Sonus") on this computer (device). When
+    /// <paramref name="server"/> redirects, the sign-in (its approval page, the asking, the key) is the address it leads
+    /// to's.</summary>
     public static async Task<DeviceLoginStart> StartAsync(string server, string client, string device, HttpClient? http = null, CancellationToken cancel = default)
     {
-        using var res = await Http(http).PostAsJsonAsync($"{server}/auth/device/start", new { client, device }, cancel).ConfigureAwait(false);
+        HttpResponseMessage answer;
+        try { answer = await PostAsync(http, $"{server}/auth/device/start", new { client, device }, cancel).ConfigureAwait(false); }
+        catch (RedirectRefusedException ex) { throw new SubsonicException(0, ex.Message); }
+        using var res = answer;
         if (!res.IsSuccessStatusCode) throw new SubsonicException(0, $"服务器没有开始登录（{(int)res.StatusCode}）。") { HttpStatus = (int)res.StatusCode };
+        server = Redirects.MovedBase(new Uri($"{server}/auth/device/start"), res.RequestMessage?.RequestUri, "/auth/device/start") ?? server;
         using var doc = JsonDocument.Parse(await res.Content.ReadAsStreamAsync(cancel).ConfigureAwait(false));
         var r = doc.RootElement;
         string path = SubsonicClient.Str(r, "verificationPath") ?? "/app/#/device";
@@ -72,7 +84,7 @@ public static class DeviceLogin
     /// <summary>How the sign-in stands now; approved, it is the sign-in to keep.</summary>
     public static async Task<(DeviceLoginState State, Login? Login)> PollAsync(DeviceLoginStart start, HttpClient? http = null, CancellationToken cancel = default)
     {
-        using var res = await Http(http).PostAsJsonAsync($"{start.Server}/auth/device/poll", new { deviceCode = start.DeviceCode }, cancel).ConfigureAwait(false);
+        using var res = await PostAsync(http, $"{start.Server}/auth/device/poll", new { deviceCode = start.DeviceCode }, cancel).ConfigureAwait(false);
         if (!res.IsSuccessStatusCode) return (DeviceLoginState.Pending, null); // asked again next time
         using var doc = JsonDocument.Parse(await res.Content.ReadAsStreamAsync(cancel).ConfigureAwait(false));
         var r = doc.RootElement;
@@ -112,7 +124,7 @@ public static class DeviceLogin
         if (!login.IsApiKey) return false;
         try
         {
-            using var res = await Http(http).PostAsJsonAsync($"{login.Server}/auth/device/revoke", new { apiKey = login.ApiKey }, cancel).ConfigureAwait(false);
+            using var res = await PostAsync(http, $"{login.Server}/auth/device/revoke", new { apiKey = login.ApiKey }, cancel).ConfigureAwait(false);
             return res.IsSuccessStatusCode;
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException) { return false; }

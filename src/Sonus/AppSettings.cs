@@ -15,8 +15,11 @@ public static class AppPaths
     /// none when the data folder is given (a test instance).</summary>
     public static string? FormerDataDirectory => Custom is null ? Path.Combine(LocalAppData, AppName.Former) : null;
 
-    /// <summary>A test instance (tools/e2e): its own data folder and credentials, never the user's.</summary>
-    public static bool IsTestInstance => Testing.E2EChannel.Enabled;
+    /// <summary>A visible test preview (tools/e2e/preview.mjs): requires its own SONUS_DATA_DIR so it never touches the user's data.</summary>
+    public static bool IsObserveInstance => Environment.GetEnvironmentVariable("SONUS_OBSERVE") == "1" && Custom is not null;
+
+    /// <summary>A test instance (tools/e2e or visible preview): its own data folder and credentials, never the user's.</summary>
+    public static bool IsTestInstance => Testing.E2EChannel.Enabled || IsObserveInstance;
 }
 
 /// <summary>The app's preferences (settings.json in the data folder). The sign-in is not here: it is in Credential Manager.</summary>

@@ -67,8 +67,12 @@ public sealed partial class MainWindow : Window, IShell
         AppWindow.Closing += async (_, e) =>
         {
             Log.Write($"[window] closing ({(_music is null ? "signed out: closes at once" : "signed in")}{(_closing ? ", already closing" : "")})");
-            if (_music is null || _closing) return;
-            e.Cancel = true; _closing = true;
+            if (_closing) return; // Close() below, or the update's: the close goes ahead
+            // From here on the window is going away, whether at once (signed out) or after the queue is saved: the top bar's
+            // layout handlers stop (a layout pass after the close found no title bar: NullReferenceException).
+            _closing = true;
+            if (_music is null) return;
+            e.Cancel = true;
             await _music.SaveQueueNowAsync(); // the position, for another device
             _connect?.Dispose();
             _session?.Dispose();
@@ -455,9 +459,9 @@ public sealed partial class MainWindow : Window, IShell
     /// </summary>
     private void FitTopBar()
     {
-        if (TopBar.XamlRoot is not { } root) return;
+        if (TopBar.XamlRoot is not { } root || _closing || AppWindow?.TitleBar is not { } titleBar) return;
         double scale = root.RasterizationScale, width = TopBar.ActualWidth;
-        double caption = AppWindow.TitleBar.RightInset / (scale * Zoom); // in the zoomed layout's units
+        double caption = titleBar.RightInset / (scale * Zoom); // in the zoomed layout's units
         var end = new Thickness(0, 0, caption + 12, 0);
         if (TopEnd.Margin != end) TopEnd.Margin = end;
         if (_searchPill is not null && width > 0)
@@ -480,9 +484,9 @@ public sealed partial class MainWindow : Window, IShell
     /// </summary>
     private void UpdatePassthrough()
     {
-        if (TopBar.XamlRoot is not { } root || _closing) return;
+        if (TopBar.XamlRoot is not { } root || _closing || AppWindow?.TitleBar is not { } titleBar) return;
         double scale = root.RasterizationScale;
-        int buttons = (int)Math.Floor(root.Size.Width * scale) - AppWindow.TitleBar.RightInset; // where the window buttons begin
+        int buttons = (int)Math.Floor(root.Size.Width * scale) - titleBar.RightInset; // where the window buttons begin
         var parts = new List<Windows.Graphics.RectInt32>(2);
         foreach (var part in new FrameworkElement[] { TopCenter, TopEnd })
         {

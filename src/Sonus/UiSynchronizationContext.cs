@@ -23,6 +23,8 @@ namespace Sonus;
 /// apartment) costs at most a second instead of a deadlock. WPF does the same while it lays out.</para>
 /// <para>Not covered, as before: COM's own modal loop while the UI thread makes an outgoing cross-apartment call, and waits
 /// inside native code (XAML, CoreMessaging).</para>
+/// <para>Only while the message loop runs: Program.Main removes it when Application.Start returns, before the runtime's
+/// shutdown waits for the finalizer thread (which may be calling into this thread).</para>
 /// </summary>
 internal sealed partial class UiSynchronizationContext : DispatcherQueueSynchronizationContext
 {
@@ -50,15 +52,14 @@ internal sealed partial class UiSynchronizationContext : DispatcherQueueSynchron
         return base.Wait(waitHandles, waitAll, millisecondsTimeout == Timeout.Infinite ? Timeout.Infinite : millisecondsTimeout - first);
     }
 
-    /// <summary>What waited: the managed frames above the runtime's wait (the lock's or the wait's caller).</summary>
+    /// <summary>What waited: the managed frames above the runtime's wait (the lock's or the wait's caller); if there are
+    /// none outside System.Threading, the top frames as they are (a wait the runtime itself began shows only its helper).</summary>
     private static string Waiter()
     {
-        var frames = new StackTrace(2, false).GetFrames()
-            .Select(f => f.GetMethod())
-            .Where(m => m?.DeclaringType is { } t && t.Namespace is not ("System.Threading" or "System.Threading.Tasks"))
-            .Take(4)
-            .Select(m => $"{m!.DeclaringType!.Name}.{m.Name}");
-        return string.Join(" < ", frames);
+        var methods = new StackTrace(2, false).GetFrames().Select(f => f.GetMethod()).Where(m => m?.DeclaringType is not null).ToList();
+        var callers = methods.Where(m => m!.DeclaringType!.Namespace is not ("System.Threading" or "System.Threading.Tasks")).ToList();
+        var shown = (callers.Count > 0 ? callers : methods).Take(4).Select(m => $"{m!.DeclaringType!.Name}.{m.Name}").ToList();
+        return shown.Count > 0 ? string.Join(" < ", shown) : "no managed frames";
     }
 
     [LibraryImport("kernel32.dll")]

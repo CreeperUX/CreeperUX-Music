@@ -40,6 +40,10 @@ public static partial class Program
             _ = new App();
             WatchUiThread(DispatcherQueue.GetForCurrentThread());
         });
+        // The message loop has ended, and nothing is laid out any more: waits on this thread pump again, as the CLR's do.
+        // The runtime's shutdown waits here for the finalizer thread, which may still be releasing objects that live on
+        // this thread (calls into it): without pumping, the process lingered a second before it ended.
+        SynchronizationContext.SetSynchronizationContext(null);
         Log.Write("[exit] the window closed: the app ends");
         return 0;
     }

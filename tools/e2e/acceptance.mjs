@@ -91,6 +91,7 @@ function quiet(app) {
   try { q = app.quiet(); } catch (e) { q = `出错：${e.message.split('\n')[0]}`; }
   results.push({ round: current, name: `静默：${q}`, ok: q.startsWith('QUIET') });
   log(`  ${q.startsWith('QUIET') ? '✓' : '✗'} 静默检查：${q}`);
+  if (!q.startsWith('QUIET')) keepLogs('静默检查', q);
   noExceptions(app);
 }
 // exceptions the app caught and logged (deferred UI work goes through UiThread, which logs "[ui] … failed") or survived
@@ -107,6 +108,7 @@ function noExceptions(app) {
   const first = bad[0]?.slice(24, 240);
   results.push({ round: current, name: bad.length ? `日志里有 ${bad.length} 个异常：${first}` : '日志里没有异常', ok: bad.length === 0 });
   log(`  ${bad.length ? '✗' : '✓'} 日志里${bad.length ? `有 ${bad.length} 个异常：${first}` : '没有异常'}`);
+  if (bad.length) keepLogs(`日志里有 ${bad.length} 个异常`, ['', ...bad].join('\n')); // every line, not just the first
 }
 
 // ---------------------------------------------------------------- build, the server, the first instance

@@ -111,6 +111,17 @@ internal static class E2EChannel
         return ran < 0 ? "error: the call did not run" : $"{(ran < acquired ? "during" : "after")} the wait (call at {ran} ms, lock at {acquired} ms)";
     }
 
+    /// <summary>
+    /// "memory": managed memory after a full collection, in KB (pages left behind must not pile up). It collects on a pool
+    /// thread: the finalizer releases XAML objects with calls into the UI thread, so the UI thread must be free to take them.
+    /// Waiting for the finalizers on the UI thread stood still a second and then pumped (UiSynchronizationContext).
+    /// </summary>
+    private static async Task<string> Memory()
+    {
+        long bytes = await Task.Run(() => { GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); return GC.GetTotalMemory(true); });
+        return (bytes / 1024).ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
     private static string LongWait()
     {
         var gate = new object();
@@ -158,7 +169,14 @@ internal static class E2EChannel
         var done = new TaskCompletionSource<string>();
         ui.TryEnqueue(async () =>
         {
-            try { done.SetResult(line.StartsWith("shot ", StringComparison.Ordinal) ? await Shot(line[5..].Trim()) : line.Trim() == "reentrancy" ? await Reentrancy() : Execute(line.Trim())); }
+            try
+            {
+                string command = line.Trim();
+                done.SetResult(command.StartsWith("shot ", StringComparison.Ordinal) ? await Shot(command[5..].Trim())
+                    : command == "reentrancy" ? await Reentrancy()
+                    : command == "memory" ? await Memory()
+                    : Execute(command));
+            }
             catch (Exception ex) { Log.Write($"[e2e] {line}: {ex}"); done.SetResult("error: " + ex.Message); }
         });
         return done.Task;
@@ -255,8 +273,6 @@ internal static class E2EChannel
             "bounds" => W?.Content is UIElement broot ? string.Join(Separator, Named().Where(x => Matches(x.Name, arg)).Select(x =>
                 { var r = x.Element.TransformToVisual(broot).TransformBounds(new Windows.Foundation.Rect(0, 0, x.Element.ActualWidth, x.Element.ActualHeight));
                   return FormattableString.Invariant($"{x.Name} [{x.Element.GetType().Name}] {r.X:0.#},{r.Y:0.#} {r.Width:0.#}x{r.Height:0.#}"); })) : "error: no window",
-            // managed memory after a full collection, in KB (pages left behind must not pile up)
-            "memory" => Done(() => { GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); }) is var _ ? (GC.GetTotalMemory(true) / 1024).ToString(System.Globalization.CultureInfo.InvariantCulture) : "",
             "ws" => (Environment.WorkingSet / (1024 * 1024)).ToString(System.Globalization.CultureInfo.InvariantCulture), // MB
             "elements" => W?.Content is UIElement el ? Descend(el).Count().ToString(System.Globalization.CultureInfo.InvariantCulture) : "0",
             "window" => W is { } ww ? FormattableString.Invariant($"{ww.AppWindow.Size.Width} {ww.AppWindow.Size.Height} {ww.Title}") : "error: no window",

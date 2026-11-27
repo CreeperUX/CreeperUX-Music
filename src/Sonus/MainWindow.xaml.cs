@@ -32,6 +32,7 @@ public sealed partial class MainWindow : Window, IShell
     private Border? _searchPill;
     private UIElement? _browseSeparator;
     private Button? _connection, _settingsButton;
+    private SolidColorBrush? _connectionHover, _settingsHover; // hover colours that follow the state (Ui.OwnBrush)
     private bool _connectionOver;
     private Microsoft.UI.Xaml.Controls.Primitives.ToggleButton? _panelToggle;
     private DispatcherTimer? _searchTimer;
@@ -342,8 +343,7 @@ public sealed partial class MainWindow : Window, IShell
         // the connection: a quiet pill (muted text, the hover colour under the pointer), as foobar2k's
         var label = Ui.Text(music.Server.Name, size: 12, foreground: Ui.Brush("TextSecondaryBrush"));
         _connection = new Button { Content = Ui.Row(8, dot, label), Style = Ui.Style("PillButtonStyle"), Tag = (dot, label), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), Height = 36, CornerRadius = new CornerRadius(18), Padding = new Thickness(14, 0, 14, 0), VerticalAlignment = VerticalAlignment.Center };
-        _connection.Resources["ButtonBackgroundPointerOver"] = Ui.Brush("HoverBrush");
-        _connection.Resources["ButtonBackgroundPressed"] = Ui.Brush("HoverBrush");
+        _connectionHover = Ui.OwnBrush(_connection, "HoverBrush", "ButtonBackgroundPointerOver", "ButtonBackgroundPressed");
         _connection.PointerEntered += (_, _) => { _connectionOver = true; SyncConnection(); };
         _connection.PointerExited += (_, _) => { _connectionOver = false; SyncConnection(); };
         _connection.Click += async (_, _) =>
@@ -358,7 +358,7 @@ public sealed partial class MainWindow : Window, IShell
             ShowToast(music.IsOnline ? new("已重新连接服务器") : new("无法连接到音乐服务器。检查网络，然后重新连接。", true, "重新连接", () => _ = music.GoOnlineAsync()));
         };
         var settings = Ui.IconButton(Glyphs.Settings, "设置", (_, _) => Navigate("settings"), 36, 16);
-        settings.Resources["ButtonForegroundPointerOver"] = Ui.Brush("TextPrimaryBrush");
+        _settingsHover = Ui.OwnBrush(settings, "TextPrimaryBrush", "ButtonForegroundPointerOver");
         Motion.Press(settings);
         _settingsButton = settings;
         _panelToggle = Ui.IconToggle(Glyphs.Panel, "显示或隐藏正在播放", 36);
@@ -468,8 +468,7 @@ public sealed partial class MainWindow : Window, IShell
         // offline stands out with a soft red tint and primary text (foobar2k's .f2k-conn[data-state="offline"])
         label.Foreground = !online || _connectionOver ? Ui.Brush("TextPrimaryBrush") : Ui.Brush("TextSecondaryBrush");
         _connection.Background = online ? new SolidColorBrush(Microsoft.UI.Colors.Transparent) : Ui.Brush("OfflineBrush");
-        _connection.Resources["ButtonBackgroundPointerOver"] = online ? Ui.Brush("HoverBrush") : Ui.Brush("OfflineHoverBrush");
-        _connection.Resources["ButtonBackgroundPressed"] = online ? Ui.Brush("HoverBrush") : Ui.Brush("OfflineHoverBrush");
+        if (_connectionHover is not null) Ui.Recolor(_connectionHover, online ? "HoverBrush" : "OfflineHoverBrush");
         string name = online ? $"已连接 · {m.Server.Version}" : "未连接到服务器，点击重新连接";
         AutomationProperties.SetName(_connection, name);
         ToolTipService.SetToolTip(_connection, name);
@@ -737,7 +736,7 @@ public sealed partial class MainWindow : Window, IShell
         {
             bool onSettings = kind == "settings";
             _settingsButton.Foreground = onSettings ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextSecondaryBrush");
-            _settingsButton.Resources["ButtonForegroundPointerOver"] = onSettings ? Ui.Brush("AccentHiBrush") : Ui.Brush("TextPrimaryBrush");
+            if (_settingsHover is not null) Ui.Recolor(_settingsHover, onSettings ? "AccentHiBrush" : "TextPrimaryBrush");
         }
         _library?.SetCurrentRoute(_route);
     }

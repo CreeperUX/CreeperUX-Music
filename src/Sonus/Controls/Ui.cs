@@ -33,6 +33,20 @@ public static class Ui
     public static SolidColorBrush Solid(Color c) => new(c);
     public static Color Rgb(byte r, byte g, byte b, byte a = 255) => Color.FromArgb(a, r, g, b);
 
+    /// <summary>A control's own brush for lightweight-styling <paramref name="keys"/> (hover, pressed colours) that follow
+    /// some state, starting as the colour of the app brush <paramref name="like"/>. A visual state looks its resource up
+    /// when it is entered, so a new Resources[key] does not show while the pointer rests on the control (the pill clicked
+    /// to reconnect would stay red under it); recolouring this brush shows at once.</summary>
+    public static SolidColorBrush OwnBrush(FrameworkElement e, string like, params string[] keys)
+    {
+        var b = new SolidColorBrush(((SolidColorBrush)Brush(like)).Color);
+        foreach (var k in keys) e.Resources[k] = b;
+        return b;
+    }
+
+    /// <summary>Recolours a brush from <see cref="OwnBrush"/> to the colour of the app brush <paramref name="like"/>.</summary>
+    public static void Recolor(SolidColorBrush own, string like) => own.Color = ((SolidColorBrush)Brush(like)).Color;
+
     /// <summary>An icon (the kit's, KitIcon) in a colour of its own.</summary>
     public static KitIcon Icon(string glyph, double size = 16, Brush? foreground = null) => new(glyph, size) { Foreground = foreground ?? Brush("TextSecondaryBrush") };
 

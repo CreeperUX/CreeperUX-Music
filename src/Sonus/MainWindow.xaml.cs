@@ -365,7 +365,6 @@ public sealed partial class MainWindow : Window, IShell
         _panelToggle.IsChecked = _settings.PanelOpen;
         Motion.Press(_panelToggle);
         _panelToggle.Click += (_, _) => { Motion.PopIcon(_panelToggle); SetPanel(_panelToggle.IsChecked == true); if (_panelToggle.IsChecked == true) _panel?.Show("now", animate: false); };
-        if (AppPaths.IsObserveInstance) TopEnd.Children.Add(MakePageRiseToggle());
         TopEnd.Children.Add(_connection); TopEnd.Children.Add(settings); TopEnd.Children.Add(_panelToggle);
         SyncUpdatePill();
 
@@ -386,36 +385,6 @@ public sealed partial class MainWindow : Window, IShell
 
     private Button? _updatePill;
     private string? _updateToasted;
-
-    /// <summary>Preview-only A/B switch in the top bar: lets the user compare 16 px / 260 ms vs 6 px / 220 ms page rise.</summary>
-    private Button MakePageRiseToggle()
-    {
-        var label = Ui.Text("", size: 12, foreground: Ui.Brush("AccentTextBrush"), bold: true);
-        var button = new Button
-        {
-            Content = label, Style = Ui.Style("PillButtonStyle"), Background = Ui.Brush("RaisedBrush"),
-            BorderBrush = Ui.Brush("LineBrush"), BorderThickness = new Thickness(1),
-            Height = 32, CornerRadius = new CornerRadius(16), Padding = new Thickness(12, 0, 12, 0), VerticalAlignment = VerticalAlignment.Center,
-        };
-        button.Resources["ButtonBackgroundPointerOver"] = Ui.Brush("RaisedHiBrush");
-        button.Resources["ButtonBackgroundPressed"] = Ui.Brush("RaisedHiBrush");
-        Motion.Press(button);
-        void Sync()
-        {
-            label.Text = Motion.LargePageRise ? "换页 16px" : "换页 6px";
-            string tip = $"当前换页动效：{(Motion.LargePageRise ? "16 px / 260 ms" : "6 px / 220 ms")}，点击切换对比";
-            AutomationProperties.SetName(button, label.Text);
-            ToolTipService.SetToolTip(button, tip);
-        }
-        button.Click += (_, _) =>
-        {
-            Motion.LargePageRise = !Motion.LargePageRise;
-            Sync();
-            ShowToast(new($"已切换换页动效：{(Motion.LargePageRise ? "16 px / 260 ms" : "6 px / 220 ms")}"));
-        };
-        Sync();
-        return button;
-    }
 
     /// <summary>A newer version: a quiet pill before the connection, in the accent colour, opening the update dialog
     /// (and, the first time, a toast unless 设置 is showing it).</summary>
@@ -714,7 +683,7 @@ public sealed partial class MainWindow : Window, IShell
         MainHost.Child = view;
         // live search updates replace the view in place: fade quietly instead of jumping vertically on every keystroke
         if (replace && kind == "search") Motion.Swap(view);
-        else Motion.Enter(view, rise: Motion.PageRise, move: Motion.PageMove);
+        else Motion.Enter(view, rise: 6, move: Motion.Push); // the page fades in; its rows and cards rise in after it (6 px: the owner's pick over 16)
         Title = (view.Title.Length > 0 ? $"{view.Title} · Sonus" : "Sonus") + (AppPaths.IsObserveInstance ? " [测试版]" : "");
         if (_search is not null && kind != "search" && _search.FocusState == FocusState.Unfocused) _search.Text = "";
         SyncActiveNav(kind);

@@ -32,11 +32,6 @@ public static class Motion
     /// <summary>Windows' "Animation effects" (Settings › Accessibility › Visual effects).</summary>
     public static bool Enabled { get; } = new Windows.UI.ViewManagement.UISettings().AnimationsEnabled;
 
-    /// <summary>Page entrance rise A/B (preview toggle): true = 16 px / 260 ms, false = 6 px / 220 ms.</summary>
-    public static bool LargePageRise { get; set; } = true;
-    public static float PageRise => LargePageRise ? 16f : 6f;
-    public static TimeSpan PageMove => LargePageRise ? TimeSpan.FromMilliseconds(260) : Push;
-
     // ---------------------------------------------------------------- comings-in, started on the frame that first draws them
     private static readonly List<Action<Compositor>> Starts = [];
     private static bool _waiting;

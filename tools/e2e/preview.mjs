@@ -2,7 +2,7 @@
 // - builds into tools/e2e/.work/build-observe/<arch> so it never locks or touches the installed Sonus;
 // - uses its own data folder (.work/data-observe) and its own Credential Manager entry (Sonus-test-observe:server),
 //   separate from both the user's Sonus:server and acceptance.mjs's Sonus-test-<hash>:server;
-// - marks the window clearly as a test build and adds a top-bar toggle to compare 16 px vs 6 px page-change rise;
+// - marks the window clearly as a test build (a badge by the name, "[测试版]" in the title);
 // - stops the local demo server and deletes Sonus-test-observe:server as soon as the window closes.
 //
 // Usage: node tools/e2e/preview.mjs [--arch=ARM64|x64] [--no-build] [--auto]
@@ -98,8 +98,8 @@ console.log(`演示服务器：${site}（账号 demo / demo）`);
 console.log(`数据目录：${dataDir}`);
 console.log(`测试凭据：${CRED_TARGET}`);
 console.log(autoLogin
-  ? '已自动登录演示服务器。右上角可点「换页 16px / 6px」切换对比换页动效；关掉窗口自动清理。'
-  : '已打开可见测试版：点「使用本机的演示服务器」登录（或加 --auto 跳过登录页）。右上角可切换「换页 16px / 6px」对比换页动效；关掉窗口自动清理。');
+  ? '已自动登录演示服务器。关掉窗口自动清理。'
+  : '已打开可见测试版：点「使用本机的演示服务器」登录（或加 --auto 跳过登录页）。关掉窗口自动清理。');
 
 const app = spawn(exe, ['--demo', site], {
   env: {

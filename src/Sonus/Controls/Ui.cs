@@ -244,6 +244,23 @@ public static class Ui
         i.Click += (_, _) => click();
         return i;
     }
+
+    /// <summary>Applies Sonus's cool dark palette to a ContentDialog (WinUI's default template resolves warm-grey brushes
+    /// from its merged ThemeDictionaries unless overridden on the dialog itself).</summary>
+    public static ContentDialog ThemeDialog(ContentDialog d)
+    {
+        var top = Brush("ToastBrush");       // #1B2227: content area
+        var footer = Brush("PanelBrush");    // #151B1F: command bar
+        var line = Brush("LineBrush");
+        d.Background = footer;
+        d.BorderBrush = line;
+        d.Resources["ContentDialogBackground"] = footer;
+        d.Resources["ContentDialogTopOverlay"] = top;
+        d.Resources["ContentDialogBorderBrush"] = line;
+        d.Resources["ContentDialogSeparatorBorderBrush"] = line;
+        d.Resources["ContentDialogSmokeFill"] = new SolidColorBrush(Rgb(3, 5, 6, 140));
+        return d;
+    }
 }
 
 /// <summary>Album art (or an artist's picture) in a rounded or round frame, with a glyph while it loads or when there is none.</summary>

@@ -31,7 +31,7 @@ public static partial class UpdateDialog
         intro.TextWrapping = TextWrapping.Wrap;
         var notes = new TextBlock { Text = Plain(release.Notes), TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true, FontSize = 13, LineHeight = 20, Foreground = Ui.Brush("TextPrimaryBrush") };
         AutomationProperties.SetName(notes, "版本说明");
-        var dialog = new ContentDialog
+        var dialog = Ui.ThemeDialog(new ContentDialog
         {
             XamlRoot = root,
             Title = $"更新到 Sonus {release.DisplayVersion}",
@@ -43,7 +43,7 @@ public static partial class UpdateDialog
             PrimaryButtonText = "下载并安装",
             CloseButtonText = "以后再说",
             DefaultButton = ContentDialogButton.Primary,
-        };
+        });
 
         // not disposed: a download still finishing after the dialog closed may look at it
         var cancel = new CancellationTokenSource();

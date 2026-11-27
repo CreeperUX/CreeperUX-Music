@@ -62,14 +62,9 @@
             <SolidColorBrush x:Key="AccentButtonForegroundPointerOver" Color="#FF111416" />
             <SolidColorBrush x:Key="AccentButtonForegroundPressed" Color="#FF111416" />
 
-            <!-- Menus and dialogs: solid, in the app's cool dark palette rather than WinUI's warm-grey default -->
+            <!-- Menus: solid, as Spotify's (acrylic would also not show in RenderTargetBitmap screenshots) -->
             <SolidColorBrush x:Key="MenuFlyoutPresenterBackground" Color="#FF20272C" />
             <SolidColorBrush x:Key="MenuFlyoutPresenterBorderBrush" Color="#24EFEBE5" />
-            <SolidColorBrush x:Key="ContentDialogBackground" Color="#FF1B2227" />
-            <SolidColorBrush x:Key="ContentDialogTopOverlay" Color="#FF151B1F" />
-            <SolidColorBrush x:Key="ContentDialogBorderBrush" Color="#24EFEBE5" />
-            <SolidColorBrush x:Key="ContentDialogSeparatorBorderBrush" Color="#24EFEBE5" />
-            <SolidColorBrush x:Key="ContentDialogSmokeFill" Color="#8C030506" />
 
             <!-- Lists: selection is shown by the playing song, not by the system highlight -->
             <SolidColorBrush x:Key="ListViewItemBackgroundSelected" Color="#1FEFEBE5" />

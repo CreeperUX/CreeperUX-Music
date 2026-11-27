@@ -884,13 +884,13 @@ public sealed partial class MainWindow : Window, IShell
     public async Task<string?> AskText(string title, string label, string value)
     {
         var box = new TextBox { Header = label, Text = value, MaxLength = 80 };
-        var dialog = new ContentDialog { Title = title, Content = box, PrimaryButtonText = "保存", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Primary, XamlRoot = Content.XamlRoot };
+        var dialog = Ui.ThemeDialog(new ContentDialog { Title = title, Content = box, PrimaryButtonText = "保存", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Primary, XamlRoot = Content.XamlRoot });
         return await dialog.ShowAsync() == ContentDialogResult.Primary ? box.Text.Trim() : null;
     }
 
     public async Task<bool> Confirm(string title, string message, string action)
     {
-        var dialog = new ContentDialog { Title = title, Content = message, PrimaryButtonText = action, CloseButtonText = "取消", DefaultButton = ContentDialogButton.Close, XamlRoot = Content.XamlRoot };
+        var dialog = Ui.ThemeDialog(new ContentDialog { Title = title, Content = message, PrimaryButtonText = action, CloseButtonText = "取消", DefaultButton = ContentDialogButton.Close, XamlRoot = Content.XamlRoot });
         return await dialog.ShowAsync() == ContentDialogResult.Primary;
     }
 
@@ -910,6 +910,6 @@ public sealed partial class MainWindow : Window, IShell
         Fact("时长", Formats.Duration(t.Duration)); Fact("格式", Formats.Quality(t)); Fact("声道", t.Channels == 2 ? "立体声" : $"{t.Channels} 声道");
         Fact("文件大小", Formats.Size(t.Size)); Fact("位置", t.Path); Fact("播放次数", $"{t.PlayCount} 次"); Fact("上次播放", Formats.Relative(t.LastPlayed));
         Fact("回放增益", t.TrackGain is null && t.AlbumGain is null ? "无" : $"音轨 {t.TrackGain:+0.00;-0.00} dB · 专辑 {t.AlbumGain:+0.00;-0.00} dB");
-        _ = new ContentDialog { Title = "属性", Content = new ScrollViewer { Content = facts, MaxHeight = 520 }, CloseButtonText = "关闭", XamlRoot = Content.XamlRoot }.ShowAsync();
+        _ = Ui.ThemeDialog(new ContentDialog { Title = "属性", Content = new ScrollViewer { Content = facts, MaxHeight = 520 }, CloseButtonText = "关闭", XamlRoot = Content.XamlRoot }).ShowAsync();
     }
 }

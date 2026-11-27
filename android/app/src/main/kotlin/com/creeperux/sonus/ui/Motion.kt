@@ -44,6 +44,7 @@ object Motion {
     const val CONTROL = 200 // --cx-motion-control
     const val PUSH = 220 // --cx-motion-push
     const val SHEET = 320 // --cx-motion-sheet: bigger moves
+    const val CLOSE = 200 // a sheet leaving: quicker than it came, speeding up
     const val TINT = 600 // the page colour's change
 }
 

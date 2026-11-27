@@ -109,6 +109,12 @@ class AppGraph(private val app: Context, val scope: CoroutineScope = MainScope()
                 stateFlow.value = AppState.Failed(login, "服务器的回答不像 Navidrome。")
                 return@launch
             }
+            // the server's address redirects (http:// to https://): the sign-in keeps the one it answered at
+            val moved = session.client.login
+            if (moved != login) {
+                logins.save(moved)
+                settings.lastServer = moved.server
+            }
             playback.attach(session)
             closeLink()
             if (SessionClient.supported(session.client)) {

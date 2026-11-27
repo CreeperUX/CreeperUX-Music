@@ -112,11 +112,13 @@ fun SignInScreen(graph: AppGraph, message: String?) {
         browserJob = scope.launch {
             try {
                 val (address, supported) = DeviceLogin.probe(server)
+                server = address // where the server answers (an address that redirects: where it leads), shown as used
                 if (!supported) {
                     error = "这个服务器不支持在浏览器中登录，请用用户名和密码登录。"
                     return@launch
                 }
                 val start = DeviceLogin.start(address, "Sonus", graph.deviceName)
+                server = start.server
                 browser = start
                 openBrowser(context, start.verificationUrl)
                 val (state, login) = DeviceLogin.await(start)

@@ -50,7 +50,7 @@ public sealed class HomePage : View
 
         var shelves = new StackPanel { Spacing = 28 };
         body.Children.Add(shelves);
-        void Render(string? filter)
+        void Render(string? filter, bool animate)
         {
             shelves.Children.Clear();
             bool Want(string type) => filter is null || filter == type;
@@ -60,9 +60,10 @@ public sealed class HomePage : View
             if (Want("album")) shelves.Children.Add(Cards.Shelf(music, shell, "高解析度收藏", col.HiRes, "shelf:hires"));
             if (Want("album")) shelves.Children.Add(Cards.Shelf(music, shell, "最近添加到媒体库", col.Added, "shelf:added"));
             if (Want("album")) shelves.Children.Add(Cards.Shelf(music, shell, "很久没听了", col.Forgotten, "shelf:forgotten"));
+            if (animate) Motion.Enter(shelves, rise: 14, move: TimeSpan.FromMilliseconds(240));
         }
-        chips.Changed += Render;
-        Render(null);
+        chips.Changed += filter => Render(filter, animate: true);
+        Render(null, animate: false);
     }
 
     private FrameworkElement QuickTile(CardRef r)
@@ -250,15 +251,19 @@ public sealed class ArtistPage : View
 
         body.Children.Add(Ui.Text("唱片", "SectionTitleStyle"));
         var host = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch, IsTabStop = false };
-        void Releases(string? filter) => host.Content = Cards.Grid(music, shell, albums.Where(x => filter is null || (filter == "album" ? x.Type == AlbumType.Album : x.Type != AlbumType.Album)).Select(x => new CardRef("album", x.Id)));
+        void Releases(string? filter, bool animate)
+        {
+            host.Content = Cards.Grid(music, shell, albums.Where(x => filter is null || (filter == "album" ? x.Type == AlbumType.Album : x.Type != AlbumType.Album)).Select(x => new CardRef("album", x.Id)));
+            if (animate) Motion.Enter(host, rise: 14, move: TimeSpan.FromMilliseconds(240));
+        }
         if (albums.Any(x => x.Type != AlbumType.Album))
         {
             var chips = new Chips("唱片", [("album", "专辑"), ("single", "单曲和 EP")]);
-            chips.Changed += Releases;
+            chips.Changed += filter => Releases(filter, animate: true);
             body.Children.Add(chips);
         }
         body.Children.Add(host);
-        Releases(null);
+        Releases(null, animate: false);
 
         var bio = new StackPanel { Spacing = 8, Visibility = Visibility.Collapsed, MaxWidth = 760, HorizontalAlignment = HorizontalAlignment.Left };
         body.Children.Add(bio);

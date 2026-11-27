@@ -60,6 +60,7 @@ public sealed class LibraryPane : UserControl
         create.Resources["ButtonBackgroundPointerOver"] = Ui.Brush("RaisedHiBrush");
         create.Resources["ButtonBackgroundPressed"] = Ui.Brush("RaisedHiBrush");
         create.Resources["ButtonForegroundPointerOver"] = Ui.Brush("TextPrimaryBrush");
+        Motion.Press(create);
         head.Children.Add(titleButton); head.Children.Add(create);
         _titleButton = titleButton; _create = create;
 
@@ -131,6 +132,17 @@ public sealed class LibraryPane : UserControl
         _title.Visibility = rail ? Visibility.Collapsed : Visibility.Visible;
         RailChanged?.Invoke(rail, byUser);
         Render();
+        // layout snaps to 80 / 300 px at once; the visual settle runs on the compositor (no per-frame width animation)
+        if (IsLoaded && Motion.Enabled)
+        {
+            Motion.Swap(_head);
+            if (!rail)
+            {
+                Motion.Enter(_tools, rise: 0, slide: -18, move: Motion.Push);
+                Motion.Enter(_items, rise: 0, slide: -14, move: Motion.Push);
+            }
+            else Motion.Enter(_items, rise: 0, slide: 12, move: Motion.Control);
+        }
     }
 
     private IEnumerable<Entry> Entries()

@@ -295,6 +295,7 @@ public sealed partial class MainWindow : Window, IShell
         var browse = Ui.IconButton(Glyphs.Browse, "浏览全部", (_, _) => Navigate("search:"), 40, 18);
         browse.Resources["ButtonForegroundPointerOver"] = Ui.Brush("TextPrimaryBrush");
         browse.VerticalAlignment = VerticalAlignment.Center;
+        Motion.Press(browse);
         var glass = Ui.Icon(Glyphs.Search, 18);
         glass.VerticalAlignment = VerticalAlignment.Center; glass.Margin = new Thickness(12, 0, 0, 0); glass.IsHitTestVisible = false;
         var separator = new Microsoft.UI.Xaml.Shapes.Rectangle { Width = 1, Height = 24, Fill = Ui.Brush("LineBrush"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(4, 0, 2, 0) };
@@ -348,10 +349,12 @@ public sealed partial class MainWindow : Window, IShell
         };
         var settings = Ui.IconButton(Glyphs.Settings, "设置", (_, _) => Navigate("settings"), 36, 16);
         settings.Resources["ButtonForegroundPointerOver"] = Ui.Brush("TextPrimaryBrush");
+        Motion.Press(settings);
         _settingsButton = settings;
         _panelToggle = Ui.IconToggle(Glyphs.Panel, "显示或隐藏正在播放", 36);
         _panelToggle.IsChecked = _settings.PanelOpen;
-        _panelToggle.Click += (_, _) => { SetPanel(_panelToggle.IsChecked == true); if (_panelToggle.IsChecked == true) _panel?.Show("now", animate: false); };
+        Motion.Press(_panelToggle);
+        _panelToggle.Click += (_, _) => { Motion.PopIcon(_panelToggle); SetPanel(_panelToggle.IsChecked == true); if (_panelToggle.IsChecked == true) _panel?.Show("now", animate: false); };
         TopEnd.Children.Add(_connection); TopEnd.Children.Add(settings); TopEnd.Children.Add(_panelToggle);
         SyncUpdatePill();
 
@@ -629,7 +632,7 @@ public sealed partial class MainWindow : Window, IShell
         if (_music is not { } music) return;
         if (route == "back") { GoBack(); return; }
         if (!replace && route != _route) { _back.Add(_route); _forward.Clear(); }
-        Show(route, music);
+        Show(route, music, replace);
     }
 
     public void GoBack()
@@ -648,7 +651,7 @@ public sealed partial class MainWindow : Window, IShell
         Show(r, _music);
     }
 
-    private void Show(string route, MusicService music)
+    private void Show(string route, MusicService music, bool replace = false)
     {
         var clock = System.Diagnostics.Stopwatch.StartNew();
         _view?.Leave();
@@ -669,7 +672,9 @@ public sealed partial class MainWindow : Window, IShell
         };
         _view = view;
         MainHost.Child = view;
-        Motion.Enter(view, rise: 6, move: Motion.Push); // the page fades in; its rows and cards rise in after it
+        // live search updates replace the view in place: fade quietly instead of jumping vertically on every keystroke
+        if (replace && kind == "search") Motion.Swap(view);
+        else Motion.Enter(view, rise: Motion.PageRise, move: Motion.PageMove);
         Title = view.Title.Length > 0 ? $"{view.Title} · Sonus" : "Sonus";
         if (_search is not null && kind != "search" && _search.FocusState == FocusState.Unfocused) _search.Text = "";
         SyncActiveNav(kind);

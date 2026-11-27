@@ -280,6 +280,7 @@ public sealed class Chips : StackPanel
             b.Resources["ToggleButtonBackgroundPressed"] = Ui.Brush("RaisedHiBrush");
             b.Resources["ToggleButtonForegroundPointerOver"] = Ui.Brush("TextPrimaryBrush");
             b.Resources["ToggleButtonForegroundPressed"] = Ui.Brush("TextPrimaryBrush");
+            Motion.Press(b);
             b.Click += (_, _) =>
             {
                 Value = b.IsChecked == true ? v : null;

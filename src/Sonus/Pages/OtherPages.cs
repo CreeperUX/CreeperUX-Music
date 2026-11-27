@@ -113,7 +113,7 @@ public sealed class SearchPage : View
         body.Children.Add(chips);
         var host = new StackPanel { Spacing = 28 };
         body.Children.Add(host);
-        void Render(string? kind)
+        void Render(string? kind, bool animate)
         {
             host.Children.Clear();
             songList.SetIds(kind == "track" ? r.Tracks : []);
@@ -137,9 +137,10 @@ public sealed class SearchPage : View
                 host.Children.Add(Cards.Shelf(Music, Shell, "歌单", playlists.Select(id => new CardRef("playlist", id)).ToList()));
             }
             else if (kind != "track") host.Children.Add(Cards.Grid(Music, Shell, (kind == "artist" ? r.Artists : kind == "album" ? r.Albums : playlists).Select(id => new CardRef(kind, id))));
+            if (animate && kind != "track") Motion.Enter(host, rise: 14, move: TimeSpan.FromMilliseconds(240));
         }
-        chips.Changed += Render;
-        Render(null);
+        chips.Changed += kind => Render(kind, animate: true);
+        Render(null, animate: false);
     }
 
     private FrameworkElement TopResult(CardRef best)
@@ -266,6 +267,7 @@ public sealed class LyricsPage : View
             if (l.Time is { } time) line.Click += (_, _) => Music.Seek(time);
             _lines.Children.Add(line);
         }
+        Motion.Enter(_lines, rise: 12, move: Motion.Push);
         Follow(Music.Position);
     }
 

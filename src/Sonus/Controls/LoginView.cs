@@ -48,9 +48,11 @@ public sealed class LoginView : UserControl
         _error.Visibility = error is null ? Visibility.Collapsed : Visibility.Visible;
         AutomationProperties.SetLiveSetting(_error, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Assertive);
         _submit = new Button { Content = "登录", Style = Ui.Style("AccentButtonStyle"), MinWidth = 120, Padding = new Thickness(20, 8, 20, 8), CornerRadius = new CornerRadius(18) };
+        Motion.Press(_submit);
         _submit.Click += async (_, _) => await Go(_server.Text, _user.Text, _password.Password);
         _password.KeyDown += async (_, e) => { if (e.Key == Windows.System.VirtualKey.Enter) await Go(_server.Text, _user.Text, _password.Password); };
         _browser = new Button { Content = Ui.Row(8, Ui.Icon(Glyphs.External, 14), Ui.Text("在浏览器中登录")), Style = Ui.Style("PillButtonStyle"), Padding = new Thickness(16, 8, 16, 8) };
+        Motion.Press(_browser);
         AutomationProperties.SetName(_browser, "在浏览器中登录");
         ToolTipService.SetToolTip(_browser, "在服务器的网页上登录并允许这台电脑，不用在这里输密码；开启了二步验证的服务器用这个最方便。");
         _browser.Click += async (_, _) => await GoBrowser();
@@ -67,6 +69,7 @@ public sealed class LoginView : UserControl
             b.Resources["ButtonBackgroundPressed"] = Ui.Brush("HoverBrush");
             b.Resources["ButtonBorderBrushPointerOver"] = Ui.Brush("LineBrush");
             b.Resources["ButtonBorderBrushPressed"] = Ui.Brush("LineBrush");
+            Motion.Press(b);
             return b;
         }
         var reopen = WaitButton("重新打开浏览器");
@@ -85,6 +88,7 @@ public sealed class LoginView : UserControl
         if (demoServer is not null)
         {
             var demo = _demo = new Button { Content = Ui.Row(8, Ui.Icon(Glyphs.Music, 14), Ui.Text("使用本机的演示服务器")), Style = Ui.Style("PillButtonStyle"), Padding = new Thickness(16, 8, 16, 8) };
+            Motion.Press(demo);
             AutomationProperties.SetName(demo, "使用本机的演示服务器");
             demo.Click += async (_, _) => await Go(demoServer, DemoAccount.User, DemoAccount.Password);
             demoRow = Ui.Row(12, demo);
@@ -105,6 +109,7 @@ public sealed class LoginView : UserControl
             Shadow = new Microsoft.UI.Xaml.Media.ThemeShadow(), Translation = new System.Numerics.Vector3(0, 0, 24),
         };
         foreach (var e in new UIElement?[] { brand, title, intro, _server, _plain, _user, _password, _error, actions, demoRow, _waiting, note }) if (e is not null) card.Children.Add(e);
+        Motion.Enter(card, rise: 14, move: Motion.Push, transitions: true);
         Content = new ScrollViewer { Content = card, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         Loaded += (_, _) => { if (windowActive) ((Control)(_server.Text.Length > 0 ? _user : _server)).Focus(FocusState.Programmatic); };
     }
@@ -158,6 +163,7 @@ public sealed class LoginView : UserControl
             var start = _started = await DeviceLogin.StartAsync(server, "Sonus", DeviceName, cancel: cancel.Token);
             _code.Text = start.UserCode;
             _waiting.Visibility = Visibility.Visible;
+            Motion.Enter(_waiting, rise: 12, move: Motion.Push);
             if (OpenBrowser is { } open) await open(start.VerificationUrl);
             var (state, login) = await DeviceLogin.WaitAsync(start, cancel: cancel.Token);
             switch (state)

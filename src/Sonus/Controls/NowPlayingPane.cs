@@ -86,9 +86,9 @@ public sealed class NowPlayingPane : UserControl
         }
         else
         {
-            if (mode == "queue") RenderQueue(); else RenderNow(force: true);
+            if (mode == "queue") RenderQueue(animate); else RenderNow(force: true);
             if (was == "devices") CloseSheet(animate); // it sinks away from what is under it
-            else if (animate) Motion.Enter(_body, rise: 12); // now playing and the queue: one rises in where the other was
+            else if (animate) Motion.Enter(_body, rise: 14, move: TimeSpan.FromMilliseconds(240)); // now playing and the queue: one rises in where the other was
         }
         UpdateHeading();
         if (animate) Motion.Swap(_titles);
@@ -277,14 +277,16 @@ public sealed class NowPlayingPane : UserControl
     public string? CurrentLyric { get; private set; }
 
     // ---------------------------------------------------------------- Queue
-    private void RenderQueue()
+    private void RenderQueue(bool animate = false)
     {
         var body = new StackPanel { Spacing = 8, Padding = new Thickness(8, 0, 8, 24) };
+        int rowIndex = 0;
+        void AddRow(Grid row) { if (animate && rowIndex < 8) Motion.Stagger(row, rowIndex, rise: 12); rowIndex++; body.Children.Add(row); }
         var current = _music.Current;
         if (current is not null)
         {
             body.Children.Add(Section("正在播放", null));
-            body.Children.Add(Row(current, null, playing: true));
+            AddRow(Row(current, null, playing: true));
         }
         var entries = _music.Queue.Entries;
         var manual = entries.Where(e => e.Manual).ToList();
@@ -292,12 +294,12 @@ public sealed class NowPlayingPane : UserControl
         if (manual.Count > 0)
         {
             body.Children.Add(Section("接下来播放", () => _music.QueueClear(manual: true)));
-            foreach (var e in manual) if (_music.Library.Track(e.TrackId) is { } t) body.Children.Add(Row(t, e));
+            foreach (var e in manual) if (_music.Library.Track(e.TrackId) is { } t) AddRow(Row(t, e));
         }
         if (rest.Count > 0)
         {
             body.Children.Add(Section($"接下来：{_music.Queue.Context?.Label}", () => _music.QueueClear(manual: false)));
-            foreach (var e in rest) if (_music.Library.Track(e.TrackId) is { } t) body.Children.Add(Row(t, e));
+            foreach (var e in rest) if (_music.Library.Track(e.TrackId) is { } t) AddRow(Row(t, e));
         }
         if (current is null && entries.Count == 0) body.Children.Add(Ui.Text("队列里没有歌曲", "MutedTextStyle"));
         AutomationProperties.SetName(body, "播放队列");

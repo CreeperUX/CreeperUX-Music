@@ -1,6 +1,12 @@
 package com.creeperux.sonus.ui.components
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -8,8 +14,8 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,14 +39,17 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
@@ -49,7 +58,15 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import coil3.compose.SubcomposeAsyncImage
+import coil3.compose.AsyncImage
+import coil3.compose.LocalPlatformContext
+import coil3.memory.MemoryCache
+import coil3.request.ImageRequest
+import coil3.request.crossfade
+import com.creeperux.sonus.ui.LocalMotion
+import com.creeperux.sonus.ui.Motion
+import com.creeperux.sonus.ui.pressScale
+import com.creeperux.sonus.ui.rememberHaptics
 import com.creeperux.sonus.ui.icons.KitIcon
 import com.creeperux.sonus.ui.theme.Shapes
 import com.creeperux.sonus.ui.theme.Sonus
@@ -60,18 +77,28 @@ fun Dp.px(): Int = with(LocalDensity.current) { this@px.roundToPx() }
 
 /**
  * A cover: the image when there is one, else the raised colour with an icon. [url] comes from
- * MusicSession.coverUrl(albumId, size.px()), so the server is asked for the size the Windows app would ask.
+ * MusicSession.coverUrl(albumId, size.px()), so the server is asked for the size the Windows app would ask. The image
+ * fades in over the raised colour (Coil's crossfade; AsyncImage, not a subcomposition per row, so long lists scroll
+ * lightly). With [follows], a new image cross-fades from the one before (the player's cover when the song changes)
+ * instead of from the empty colour.
  */
 @Composable
-fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, shape: Shape = RoundedCornerShape(Shapes.smallCover), placeholder: String = "album") {
+fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, shape: Shape = RoundedCornerShape(Shapes.smallCover), placeholder: String = "album", follows: Boolean = false) {
     val c = Sonus.colors
+    val context = LocalPlatformContext.current
+    var shown by remember(url) { mutableStateOf(false) } // the image is there: the icon under it is not drawn
+    val previous = remember { mutableStateOf<MemoryCache.Key?>(null) }
     Box(modifier.size(size).clip(shape).background(c.raised), contentAlignment = Alignment.Center) {
-        if (url == null) {
-            KitIcon(placeholder, size = size * 0.32f, tint = c.textQuiet)
-        } else {
-            SubcomposeAsyncImage(
-                model = url, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize(),
-                loading = {}, error = { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { KitIcon(placeholder, size = size * 0.32f, tint = c.textQuiet) } },
+        if (url == null || !shown) KitIcon(placeholder, size = size * 0.32f, tint = c.textQuiet)
+        if (url != null) {
+            val request = remember(url) {
+                ImageRequest.Builder(context).data(url).crossfade(if (follows) Motion.SHEET else 180)
+                    .apply { if (follows) previous.value?.let { placeholderMemoryCacheKey(it) } }
+                    .build()
+            }
+            AsyncImage(
+                model = request, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize(),
+                onSuccess = { shown = true; previous.value = it.result.memoryCacheKey },
             )
         }
     }
@@ -90,26 +117,44 @@ fun SpecialCover(kind: String, size: Dp, modifier: Modifier = Modifier, shape: S
     }
 }
 
-/** A tap target that grows a little when pressed (the Windows app's 0.97 / 1.04 button motion, pressed only). */
+/** A tap target that gives a little when pressed and comes back (the Windows app's press and release: 60 and 120 ms). */
 @Composable
-fun Modifier.pressable(onClick: () -> Unit, label: String? = null, enabled: Boolean = true): Modifier {
+fun Modifier.pressable(onClick: () -> Unit, label: String? = null, enabled: Boolean = true, onLongClick: (() -> Unit)? = null): Modifier {
     val source = remember { MutableInteractionSource() }
-    val pressed by source.collectIsPressedAsState()
+    val haptics = rememberHaptics()
     return this
-        .scale(if (pressed) 0.96f else 1f)
+        .pressScale(source)
         .then(if (label != null) Modifier.semantics { contentDescription = label } else Modifier)
-        .clickable(interactionSource = source, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
+        .combinedClickable(
+            interactionSource = source, indication = null, enabled = enabled, role = Role.Button, onClick = onClick,
+            onLongClick = onLongClick?.let { long -> { haptics.longPress(); long() } },
+        )
+}
+
+/** Play or pause, the one turning into the other (a quick scale and fade, as the Windows bar's icon pop). */
+@Composable
+fun PlayPauseIcon(playing: Boolean, size: Dp, tint: Color) {
+    AnimatedContent(
+        playing,
+        transitionSpec = {
+            (scaleIn(tween(Motion.CONTROL, easing = Motion.EaseOut), initialScale = 0.6f) + fadeIn(tween(Motion.ENTER))) togetherWith
+                (scaleOut(tween(Motion.EXIT), targetScale = 0.6f) + fadeOut(tween(Motion.EXIT)))
+        },
+        contentAlignment = Alignment.Center,
+        label = "play-pause",
+    ) { on -> KitIcon(if (on) "pause" else "play", size = size, tint = tint) }
 }
 
 /** The round amber play button of pages and cards. */
 @Composable
 fun PlayButton(playing: Boolean, size: Dp, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val c = Sonus.colors
+    val haptics = rememberHaptics()
     Box(
-        modifier.size(size).clip(CircleShape).background(c.accent).pressable(onClick, if (playing) "暂停" else "播放"),
+        modifier.size(size).clip(CircleShape).background(c.accent).pressable({ haptics.tap(); onClick() }, if (playing) "暂停" else "播放"),
         contentAlignment = Alignment.Center,
     ) {
-        KitIcon(if (playing) "pause" else "play", size = size * 0.36f, tint = c.onAccent)
+        PlayPauseIcon(playing, size * 0.36f, c.onAccent)
     }
 }
 
@@ -176,14 +221,23 @@ fun PillButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier,
 /** The three bars that move beside the playing song (KitIcon.cs: 3 px bars, 0.82 / 1.06 / 0.74 s). */
 @Composable
 fun LevelBars(playing: Boolean, modifier: Modifier = Modifier, color: Color = Sonus.colors.accentText, height: Dp = 14.dp) {
+    val moving = playing && LocalMotion.current // with animations off, still bars
     val t = rememberInfiniteTransition(label = "bars")
     val periods = intArrayOf(820, 1060, 740)
     val levels = periods.mapIndexed { i, ms ->
         t.animateFloat(0.25f + i * 0.1f, 1f, infiniteRepeatable(tween(ms / 2, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "bar$i")
     }
     Row(modifier.height(height), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.Bottom) {
-        levels.forEach { l ->
-            Box(Modifier.width(3.dp).fillMaxHeight(if (playing) l.value else 0.3f).clip(RoundedCornerShape(1.dp)).background(color))
+        levels.forEachIndexed { i, l ->
+            // drawn smaller, not laid out again: the bars move without recomposing the row
+            Box(
+                Modifier.width(3.dp).fillMaxHeight()
+                    .graphicsLayer {
+                        scaleY = if (moving) l.value else if (playing) 0.55f + i * 0.15f else 0.3f
+                        transformOrigin = TransformOrigin(0.5f, 1f)
+                    }
+                    .clip(RoundedCornerShape(1.dp)).background(color),
+            )
         }
     }
 }

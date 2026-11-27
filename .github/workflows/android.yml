@@ -48,7 +48,8 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v6
 
-      - run: ./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug --console=plain
+      # the debug build, and the test build people install (R8, the baseline profile), which must build too
+      - run: ./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug :app:assemblePreview --console=plain
 
       - name: Test reports
         if: failure()

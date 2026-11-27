@@ -53,6 +53,7 @@ import com.creeperux.sonus.ui.components.SectionHeader
 import com.creeperux.sonus.ui.components.pageTint
 import com.creeperux.sonus.ui.components.pressable
 import com.creeperux.sonus.ui.components.px
+import com.creeperux.sonus.ui.entrance
 import com.creeperux.sonus.ui.pageTop
 import com.creeperux.sonus.ui.theme.Shapes
 import com.creeperux.sonus.ui.theme.Sonus
@@ -139,11 +140,11 @@ fun HomeScreen() {
                 if (filter.isEmpty()) QuickTiles(tiles)
             }
         }
-        for (key in wanted) {
+        for ((shelf, key) in wanted.withIndex()) {
             val cards = shelves.byKey(key)
             if (cards.isEmpty()) continue
             item(key) {
-                Column(Modifier.padding(top = 24.dp)) {
+                Column(Modifier.entrance(6 + shelf).padding(top = 24.dp)) {
                     SectionHeader(ShelfTitles.getValue(key), Modifier.padding(horizontal = 16.dp), "显示全部") { nav.go(Route.Shelf(key)) }
                     Spacer(Modifier.height(8.dp))
                     LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -161,9 +162,9 @@ private fun QuickTiles(tiles: List<CardRef>) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val columns = if (maxWidth >= 900.dp) 4 else 2
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            tiles.chunked(columns).forEach { row ->
+            tiles.chunked(columns).forEachIndexed { r, row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    row.forEach { QuickTile(it, Modifier.weight(1f)) }
+                    row.forEachIndexed { i, tile -> QuickTile(tile, Modifier.weight(1f).entrance(r * columns + i)) }
                     repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
                 }
             }

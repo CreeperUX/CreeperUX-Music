@@ -1,10 +1,15 @@
 package com.creeperux.sonus.ui.screens
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -52,9 +57,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
@@ -66,13 +71,14 @@ import androidx.compose.ui.unit.sp
 import com.creeperux.sonus.core.Formats
 import com.creeperux.sonus.core.LyricLine
 import com.creeperux.sonus.core.LyricsParser
-import com.creeperux.sonus.core.PlaybackOrder
 import com.creeperux.sonus.core.PlayQueue
+import com.creeperux.sonus.core.PlaybackOrder
 import com.creeperux.sonus.core.Track
 import com.creeperux.sonus.playback.PlayerStatus
 import com.creeperux.sonus.ui.LocalNav
 import com.creeperux.sonus.ui.LocalPlayer
 import com.creeperux.sonus.ui.LocalSession
+import com.creeperux.sonus.ui.Motion
 import com.creeperux.sonus.ui.OnlineDot
 import com.creeperux.sonus.ui.PanelView
 import com.creeperux.sonus.ui.PlayerView
@@ -80,6 +86,7 @@ import com.creeperux.sonus.ui.Route
 import com.creeperux.sonus.ui.components.AudioFacts
 import com.creeperux.sonus.ui.components.Cover
 import com.creeperux.sonus.ui.components.EmptyState
+import com.creeperux.sonus.ui.components.PlayPauseIcon
 import com.creeperux.sonus.ui.components.RoundButton
 import com.creeperux.sonus.ui.components.TrackMenu
 import com.creeperux.sonus.ui.components.pressable
@@ -87,6 +94,8 @@ import com.creeperux.sonus.ui.components.px
 import com.creeperux.sonus.ui.components.rememberCoverColor
 import com.creeperux.sonus.ui.components.shade
 import com.creeperux.sonus.ui.icons.KitIcon
+import com.creeperux.sonus.ui.pressScale
+import com.creeperux.sonus.ui.rememberHaptics
 import com.creeperux.sonus.ui.theme.Display
 import com.creeperux.sonus.ui.theme.Shapes
 import com.creeperux.sonus.ui.theme.Sonus
@@ -123,6 +132,12 @@ fun SeekBar(modifier: Modifier = Modifier, light: Boolean = false) {
     }
     val shown = if (slider.isDragging) slider.value.toDouble() else position.coerceIn(0.0, if (duration > 0) duration else 0.0)
     val text = if (light) Color.White else c.text
+    // held, it grows under the finger (the thumb and the track), as Spotify's; a light tick when it is taken and let go
+    val haptics = rememberHaptics()
+    val held = slider.isDragging
+    LaunchedEffect(held) { if (held) haptics.dragStart() }
+    val thumb by animateDpAsState(if (held) 18.dp else 12.dp, tween(Motion.CONTROL, easing = Motion.EaseOut), label = "thumb")
+    val track by animateDpAsState(if (held) 6.dp else 4.dp, tween(Motion.CONTROL, easing = Motion.EaseOut), label = "track")
     val colors = SliderDefaults.colors(
         thumbColor = text, activeTrackColor = if (slider.isDragging) c.accent else text, inactiveTrackColor = text.copy(alpha = 0.22f),
         disabledThumbColor = text.copy(alpha = 0.3f), disabledActiveTrackColor = text.copy(alpha = 0.3f), disabledInactiveTrackColor = text.copy(alpha = 0.12f),
@@ -131,12 +146,15 @@ fun SeekBar(modifier: Modifier = Modifier, light: Boolean = false) {
         Slider(
             state = slider,
             onValueChange = { slider.value = it },
-            onValueChangeFinished = { player.seek(slider.value.toDouble()) },
+            onValueChangeFinished = {
+                if (held) haptics.dragEnd()
+                player.seek(slider.value.toDouble())
+            },
             modifier = Modifier.fillMaxWidth().height(24.dp).testTag("seek"),
             enabled = duration > 0,
             colors = colors,
-            thumb = { Box(Modifier.size(12.dp).clip(CircleShape).background(if (duration > 0) text else text.copy(alpha = 0.3f))) },
-            track = { s: SliderState -> SliderDefaults.Track(s, Modifier.height(4.dp), colors = colors, drawStopIndicator = null, thumbTrackGapSize = 0.dp) },
+            thumb = { Box(Modifier.size(thumb).clip(CircleShape).background(if (duration > 0) text else text.copy(alpha = 0.3f))) },
+            track = { s: SliderState -> SliderDefaults.Track(s, Modifier.height(track), colors = colors, drawStopIndicator = null, thumbTrackGapSize = 0.dp) },
         )
         Row {
             Text(Formats.duration(shown), style = Sonus.type.numbers, color = text.copy(alpha = 0.7f), modifier = Modifier.testTag("position"))
@@ -156,14 +174,16 @@ fun Controls(big: Boolean, modifier: Modifier = Modifier, light: Boolean = false
     val repeat = state.order == PlaybackOrder.RepeatPlaylist || state.order == PlaybackOrder.RepeatTrack
     val fg = if (light) Color.White else c.text
     val playSize = if (big) 68.dp else 40.dp
+    val haptics = rememberHaptics()
     Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = if (big) Arrangement.SpaceBetween else Arrangement.spacedBy(12.dp)) {
         RoundButton("shuffle", "随机播放", { player.setOrder(if (shuffled) PlaybackOrder.Default else PlaybackOrder.ShuffleTracks) }, on = shuffled, tint = if (shuffled) c.accent else fg, size = if (big) 48.dp else 36.dp)
         RoundButton("skip-previous", "上一首", player::previous, tint = fg, size = if (big) 56.dp else 36.dp, iconSize = if (big) 26.dp else 18.dp)
         Box(
-            Modifier.size(playSize).clip(CircleShape).background(if (light) Color.White else c.playButton).pressable(player::togglePlay, if (state.isActive) "暂停" else "播放").testTag("play-pause"),
+            Modifier.size(playSize).clip(CircleShape).background(if (light) Color.White else c.playButton)
+                .pressable({ haptics.tap(); player.togglePlay() }, if (state.isActive) "暂停" else "播放").testTag("play-pause"),
             contentAlignment = Alignment.Center,
         ) {
-            KitIcon(if (state.isActive) "pause" else "play", size = playSize * 0.38f, tint = if (light) Color(0xFF111416) else c.onPlayButton)
+            PlayPauseIcon(state.isActive, playSize * 0.38f, if (light) Color(0xFF111416) else c.onPlayButton)
         }
         RoundButton("skip-next", "下一首", player::next, tint = fg, size = if (big) 56.dp else 36.dp, iconSize = if (big) 26.dp else 18.dp)
         RoundButton(
@@ -188,15 +208,22 @@ private fun Heart(t: Track, light: Boolean = false, size: Dp = 40.dp) {
     val c = Sonus.colors
     val session = LocalSession.current
     val scope = rememberCoroutineScope()
-    var pop by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (pop) 1.28f else 1f, tween(140), finishedListener = { pop = false }, label = "like")
+    val haptics = rememberHaptics()
+    val scale = remember { Animatable(1f) }
     RoundButton(
         if (t.liked) "heart-filled" else "heart", if (t.liked) "取消喜欢" else "喜欢",
         {
-            pop = !t.liked
-            scope.launch { session.setLiked(t.id, !t.liked) }
+            val liking = !t.liked
+            haptics.toggle(liking)
+            if (liking) {
+                scope.launch {
+                    scale.animateTo(1.28f, tween(110, easing = Motion.EaseOut))
+                    scale.animateTo(1f, spring(dampingRatio = 0.45f, stiffness = Spring.StiffnessMedium))
+                }
+            }
+            scope.launch { session.setLiked(t.id, liking) }
         },
-        Modifier.scale(scale).testTag("like"), size = size,
+        Modifier.graphicsLayer { scaleX = scale.value; scaleY = scale.value }.testTag("like"), size = size,
         tint = if (t.liked) c.accent else if (light) Color.White.copy(alpha = 0.8f) else c.textMuted,
     )
 }
@@ -205,7 +232,7 @@ private fun Heart(t: Track, light: Boolean = false, size: Dp = 40.dp) {
 
 /** The bar above the phone's tabs: the song, play/pause, and a thin line of progress. Tapping it opens the player. */
 @Composable
-fun MiniPlayer(open: () -> Unit) {
+fun MiniPlayer(open: () -> Unit, modifier: Modifier = Modifier, coverModifier: Modifier = Modifier) {
     val c = Sonus.colors
     val session = LocalSession.current
     val player = LocalPlayer.current
@@ -213,11 +240,16 @@ fun MiniPlayer(open: () -> Unit) {
     val position by player.position.collectAsState()
     val t = currentTrack() ?: return
     val tint = rememberCoverColor(session.trackCoverUrl(t, 64))
-    val back by animateColorAsState(tint?.let { if (c.isDark) lerp(c.raised, it.shade(0.35f), 0.7f) else lerp(c.raised, it, 0.18f) } ?: c.raised, tween(400), label = "mini")
-    Box(Modifier.fillMaxWidth().background(c.panel).padding(horizontal = 8.dp, vertical = 6.dp)) {
-        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(Shapes.panel)).background(back).clickable(onClick = open).testTag("mini-player")) {
+    val back by animateColorAsState(tint?.let { if (c.isDark) lerp(c.raised, it.shade(0.35f), 0.7f) else lerp(c.raised, it, 0.18f) } ?: c.raised, tween(Motion.TINT), label = "mini")
+    val haptics = rememberHaptics()
+    val source = remember { MutableInteractionSource() }
+    Box(modifier.fillMaxWidth().background(c.panel).padding(horizontal = 8.dp, vertical = 6.dp)) {
+        Column(
+            Modifier.fillMaxWidth().pressScale(source, pressed = 0.98f).clip(RoundedCornerShape(Shapes.panel)).background(back)
+                .clickable(interactionSource = source, indication = null, onClick = open).testTag("mini-player"),
+        ) {
             Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Cover(session.trackCoverUrl(t, 44.dp.px()), 44.dp)
+                Box(coverModifier.size(44.dp)) { Cover(session.trackCoverUrl(t, 44.dp.px()), 44.dp, Modifier.fillMaxSize(), follows = true) }
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
                     Text(t.title, style = Sonus.type.cardTitle, color = c.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -231,7 +263,10 @@ fun MiniPlayer(open: () -> Unit) {
                     }
                 }
                 Heart(t, size = 40.dp)
-                RoundButton(if (state.isActive) "pause" else "play", if (state.isActive) "暂停" else "播放", player::togglePlay, Modifier.testTag("mini-play"), size = 44.dp, iconSize = 20.dp)
+                Box(
+                    Modifier.size(44.dp).clip(CircleShape).pressable({ haptics.tap(); player.togglePlay() }, if (state.isActive) "暂停" else "播放").testTag("mini-play"),
+                    contentAlignment = Alignment.Center,
+                ) { PlayPauseIcon(state.isActive, 20.dp, c.text) }
             }
             val d = state.duration
             val f = if (d > 0) (position / d).toFloat().coerceIn(0f, 1f) else 0f
@@ -248,7 +283,7 @@ fun MiniPlayer(open: () -> Unit) {
  * and the controls, on the cover's colour.
  */
 @Composable
-fun FullPlayer() {
+fun FullPlayer(dragModifier: Modifier = Modifier, coverModifier: Modifier = Modifier) {
     val c = Sonus.colors
     val session = LocalSession.current
     val nav = LocalNav.current
@@ -256,7 +291,7 @@ fun FullPlayer() {
     val state by player.state.collectAsState()
     val t = currentTrack()
     val tint = rememberCoverColor(t?.let { session.trackCoverUrl(it, 64) })
-    val top by animateColorAsState(tint?.let { lerp(Color(0xFF151B1F), it, 0.85f) } ?: Color(0xFF20272C), tween(500), label = "top")
+    val top by animateColorAsState(tint?.let { lerp(Color(0xFF151B1F), it, 0.85f) } ?: Color(0xFF20272C), tween(Motion.TINT), label = "top")
     val view = nav.playerView.value
     var menu by remember { mutableStateOf(false) }
     Column(
@@ -269,7 +304,7 @@ fun FullPlayer() {
             .padding(horizontal = 24.dp)
             .testTag("full-player"),
     ) {
-        Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().then(dragModifier).padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             RoundButton("chevron-down", "收起", { nav.playerOpen.value = false }, tint = Color.White)
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                 if (rememberLink()?.where != null) WhereLine(light = true) else Text("正在播放", style = Sonus.type.caption, color = Color.White.copy(alpha = 0.7f))
@@ -282,10 +317,10 @@ fun FullPlayer() {
         }
         Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
             when (view) {
-                PlayerView.Cover -> BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                PlayerView.Cover -> BoxWithConstraints(Modifier.fillMaxSize().then(dragModifier), contentAlignment = Alignment.Center) {
                     val side = minOf(maxWidth, maxHeight)
-                    Box(Modifier.size(side).shadow(28.dp, RoundedCornerShape(Shapes.panel))) {
-                        Cover(t?.let { session.trackCoverUrl(it, side.px()) }, side, shape = RoundedCornerShape(Shapes.panel))
+                    Box(coverModifier.size(side).shadow(28.dp, RoundedCornerShape(Shapes.panel))) {
+                        Cover(t?.let { session.trackCoverUrl(it, side.px()) }, side, Modifier.fillMaxSize(), shape = RoundedCornerShape(Shapes.panel), follows = true)
                     }
                 }
                 PlayerView.Lyrics -> if (t != null) LyricsView(t, LyricsStyle.Full, light = true)
@@ -502,7 +537,7 @@ fun PlaybackBar() {
         Row(Modifier.fillMaxWidth().height(88.dp).padding(horizontal = 16.dp).testTag("playback-bar"), verticalAlignment = Alignment.CenterVertically) {
             Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                 if (t != null) {
-                    Cover(session.trackCoverUrl(t, 56.dp.px()), 56.dp)
+                    Cover(session.trackCoverUrl(t, 56.dp.px()), 56.dp, follows = true)
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f, fill = false)) {
                         Text(t.title, style = Sonus.type.cardTitle, color = c.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { nav.go(Route.Album(t.albumId)) })

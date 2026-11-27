@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -49,6 +50,7 @@ import com.creeperux.sonus.ui.components.LevelBars
 import com.creeperux.sonus.ui.components.PlaylistCover
 import com.creeperux.sonus.ui.components.RoundButton
 import com.creeperux.sonus.ui.components.px
+import com.creeperux.sonus.ui.entrance
 import com.creeperux.sonus.ui.icons.KitIcon
 import com.creeperux.sonus.ui.pageTop
 import com.creeperux.sonus.ui.theme.Shapes
@@ -185,10 +187,11 @@ fun LibraryList(pane: Boolean) {
                 Spacer(Modifier.height(6.dp))
             }
         }
-        items(shown, key = { it.key }) { e ->
+        itemsIndexed(shown, key = { _, e -> e.key }) { i, e ->
             val playing = state.context?.let { it.kind == e.type && it.id == e.id } == true
             Row(
                 Modifier
+                    .entrance(i)
                     .fillMaxWidth()
                     .padding(horizontal = if (pane) 6.dp else 8.dp)
                     .clip(RoundedCornerShape(Shapes.row))

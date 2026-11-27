@@ -2,12 +2,9 @@ package com.creeperux.sonus.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -65,18 +62,15 @@ import com.creeperux.sonus.AppState
 import com.creeperux.sonus.session.MusicSession
 import com.creeperux.sonus.session.Toast
 import com.creeperux.sonus.ui.components.PillButton
-import com.creeperux.sonus.ui.components.pressable
 import com.creeperux.sonus.ui.icons.KitIcon
 import com.creeperux.sonus.ui.screens.AlbumPage
 import com.creeperux.sonus.ui.screens.ArtistPage
-import com.creeperux.sonus.ui.screens.FullPlayer
 import com.creeperux.sonus.ui.screens.GenrePage
 import com.creeperux.sonus.ui.screens.HomeScreen
 import com.creeperux.sonus.ui.screens.LibraryList
 import com.creeperux.sonus.ui.screens.LibraryRail
 import com.creeperux.sonus.ui.screens.LibraryScreen
 import com.creeperux.sonus.ui.screens.LyricsPage
-import com.creeperux.sonus.ui.screens.MiniPlayer
 import com.creeperux.sonus.ui.screens.PlaybackBar
 import com.creeperux.sonus.ui.screens.PlaylistPage
 import com.creeperux.sonus.ui.screens.RightPanel
@@ -148,7 +142,7 @@ private fun Main(graph: AppGraph, session: MusicSession) {
         session.toast.collect { t -> scope.launch { show(snackbar, t) } }
     }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { scope.launch { session.onActivated() } }
-    CompositionLocalProvider(LocalGraph provides graph, LocalSession provides session, LocalPlayer provides graph.playback, LocalNav provides nav) {
+    CompositionLocalProvider(LocalGraph provides graph, LocalSession provides session, LocalPlayer provides graph.playback, LocalNav provides nav, LocalMotion provides rememberMotionEnabled()) {
         BackHandler(nav.canGoBack) { nav.back() }
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val layout = when {
@@ -203,31 +197,9 @@ fun Page(route: Route) {
     }
 }
 
-/** The phone: the page, the mini player and the tabs; the full player slides up over them. */
-@Composable
-private fun PhoneShell(nav: Navigator) {
-    val c = Sonus.colors
-    val player = LocalPlayer.current
-    val state by player.state.collectAsState()
-    Box(Modifier.fillMaxSize().background(c.panel)) {
-        Column(Modifier.fillMaxSize()) {
-            Box(Modifier.weight(1f).fillMaxWidth()) {
-                AnimatedContent(nav.current, transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(90)) }, label = "page") { r -> Page(r) }
-            }
-            if (state.trackId != null) MiniPlayer { nav.playerOpen.value = true }
-            BottomTabs(nav)
-        }
-        AnimatedVisibility(
-            nav.playerOpen.value,
-            enter = slideInVertically(tween(280)) { it } + fadeIn(tween(200)),
-            exit = slideOutVertically(tween(220)) { it } + fadeOut(tween(180)),
-        ) { FullPlayer() }
-    }
-}
-
 /** The phone's tabs: Material 3's NavigationBar, in the Sonus colours (the selected tab on the raised colour). */
 @Composable
-private fun BottomTabs(nav: Navigator) {
+internal fun PhoneTabs(nav: Navigator) {
     val c = Sonus.colors
     NavigationBar(containerColor = c.window, tonalElevation = 0.dp, modifier = Modifier.height(80.dp + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding())) {
         Tab.entries.forEach { t ->
@@ -262,7 +234,7 @@ private fun TabletShell(nav: Navigator, layout: Layout) {
                 if (layout == Layout.TabletNarrow) LibraryRail() else LibraryList(pane = true)
             }
             Box(Modifier.weight(1f).fillMaxHeight().clip(panelShape).background(c.panel)) {
-                AnimatedContent(nav.current, transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(90)) }, label = "page") { r -> Page(r) }
+                PageHost(nav, Modifier.fillMaxSize())
             }
             if (layout == Layout.TabletWide && nav.panelOpen.value) {
                 Box(Modifier.width(340.dp).fillMaxHeight().clip(panelShape).background(c.panel)) { RightPanel() }

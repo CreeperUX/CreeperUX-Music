@@ -289,6 +289,24 @@ class PlaybackFixesTest {
     }
 
     @Test
+    fun aConnectionLostWhilePlayingHereComesBack() {
+        needsConnect()
+        val album = TestServer.playableAlbum(session.lib)
+        playHere(album, 0)
+        val link = graph.link!!
+        waitFor(what = "this device plays the session") { link.isActiveHere && link.session.playing }
+        // the connection breaks without a goodbye, as when the screen is off and the network sleeps: the app reconnects
+        // by itself, its hello saying it still plays (until 0.5.1 that hello read the player off the main thread, Media3
+        // threw, and the connection failed before it, and every reconnect after it: the phone played on, alone)
+        link.client.simulateNetworkLoss()
+        waitFor(5_000, "the loss noticed") { !link.isConnected }
+        waitFor(15_000, "connected again") { link.isConnected }
+        waitFor(10_000, "still this device, still playing") { link.isActiveHere && link.session.playing }
+        assertThat(main { graph.playback.exo.isPlaying }).isTrue()
+        assertThat(main { state.trackId }).isEqualTo(album.trackIds[0])
+    }
+
+    @Test
     fun aFailedNextSongDoesNotFailTheOneThatPlays() {
         val (album, i) = TestServer.beforeMissing(session.lib) ?: run { assumeTrue("a song whose file is gone", false); return }
         val p = session.lib.track(album.trackIds[i])!!

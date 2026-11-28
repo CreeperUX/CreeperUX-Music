@@ -3,6 +3,7 @@ package com.creeperux.sonus.core
 import com.creeperux.sonus.core.connect.PlaybackSession
 import com.creeperux.sonus.core.connect.SessionClient
 import com.creeperux.sonus.core.connect.SessionModes
+import com.creeperux.sonus.core.connect.SessionResume
 import com.google.common.truth.Truth.assertThat
 import com.google.common.truth.Truth.assertWithMessage
 import kotlinx.coroutines.async
@@ -245,6 +246,59 @@ class ConnectDemoTest {
         } finally {
             phone.stop()
             runCatching { pc.stop() }
+        }
+    }
+
+    /** A device whose hello asks the app for [resume] and [volume] (set before it starts). */
+    private suspend fun asking(id: String, resume: () -> SessionResume?, volume: () -> Pair<Double, Boolean>, problems: MutableList<String>): SessionClient {
+        val login = SubsonicClient.signIn(base, "demo", "demo", "Sonus (Test)", http)
+        val c = SubsonicClient(login, "Sonus (Test)", http)
+        c.connect()
+        return SessionClient(c, id, "手机", "phone", clientLabel = "Sonus test", http = http).also {
+            it.resume = resume
+            it.volumeNow = volume
+            it.onProblem = { p -> problems += p }
+            it.start()
+        }
+    }
+
+    @Test
+    fun aHelloGoesOutEvenWhenWhatItSaysCannotBeRead(): Unit = runBlocking {
+        // the app's player may be read on its own thread only: a resume that threw failed the connection before its
+        // hello, and every reconnect after it (a phone that lost its connection while playing never got back)
+        val problems = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val s = asking(
+            "test-throws-01",
+            resume = { throw IllegalStateException("Player is accessed on the wrong thread.") },
+            volume = { throw IllegalStateException("no volume") },
+            problems,
+        )
+        try {
+            withTimeout(10_000) { s.connected.first { it } }
+            val said = problems.joinToString(" | ")
+            assertThat(said).contains("resume left out of the hello")
+            assertThat(said).contains("volume left out of the hello")
+        } finally {
+            s.stop()
+        }
+    }
+
+    @Test
+    fun aLostConnectionComesBackAndSaysItsResumeAgain(): Unit = runBlocking {
+        val asked = java.util.concurrent.atomic.AtomicInteger()
+        val problems = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val s = asking("test-loses-01", resume = { asked.incrementAndGet(); null }, volume = { 0.5 to false }, problems)
+        try {
+            withTimeout(10_000) { s.connected.first { it } }
+            assertThat(asked.get()).isEqualTo(1)
+            // a network loss (no goodbye): noticed, then connected again by itself, the hello asking again
+            s.simulateNetworkLoss()
+            withTimeout(5_000) { s.connected.first { !it } }
+            withTimeout(10_000) { s.connected.first { it } }
+            assertThat(asked.get()).isEqualTo(2)
+            assertThat(problems.joinToString(" | ")).contains("the connection failed")
+        } finally {
+            s.stop()
         }
     }
 

@@ -7,6 +7,8 @@ use serde_json::{Value, json};
 
 /// What the Rust server answers itself: Sonus Connect version 2 (version 1 is still Navidrome's).
 pub const OURS: &[(&str, &[u64])] = &[("sonusConnect", &[2])];
+/// Advertised when the playback library (`SONUS_RENDITIONS_ENABLED`) is on.
+pub const OURS_WITH_RENDITIONS: &[(&str, &[u64])] = &[("sonusConnect", &[2]), ("sonusRenditions", &[1])];
 
 const JSON_LIST: &[u8] = b"\"openSubsonicExtensions\":[";
 

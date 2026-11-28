@@ -3,7 +3,8 @@
 // server but the one on this machine.
 //
 //   node server-library.mjs library <dir>                       53 generated songs of 2½ to 9 minutes (tagged WAV, small:
-//                                                               8 kHz mono), synced lyrics beside each, the demo covers
+//                                                               8 kHz mono), synced lyrics beside each, the demo covers;
+//                                                               and two FLAC songs of 2½ minutes
 //   node server-library.mjs start <dir> <sonus-server.exe> <navidrome.exe> [port]
 //                                                               the server (and its Navidrome) in the background, on
 //                                                               127.0.0.1:<port> (4650), two-step verification optional
@@ -23,7 +24,7 @@ import { spawn } from 'node:child_process';
 import { createHmac, randomBytes } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const [cmd, dir, ...rest] = process.argv.slice(2);
 if (!cmd || !dir) {
@@ -98,7 +99,70 @@ if (cmd === 'library') {
       n++; bytes += file.length; seconds += duration;
     }
   }
+  // two FLAC songs (44.1 kHz, flacWriter below): one taken over mid-song from another device (tools/e2e/acceptance.mjs;
+  // Windows 0.7.0 skipped it: Media Foundation's FLAC decoder failed the move to its position). An album of two short
+  // ones, named to sort last, so that nothing that looks for "an album of long songs" picks it.
+  const flac = await flacWriter();
+  const lossless = join(music, '龙吟', '2024 - 龙吟（无损）');
+  mkdirSync(lossless, { recursive: true });
+  const losslessArt = join(repo, 'tools', 'demo-server', 'covers', 'al2.jpg');
+  if (existsSync(losslessArt)) copyFileSync(losslessArt, join(lossless, 'cover.jpg'));
+  for (const [i, length] of [150, 150].entries()) {
+    const title = `无损 ${i + 1}`;
+    const file = flac({ tags: { title, artist: '龙吟', albumArtist: '龙吟', album: '龙吟（无损）', track: [i + 1, 2], disc: [1, 1], date: '2024', genres: ['Classical'] }, seconds: length, freq: 330 + 110 * i });
+    writeFileSync(join(lossless, `${String(i + 1).padStart(2, '0')} - ${title}.flac`), file);
+    n++; bytes += file.length; seconds += length;
+  }
   console.log(`library: ${n} songs, ${(seconds / 3600).toFixed(1)} h, ${(bytes / 1e6).toFixed(0)} MB in ${music}`);
+}
+
+/**
+ * A FLAC writer as an encoder's output looks to a player: the fixtures' verbatim frames (tools/fixtures/lib), with the
+ * frame sizes in STREAMINFO and a seek point every 10 s. Without those, Windows' Media Foundation could only guess where
+ * a position is, and sometimes failed the file at it: not what the owner's files, from real encoders, do.
+ */
+async function flacWriter() {
+  const lib = name => import(pathToFileURL(join(repo, 'tools', 'fixtures', 'lib', name)).href);
+  const { BitWriter, crc8, crc16, u8, u16be, u32le } = await lib('bits.mjs');
+  const { tone, pcmBytes } = await lib('pcm.mjs');
+  const { vorbisComments } = await lib('tags.mjs');
+  const { createHash } = await import('node:crypto');
+  const frameNumber = n => n < 0x80 ? Buffer.from([n]) : n < 0x800 ? Buffer.from([0xc0 | (n >> 6), 0x80 | (n & 0x3f)])
+    : Buffer.from([0xe0 | (n >> 12), 0x80 | ((n >> 6) & 0x3f), 0x80 | (n & 0x3f)]);
+  return ({ tags, seconds, freq }) => {
+    const rate = 44100, block = 4096, samples = tone(seconds, rate, freq), out = [], frames = [];
+    let offset = 0;
+    for (let i = 0, n = 0; i < samples.length; i += block, n++) {
+      const part = samples.subarray(i, Math.min(i + block, samples.length));
+      const head = new BitWriter().write(0b11111111111110, 14).write(0, 1).write(0, 1)
+        .write(part.length === block ? 0b1100 : 0b0111, 4).write(0b1001, 4).write(0, 4).write(0b100, 3).write(0, 1).buffer();
+      let h = Buffer.concat([head, frameNumber(n), ...(part.length === block ? [] : [u16be(part.length - 1)])]);
+      h = Buffer.concat([h, u8(crc8(h))]);
+      const sub = Buffer.alloc(1 + part.length * 2);
+      sub[0] = 0b00000010; // verbatim
+      for (let k = 0; k < part.length; k++) sub.writeInt16BE(part[k], 1 + k * 2);
+      const frame = Buffer.concat([h, sub]);
+      out.push(frame, u16be(crc16(frame)));
+      frames.push({ sample: i, offset, samples: part.length, size: frame.length + 2 });
+      offset += frame.length + 2;
+    }
+    const sizes = frames.map(x => x.size);
+    const info = new BitWriter().write(block, 16).write(block, 16).write(Math.min(...sizes), 24).write(Math.max(...sizes), 24)
+      .write(rate, 20).write(0, 3).write(15, 5).write(samples.length, 36).buffer();
+    const seek = [];
+    for (let t = 0; t < seconds; t += 10) {
+      const x = frames.find(y => y.sample >= t * rate) ?? frames.at(-1);
+      const p = Buffer.alloc(18); p.writeBigUInt64BE(BigInt(x.sample), 0); p.writeBigUInt64BE(BigInt(x.offset), 8); p.writeUInt16BE(x.samples, 16);
+      seek.push(p);
+    }
+    const pairs = vorbisComments(tags).map(([k, v]) => Buffer.from(`${k}=${v}`, 'utf8'));
+    const vendor = Buffer.from('Sonus test library');
+    const comments = Buffer.concat([u32le(vendor.length), vendor, u32le(pairs.length), ...pairs.flatMap(p => [u32le(p.length), p])]);
+    const meta = [[0, Buffer.concat([info, createHash('md5').update(pcmBytes(samples)).digest()])], [3, Buffer.concat(seek)], [4, comments]];
+    const head = [Buffer.from('fLaC')];
+    meta.forEach(([type, body], i) => head.push(u8((i === meta.length - 1 ? 0x80 : 0) | type), Buffer.from([(body.length >> 16) & 0xff, (body.length >> 8) & 0xff, body.length & 0xff]), body));
+    return Buffer.concat([...head, ...out]);
+  };
 }
 
 if (cmd === 'start') {

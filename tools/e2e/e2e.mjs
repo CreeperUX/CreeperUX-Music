@@ -64,7 +64,7 @@ export class TestApp {
     // ends it with the exception code and nothing else, no Windows Error Reporting, no Application Error event, no dump.
     // Outside it a crash is reported as any app's (WER's local dumps keep a .dmp, which acceptance.mjs copies). The job
     // also ended the instances with node: SONUS_E2E_PARENT does that now (the app ends itself when this process ends).
-    this.proc = spawn(this.exe, [], { env: { ...process.env, SONUS_E2E: this.pipe, SONUS_E2E_PARENT: String(process.pid), SONUS_DATA_DIR: this.data, SONUS_TEST_CREDENTIAL: TEST_RUN, ...(this.demo ? { SONUS_DEMO: this.demo } : {}), ...this.env }, stdio: 'ignore', detached: true });
+    this.proc = spawn(this.exe, [], { env: { ...process.env, SONUS_E2E: this.pipe, SONUS_E2E_PARENT: String(process.pid), SONUS_E2E_SILENT: '1', SONUS_DATA_DIR: this.data, SONUS_TEST_CREDENTIAL: TEST_RUN, ...(this.demo ? { SONUS_DEMO: this.demo } : {}), ...this.env }, stdio: 'ignore', detached: true });
     this.proc.on('exit', (code, signal) => { this.exit = { code, signal, expected: this.stopping, at: new Date() }; });
     this.proc.on('error', e => { this.exit ??= { code: null, signal: null, error: e.message, expected: false, at: new Date() }; });
     this.pid = this.proc.pid;

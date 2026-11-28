@@ -349,6 +349,7 @@ internal static class E2EChannel
             case "stopafter": m.SetStopAfterCurrent(Arg(1) == "on"); return "ok";
             case "replaygain": m.SetReplayGain(Enum.Parse<ReplayGainMode>(Arg(1))); return "ok";
             case "queue": m.QueueAdd(p.Skip(1), next: false); return "ok";
+            case "clearqueue": m.QueueClear(manual: true); return "ok"; // the songs queued by hand (a run against a server that keeps them)
             case "like": _ = m.SetLikedAsync(Arg(1), Arg(2) == "on"); return "ok";
             case "radio": _ = m.StartRadioAsync(Arg(1)); return "ok";
             case "playsearch":

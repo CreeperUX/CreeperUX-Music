@@ -10,7 +10,7 @@
     <WindowsAppSdkPackageVersion>2.5.1</WindowsAppSdkPackageVersion>
     <RootNamespace>Sonus</RootNamespace>
     <AssemblyName>Sonus</AssemblyName>
-    <Version>0.7.0</Version>
+    <Version>0.8.0</Version>
     <Product>Sonus</Product>
     <Company>CreeperUX</Company>
     <Description>Sonus</Description>
@@ -39,6 +39,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="$(WindowsAppSdkPackageVersion)" />
+    <PackageReference Include="NAudio.Wasapi" Version="3.3.0" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Sonus.Core\Sonus.Core.csproj" />

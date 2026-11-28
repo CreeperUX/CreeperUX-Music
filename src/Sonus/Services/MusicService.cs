@@ -37,7 +37,8 @@ public sealed class MusicService : IDisposable
         Client = client; _settings = settings; _ui = ui;
         Interlocked.Increment(ref Alive);
         Queue = new PlayQueue(id => Library.Track(id)) { Order = settings.Order };
-        Engine = new AudioEngine(ui) { Volume = settings.Volume, Muted = settings.Muted };
+        var core = ResolveInitialCore(settings.PlaybackCore);
+        Engine = new AudioEngine(ui, core) { Volume = settings.Volume, Muted = settings.Muted };
         Engine.StateChanged += OnEngineState;
         Engine.Advanced += OnAdvanced;
         Engine.Ended += OnEnded;
@@ -89,6 +90,7 @@ public sealed class MusicService : IDisposable
     public double Volume { get; private set; }
     public bool Muted => Engine.Muted;
     public ReplayGainMode ReplayGain { get; private set; }
+    public Sonus.Core.Audio.AudioCore PlaybackCore => Engine.Core;
     public string OutputId => _settings.OutputDeviceId ?? "";
     public bool IsActive => State is PlayerState.Playing or PlayerState.Loading;
 
@@ -456,6 +458,28 @@ public sealed class MusicService : IDisposable
     public void SetMuted(bool muted) { Engine.Muted = muted; _settings.Muted = muted; _settings.Save(); PlayerChanged?.Invoke(); }
 
     public void SetReplayGain(ReplayGainMode mode) { ReplayGain = mode; _settings.ReplayGain = mode; _settings.Save(); ApplyVolume(); PlayerChanged?.Invoke(); }
+
+    private static Sonus.Core.Audio.AudioCore ResolveInitialCore(Sonus.Core.Audio.AudioCore saved) =>
+        Environment.GetEnvironmentVariable("SONUS_AUDIO_CORE") switch
+        {
+            var s when string.Equals(s, "legacy", StringComparison.OrdinalIgnoreCase) => Sonus.Core.Audio.AudioCore.Legacy,
+            var s when string.Equals(s, "native", StringComparison.OrdinalIgnoreCase) => Sonus.Core.Audio.AudioCore.Native,
+            _ => saved,
+        };
+
+    public void SetPlaybackCore(Sonus.Core.Audio.AudioCore core)
+    {
+        if (core == Engine.Core) return;
+        bool wasPlaying = State is PlayerState.Playing or PlayerState.Loading;
+        string? trackId = Elsewhere ? null : Queue.Current;
+        double at = Position;
+        _settings.PlaybackCore = core;
+        _settings.Save();
+        Engine.SetCore(core);
+        if (trackId is not null && State != PlayerState.Stopped)
+            Load(trackId, autoplay: wasPlaying, at: at);
+        PlayerChanged?.Invoke();
+    }
 
     /// <summary>The volume after replay gain: MediaPlayer cannot go above full volume, so gains only lower it.</summary>
     public double EffectiveVolume(Track? t)

@@ -14,6 +14,7 @@ pub mod id;
 pub mod jwt;
 pub mod library;
 pub mod mirror;
+pub mod renditions;
 pub mod routes;
 pub mod secrets;
 pub mod startup;

@@ -226,6 +226,7 @@
   - **实测**：正式数据库副本上原来交给 Go 的 102 个带艺人图片的搜索，现在由 Rust 回答，链接完全相同。
 - **第 4 部分：播放器登记**（2026-11-26）：Rust 回答的请求，播放器由 Rust 自己登记，不再每分钟向 Go 发一次 `ping`。规则照搬 Go：先用 Cookie 找（必须是同一用户、同一客户端），再按用户 + 客户端 + 浏览器匹配，都没有就新建；每个播放器最多每分钟写一次，各列写法和 Go 一样；Cookie 以请求里带的用户名命名。浏览器名称用 Go 用的那个开源解析库的规则（已移植，它自带的 102 个测试用例全部通过）。Go 回答的请求仍由 Go 登记，两边按同样的规则写同样的行。
   - **实测**：比对工具现在也比较播放器表；读取 547 个、写入 187 个请求全部一致，两边数据库一致；正式数据库副本上 9847 个请求全部一致，两边各 28 行播放器记录相同。Go 的调试日志里看不到 Rust 回答的任何请求，连 `ping` 也没有了。
+- **播放库（`src/renditions/`，设计见 `docs/streaming-renditions.md`，协议见 `docs/protocol/renditions.md`）**（2026-11-28）：默认关闭（`SONUS_RENDITIONS_ENABLED`），不改原文件、不动 Navidrome 数据库。开启后在后台低优先级并行生成四档播放版（无损 FLAC 保留原采样率/位深并由 Rust 插入 1 秒 `SEEKTABLE`，DSD 用线性相位 FIR 滤镜转为 88.2 kHz/24 位 FLAC；有损三档 Opus 256 / 160 / 96 以 Ogg 封装并返回 `audio/ogg`；MP3 原文件仅生成高/普通两档），逐首从头解码并核对时长（差 ≤ 0.1 s），用 EBU R128 测量单曲与专辑响度及真峰值；对账、7 天宽限和删除刹车（`sonus-server renditions-allow-deletions`）与 R2 镜像一致。`stream` 带 `sonusQuality` 时按档位返回（支持区间和 `X-Sonus-*` 头），不带参数与老客户端逐字节不变；新增 `getSonusRenditions` 和管理员专用 `getSonusLibraryHealth`（开启时在 `getOpenSubsonicExtensions` 声明 `sonusRenditions: [1]`）。
 
 ### 阶段 6：新网页界面和 Sonus 管理接口（L，可与阶段 3–5 并行）
 

@@ -18,9 +18,23 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> ExitCode {
     // `sonus-server enrolment-code <user>`: not the server, a word to its database (enrol.rs)
     // `sonus-server r2-restore …`, `sonus-server r2-allow-deletions`: the R2 mirror's (mirror/cli.rs)
+    // `sonus-server renditions-allow-deletions`: the playback library's (renditions/mod.rs)
     let mut mirror_args = std::env::args_os().skip(1);
     if let Some(command) = mirror_args.next().filter(sonus_server::mirror::cli::is_command) {
         return match sonus_server::mirror::cli::run(&command, mirror_args.collect(), &|name| std::env::var(name).ok()).await {
+            Ok(said) => {
+                println!("{said}");
+                ExitCode::SUCCESS
+            }
+            Err(why) => {
+                eprintln!("{why}");
+                ExitCode::from(1)
+            }
+        };
+    }
+    let mut renditions_args = std::env::args_os().skip(1);
+    if renditions_args.next().is_some_and(|first| sonus_server::renditions::is_cli_command(&first)) {
+        return match sonus_server::renditions::run_cli(renditions_args.collect(), &|name| std::env::var(name).ok()) {
             Ok(said) => {
                 println!("{said}");
                 ExitCode::SUCCESS
@@ -108,6 +122,7 @@ async fn main() -> ExitCode {
     if navidrome.is_some() {
         let (gateway, upstream, base_path, shared) = (gateway.clone(), config.upstream.clone(), config.base_path.clone(), config.shared.clone());
         let mirror = config.mirror;
+        let renditions_cfg = config.renditions;
         tokio::spawn(async move {
             watch_until_ready(upstream.clone(), ready).await;
             match startup::local(&shared, &upstream, &base_path).await {
@@ -119,13 +134,22 @@ async fn main() -> ExitCode {
                     info!("Subsonic sign-ins are checked here; /auth, Sonus Connect version 2 and the library reads are answered here");
                     // off without the owner's bucket and keys (SONUS_R2_*): then nothing of it runs
                     if let Some(settings) = mirror {
-                        match sonus_server::mirror::start(settings, local.db, std::path::PathBuf::from(&shared.data_folder)) {
+                        match sonus_server::mirror::start(settings, local.db.clone(), std::path::PathBuf::from(&shared.data_folder)) {
                             Ok(mirror) => {
                                 if let Some(library) = gateway.library() {
                                     library.set_mirror(mirror);
                                 }
                             }
                             Err(e) => error!("R2 mirror: {e}; the server runs without it"),
+                        }
+                    }
+                    // off by default (SONUS_RENDITIONS_ENABLED): then nothing of it runs
+                    if let Some(settings) = renditions_cfg {
+                        if let Some(library) = gateway.library() {
+                            match sonus_server::renditions::start(settings, local.db, std::path::PathBuf::from(&shared.data_folder), library.transcoder()) {
+                                Ok(renditions) => library.set_renditions(renditions),
+                                Err(e) => error!("playback library: {e}; the server runs without it"),
+                            }
                         }
                     }
                 }

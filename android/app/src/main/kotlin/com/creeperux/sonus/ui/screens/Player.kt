@@ -7,7 +7,9 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -349,6 +351,10 @@ fun FullPlayer(
                 Column(Modifier.weight(1f)) {
                     Text(t.title, style = Sonus.type.nowPlaying, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { nav.go(Route.Album(t.albumId)) }.testTag("now-title"))
                     Text(t.artist, style = Sonus.type.body, color = Color.White.copy(alpha = 0.7f), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { nav.go(Route.Artist(t.artistId)) })
+                    state.qualityBadge?.let { badge ->
+                        Spacer(Modifier.height(6.dp))
+                        QualityBadge(badge, state.qualityIsLossless, light = true)
+                    }
                 }
                 Heart(t, light = true)
             }
@@ -543,6 +549,36 @@ fun TabletTopBar() {
     }
 }
 
+@Composable
+private fun QualityBadge(text: String, lossless: Boolean, light: Boolean = false, modifier: Modifier = Modifier) {
+    val c = Sonus.colors
+    val fg = when {
+        lossless && light -> c.accent
+        lossless -> c.accentText
+        light -> Color.White.copy(alpha = 0.85f)
+        else -> c.textMuted
+    }
+    val bg = when {
+        light -> Color.White.copy(alpha = 0.12f)
+        else -> c.raised
+    }
+    val border = when {
+        lossless -> c.accent.copy(alpha = 0.55f)
+        light -> Color.White.copy(alpha = 0.2f)
+        else -> c.divider
+    }
+    Box(
+        modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(bg)
+            .border(BorderStroke(1.dp, border), RoundedCornerShape(4.dp))
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+            .testTag("quality-badge"),
+    ) {
+        Text(text, style = Sonus.type.caption.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold), color = fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
 /** The tablet's playback bar (PlaybackBar.cs): the song on the left, the controls and position in the middle, the
  *  lyrics and queue toggles on the right. */
 @Composable
@@ -550,7 +586,11 @@ fun PlaybackBar() {
     val c = Sonus.colors
     val session = LocalSession.current
     val nav = LocalNav.current
+    val player = LocalPlayer.current
+    val state by player.state.collectAsState()
     val t = currentTrack()
+    val link = rememberLink()
+    val hasWhere = link != null && link.where != null && link.session.activeDevice?.takeIf { it != link.id && link.session.current != null } == null
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().height(88.dp).padding(horizontal = 16.dp).testTag("playback-bar"), verticalAlignment = Alignment.CenterVertically) {
             Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
@@ -560,7 +600,14 @@ fun PlaybackBar() {
                     Column(Modifier.weight(1f, fill = false)) {
                         Text(t.title, style = Sonus.type.cardTitle, color = c.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { nav.go(Route.Album(t.albumId)) })
                         Text(t.artist, style = Sonus.type.caption, color = c.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { nav.go(Route.Artist(t.artistId)) })
-                        WhereLine(besideStrip = true)
+                        if (hasWhere) {
+                            WhereLine(besideStrip = true)
+                        } else {
+                            state.qualityBadge?.let { badge ->
+                                Spacer(Modifier.height(3.dp))
+                                QualityBadge(badge, state.qualityIsLossless)
+                            }
+                        }
                     }
                     Heart(t)
                 }

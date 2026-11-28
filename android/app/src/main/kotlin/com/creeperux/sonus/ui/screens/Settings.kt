@@ -32,9 +32,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.creeperux.sonus.BuildConfigInfo
+import com.creeperux.sonus.core.AudioQuality
 import com.creeperux.sonus.core.Formats
+import com.creeperux.sonus.core.LoudnessLevel
+import com.creeperux.sonus.core.LoudnessMode
 import com.creeperux.sonus.core.PlaybackOrder
-import com.creeperux.sonus.core.ReplayGainMode
 import com.creeperux.sonus.data.ThemeMode
 import com.creeperux.sonus.ui.LocalGraph
 import com.creeperux.sonus.ui.LocalPlayer
@@ -56,7 +58,11 @@ fun SettingsScreen() {
     val state by player.state.collectAsState()
     val server by session.serverInfo.collectAsState()
     val theme by graph.themeMode.collectAsState()
-    var gain by remember { mutableStateOf(player.replayGain) }
+    var wifiQuality by remember { mutableStateOf(player.wifiQuality) }
+    var cellularQuality by remember { mutableStateOf(player.cellularQuality) }
+    var loudnessLevel by remember { mutableStateOf(player.loudnessLevel) }
+    var loudnessMode by remember { mutableStateOf(player.loudnessMode) }
+    var alwaysOriginal by remember { mutableStateOf(player.alwaysOriginal) }
     val context = LocalContext.current
     Column(Modifier.fillMaxSize().pageTop().verticalScroll(rememberScrollState()).padding(16.dp).testTag("settings"), verticalArrangement = Arrangement.spacedBy(20.dp)) {
         BackRow()
@@ -67,16 +73,61 @@ fun SettingsScreen() {
             Wrap {
                 PlaybackOrder.entries.forEach { o -> Chip(Formats.order(o), state.order == o, { player.setOrder(o) }) }
             }
-            Label("回放增益（只降低音量，不会放大）")
-            Wrap {
-                listOf(ReplayGainMode.Album to "专辑", ReplayGainMode.Track to "曲目", ReplayGainMode.Off to "关闭").forEach { (m, label) ->
-                    Chip(label, gain == m, { gain = m; player.replayGain = m })
-                }
-            }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("播完当前歌曲后停止", style = Sonus.type.body, color = c.text, modifier = Modifier.weight(1f))
                 Switch(state.stopAfterCurrent, { player.setStopAfterCurrent(it) }, colors = SwitchDefaults.colors(checkedTrackColor = c.accent, checkedThumbColor = c.onAccent))
             }
+        }
+
+        Group("音质与音量") {
+            val tiers = listOf(
+                AudioQuality.Auto to "自动",
+                AudioQuality.Normal to "普通",
+                AudioQuality.High to "高",
+                AudioQuality.VeryHigh to "极高",
+                AudioQuality.Lossless to "无损",
+            )
+            Label("Wi-Fi 下的音质")
+            Wrap {
+                tiers.forEach { (q, label) ->
+                    Chip(label, wifiQuality == q, { wifiQuality = q; player.wifiQuality = q }, Modifier.testTag("wifi-quality-${q.name}"))
+                }
+            }
+            Label("移动网络下的音质")
+            Wrap {
+                tiers.forEach { (q, label) ->
+                    Chip(label, cellularQuality == q, { cellularQuality = q; player.cellularQuality = q }, Modifier.testTag("cell-quality-${q.name}"))
+                }
+            }
+            Text(
+                "自动：Wi-Fi 下默认无损，移动网络下默认高（Opus 160）；两项均选“无损”即为强制无损。仅在“自动”且缓冲较慢时临时降一档，切网络后下一首生效。",
+                style = Sonus.type.bodySmall,
+                color = c.textMuted,
+            )
+            Label("音量均衡")
+            Wrap {
+                listOf(
+                    LoudnessLevel.Off to "关",
+                    LoudnessLevel.Quiet to "安静",
+                    LoudnessLevel.Normal to "正常",
+                    LoudnessLevel.Loud to "大声",
+                ).forEach { (lvl, label) ->
+                    Chip(label, loudnessLevel == lvl, { loudnessLevel = lvl; player.loudnessLevel = lvl }, Modifier.testTag("loudness-${lvl.name}"))
+                }
+            }
+            if (loudnessLevel != LoudnessLevel.Off) {
+                Label("均衡方式")
+                Wrap {
+                    listOf(LoudnessMode.Album to "按专辑", LoudnessMode.Track to "按歌曲").forEach { (m, label) ->
+                        Chip(label, loudnessMode == m, { loudnessMode = m; player.loudnessMode = m }, Modifier.testTag("loudness-mode-${m.name}"))
+                    }
+                }
+            }
+            Text(
+                "按曲库响度统一不同专辑的音量（安静 −18 / 正常 −14 / 大声 −11 LUFS），带防削波峰值保护；无响度数据时回退到回放增益标签。",
+                style = Sonus.type.bodySmall,
+                color = c.textMuted,
+            )
         }
 
         Group("显示") {
@@ -109,6 +160,22 @@ fun SettingsScreen() {
         }
 
         Group("更新") { UpdatesSection() }
+
+        Group("高级") {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("始终用原文件", style = Sonus.type.body, color = c.text)
+                    Text("开启后始终请求服务器原始文件，音质设置不生效（用于排查问题或对比音质）。", style = Sonus.type.bodySmall, color = c.textMuted)
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(
+                    alwaysOriginal,
+                    { alwaysOriginal = it; player.alwaysOriginal = it },
+                    modifier = Modifier.testTag("always-original"),
+                    colors = SwitchDefaults.colors(checkedTrackColor = c.accent, checkedThumbColor = c.onAccent),
+                )
+            }
+        }
 
         Group("关于") {
             Fact("版本", BuildConfigInfo.versionName(context))

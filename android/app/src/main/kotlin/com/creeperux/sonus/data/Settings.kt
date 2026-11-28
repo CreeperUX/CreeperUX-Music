@@ -5,6 +5,9 @@ import android.content.SharedPreferences
 import android.os.Build
 import android.provider.Settings as SystemSettings
 import androidx.core.content.edit
+import com.creeperux.sonus.core.AudioQuality
+import com.creeperux.sonus.core.LoudnessLevel
+import com.creeperux.sonus.core.LoudnessMode
 import com.creeperux.sonus.core.PlaybackOrder
 import com.creeperux.sonus.core.ReplayGainMode
 import java.security.SecureRandom
@@ -18,8 +21,28 @@ class Settings(private val prefs: SharedPreferences) {
         set(v) = prefs.edit { putString("order", v.name) }
 
     var replayGain: ReplayGainMode
-        get() = enumOr(prefs.getString("replayGain", null), ReplayGainMode.Album)
+        get() = enumOr(prefs.getString("replayGain", null), ReplayGainMode.Off)
         set(v) = prefs.edit { putString("replayGain", v.name) }
+
+    var wifiQuality: AudioQuality
+        get() = enumOr(prefs.getString("wifiQuality", null), AudioQuality.Auto)
+        set(v) = prefs.edit { putString("wifiQuality", v.name) }
+
+    var cellularQuality: AudioQuality
+        get() = enumOr(prefs.getString("cellularQuality", null), AudioQuality.Auto)
+        set(v) = prefs.edit { putString("cellularQuality", v.name) }
+
+    var loudnessLevel: LoudnessLevel
+        get() = enumOr(prefs.getString("loudnessLevel", null), LoudnessLevel.Off)
+        set(v) = prefs.edit { putString("loudnessLevel", v.name) }
+
+    var loudnessMode: LoudnessMode
+        get() = enumOr(prefs.getString("loudnessMode", null), LoudnessMode.Album)
+        set(v) = prefs.edit { putString("loudnessMode", v.name) }
+
+    var alwaysOriginal: Boolean
+        get() = prefs.getBoolean("alwaysOriginal", false)
+        set(v) = prefs.edit { putBoolean("alwaysOriginal", v) }
 
     var theme: ThemeMode
         get() = enumOr(prefs.getString("theme", null), ThemeMode.System)

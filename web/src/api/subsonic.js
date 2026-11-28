@@ -29,6 +29,7 @@
 import { orderToBar, barToOrder } from './contract.js';
 import { lower, parseLyrics } from './lyrics.js';
 import { md5 } from './md5.js';
+import { resolveTier, browserCanPlayTier, computeLoudnessGain, isMeteredConnection } from './quality.js';
 import { createAuthApi } from './sonus.js';
 import { command, report, follow, modeOf, orderOf, windowOf, pickerDevices, newDeviceId, validDeviceId, QUIET_ERRORS } from './connect.js';
 import { openSession } from './session.js';
@@ -294,13 +295,63 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
 
   // ---------------------------------------------------------------- playback: two <audio> elements, the second loads what comes next
   const audio = [new Audio(), new Audio()];
+  for (const a of audio) a.crossOrigin = 'anonymous';
   let cur = 0, preloadId = null, ticket = 0, started = 0, counted = false;
   const el = () => audio[cur];
-  const player = { trackId: null, state: 'stopped', error: null, position: 0, duration: null, volume: storage.get('sonus.volume') ?? 0.8, muted: false, order: 'default', stopAfterCurrent: false, replayGain: storage.get('sonus.replaygain') ?? 'album', context: null, output: 'default' };
+  const player = {
+    trackId: null, state: 'stopped', error: null, position: 0, duration: null,
+    volume: storage.get('sonus.volume') ?? 0.8, muted: false, order: 'default', stopAfterCurrent: false,
+    replayGain: storage.get('sonus.replaygain') ?? 'off',
+    wifiQuality: storage.get('sonus.quality.wifi') ?? 'auto',
+    cellularQuality: storage.get('sonus.quality.cellular') ?? 'auto',
+    loudnessLevel: storage.get('sonus.loudness.level') ?? 'off',
+    loudnessMode: storage.get('sonus.loudness.mode') ?? 'album',
+    alwaysOriginal: !!storage.get('sonus.quality.original'),
+    context: null, output: 'default',
+  };
   let contextIds = [], pointer = -1, queue = [], qid = 0;
+  const renditionsCache = new Map(), renditionsLoading = new Set(), requestedTiers = new Map();
+  let autoDowngradeSteps = 0, smoothTracksSinceDowngrade = 0, waitingSince = 0, downgradedThisStall = false;
+  let audioCtx = null, boostGainNode = null;
+
+  function setBoostGain(linear) {
+    if (linear <= 1.001) {
+      if (boostGainNode) boostGainNode.gain.value = 1;
+      return;
+    }
+    try {
+      if (!audioCtx) {
+        const Ctx = globalThis.AudioContext || globalThis.webkitAudioContext;
+        if (!Ctx) return;
+        audioCtx = new Ctx();
+        boostGainNode = audioCtx.createGain();
+        const limiter = audioCtx.createDynamicsCompressor();
+        limiter.threshold.value = -1;
+        limiter.knee.value = 6;
+        limiter.ratio.value = 12;
+        limiter.attack.value = 0.003;
+        limiter.release.value = 0.05;
+        boostGainNode.connect(limiter);
+        limiter.connect(audioCtx.destination);
+        for (const a of audio) audioCtx.createMediaElementSource(a).connect(boostGainNode);
+      }
+      if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+      boostGainNode.gain.value = Math.min(4, linear);
+    } catch { /* fallback: keep <audio>.volume at 1 */ }
+  }
+
+  const activeQuality = () => (isMeteredConnection() ? player.cellularQuality : player.wifiQuality);
   const snapshot = () => {
-    const p = { ...player, context: player.context && { ...player.context }, where: null, remote: null };
     const away = sess?.state.activeElsewhere;
+    const p = {
+      ...player,
+      context: player.context && { ...player.context },
+      where: null,
+      remote: null,
+      qualitySource: !away && player.trackId && player.state !== 'stopped'
+        ? { renditions: renditionsCache.get(player.trackId) ?? null, requestedTier: requestedTiers.get(player.trackId) ?? null }
+        : null,
+    };
     if (sess) p.where = sess.state.place();
     // another device plays: the bar's volume is that device's (rule 8)
     if (away) Object.assign(p, { remote: { id: away.id, name: away.name, kind: away.kind }, volume: away.volume ?? 1, muted: !!away.muted });
@@ -315,23 +366,99 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
     if (t.codec === 'ALAC') return !!el().canPlayType('audio/mp4; codecs="alac"');
     return !t.contentType || el().canPlayType(t.contentType) !== '';
   };
-  const streamUrl = t => url('stream', canPlay(t) ? { id: t.id } : { id: t.id, format: 'opus', maxBitRate: 320 });
+  const streamUrl = t => {
+    const tier = resolveTier({
+      setting: activeQuality(),
+      metered: isMeteredConnection(),
+      alwaysOriginal: player.alwaysOriginal,
+      autoDowngradeSteps,
+      serverHasRenditions: extensions.has('sonusRenditions'),
+    });
+    if (tier && tier !== 'original' && browserCanPlayTier(tier, el())) {
+      requestedTiers.set(t.id, tier);
+      return url('stream', { id: t.id, sonusQuality: tier });
+    }
+    if (tier === 'original' && canPlay(t)) {
+      requestedTiers.set(t.id, 'original');
+      return url('stream', { id: t.id, sonusQuality: 'original' });
+    }
+    requestedTiers.set(t.id, null);
+    return url('stream', canPlay(t) ? { id: t.id } : { id: t.id, format: 'opus', maxBitRate: 320 });
+  };
+  function ensureRenditions(...ids) {
+    if (!extensions.has('sonusRenditions')) return;
+    const need = [...new Set(ids.filter(id => id && !renditionsCache.has(id) && !renditionsLoading.has(id)))];
+    if (!need.length) return;
+    for (const id of need) renditionsLoading.add(id);
+    call('getSonusRenditions', { id: need }).then(r => {
+      for (const id of need) renditionsLoading.delete(id);
+      const root = r.sonusRenditions;
+      if (!root?.enabled) return;
+      let hitCurrent = false;
+      for (const s of root.songs ?? []) {
+        if (!s?.id) continue;
+        renditionsCache.set(s.id, s);
+        if (s.id === player.trackId) hitCurrent = true;
+      }
+      if (hitCurrent) { applyVolume(); pushPlayer(); }
+    }).catch(() => {
+      for (const id of need) renditionsLoading.delete(id);
+    });
+  }
   const gain = t => {
     if (!t || player.replayGain === 'off') return 1;
     const g = player.replayGain === 'album' ? t.replayGain.album ?? t.replayGain.track : t.replayGain.track ?? t.replayGain.album;
     return g == null ? 1 : Math.min(1, 10 ** (g / 20)); // an <audio> element cannot go above full volume
   };
-  const applyVolume = () => { const v = player.muted ? 0 : Math.max(0, Math.min(1, player.volume * gain(T.get(player.trackId)))); for (const a of audio) a.volume = v; };
+  const applyVolume = () => {
+    const t = T.get(player.trackId);
+    if (player.muted) {
+      for (const a of audio) a.volume = 0;
+      setBoostGain(1);
+      return;
+    }
+    if (player.loudnessLevel !== 'off') {
+      const loudness = t ? renditionsCache.get(t.id)?.loudness ?? null : null;
+      const g = computeLoudnessGain({
+        level: player.loudnessLevel,
+        mode: player.loudnessMode,
+        loudness,
+        rgAlbum: t?.replayGain?.album ?? null,
+        rgTrack: t?.replayGain?.track ?? null,
+        allowBoost: true,
+      });
+      const scaled = player.volume * g;
+      if (scaled <= 1) {
+        for (const a of audio) a.volume = Math.max(0, Math.min(1, scaled));
+        setBoostGain(1);
+      } else {
+        for (const a of audio) a.volume = 1;
+        setBoostGain(scaled);
+      }
+      return;
+    }
+    setBoostGain(1);
+    const v = Math.max(0, Math.min(1, player.volume * gain(t)));
+    for (const a of audio) a.volume = v;
+  };
   const unload = a => { a.pause(); a.removeAttribute('src'); a.load(); };
   const MEDIA_ERRORS = { 1: '播放被中止', 2: '网络错误', 3: '解码失败', 4: '格式不受支持或文件无法读取' };
 
+  globalThis.navigator?.connection?.addEventListener?.('change', () => {
+    autoDowngradeSteps = 0;
+    smoothTracksSinceDowngrade = 0;
+    if (preloadId) { unload(audio[1 - cur]); preloadId = null; }
+  });
+
   function load(trackId, { autoplay = true, at = 0 } = {}) {
     const my = ++ticket, t = T.get(trackId);
+    waitingSince = 0; downgradedThisStall = false;
     Object.assign(player, { trackId, state: autoplay ? 'loading' : 'paused', error: null, position: at, duration: t?.duration || null });
     if (!t) { Object.assign(player, { state: 'error', error: '这首歌已不在媒体库中。' }); pushPlayer(); return; }
     if (preloadId === trackId) { const old = el(); cur = 1 - cur; unload(old); }
     else { unload(audio[1 - cur]); el().src = streamUrl(t); }
     preloadId = null; counted = false; started = Date.now();
+    ensureRenditions(trackId, peekNext());
     if (at > 0) { const a = el(); a.addEventListener('loadedmetadata', () => { if (a === el()) a.currentTime = at; }, { once: true }); }
     applyVolume(); pushPlayer();
     if (!autoplay) return;
@@ -376,11 +503,19 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
     a.preload = 'auto';
     a.addEventListener('ended', () => {
       if (a !== el()) return;
+      if (autoDowngradeSteps > 0 && !downgradedThisStall && ++smoothTracksSinceDowngrade >= 2) {
+        autoDowngradeSteps -= 1;
+        smoothTracksSinceDowngrade = 0;
+      }
+      waitingSince = 0; downgradedThisStall = false;
       if (sess) { say('ended'); return; } // the session says what follows
       if (player.stopAfterCurrent) { player.stopAfterCurrent = false; stop(); return; }
       if (player.order === 'repeat-track') { a.currentTime = 0; a.play().catch(() => {}); counted = false; return; }
       advance(1);
     });
+    a.addEventListener('waiting', () => { if (a === el() && !a.paused) waitingSince ||= Date.now(); });
+    a.addEventListener('playing', () => { if (a === el()) { waitingSince = 0; downgradedThisStall = false; } });
+    a.addEventListener('canplay', () => { if (a === el()) waitingSince = 0; });
     a.addEventListener('error', () => { if (a === el() && a.getAttribute('src')) fail(T.get(player.trackId), MEDIA_ERRORS[a.error?.code]); });
     a.addEventListener('durationchange', () => { if (a === el() && Number.isFinite(a.duration) && a.duration > 0 && !player.duration) { player.duration = a.duration; pushPlayer(); } });
     // paused or resumed from outside (the system's media controls, a headset button)
@@ -396,6 +531,13 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
       return;
     }
     if (sess && sayPositionAt && Date.now() >= sayPositionAt) { sayPositionAt = 0; say('position'); } // a seek done
+    if (waitingSince && !downgradedThisStall && Date.now() - waitingSince >= 4500 &&
+        extensions.has('sonusRenditions') && !player.alwaysOriginal && activeQuality() === 'auto' && autoDowngradeSteps < 3) {
+      downgradedThisStall = true;
+      autoDowngradeSteps += 1;
+      smoothTracksSinceDowngrade = 0;
+      if (preloadId) { unload(audio[1 - cur]); preloadId = null; }
+    }
     if (player.state !== 'playing') return;
     player.position = el().currentTime;
     emit({ type: 'position', position: player.position });
@@ -409,7 +551,7 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
     }
     if (d > 0 && d - player.position < 20 && !preloadId) { // load what comes next while this one plays
       const next = peekNext();
-      if (next && next !== player.trackId && T.has(next)) { preloadId = next; audio[1 - cur].src = streamUrl(T.get(next)); applyVolume(); }
+      if (next && next !== player.trackId && T.has(next)) { preloadId = next; ensureRenditions(next); audio[1 - cur].src = streamUrl(T.get(next)); applyVolume(); }
     }
   }, 250);
 
@@ -756,6 +898,30 @@ export function createSubsonicClient({ login = savedLogin(), scrobble = true } =
     },
     async setStopAfterCurrent(on) { if (await cmd('stopAfterCurrent', { on: !!on })) return; player.stopAfterCurrent = on; if (on && preloadId) { unload(audio[1 - cur]); preloadId = null; } pushPlayer(); },
     async setReplayGain(mode) { player.replayGain = mode; storage.set('sonus.replaygain', mode); applyVolume(); pushPlayer(); },
+    async setWifiQuality(q) {
+      player.wifiQuality = q; storage.set('sonus.quality.wifi', q);
+      autoDowngradeSteps = 0; smoothTracksSinceDowngrade = 0;
+      if (preloadId) { unload(audio[1 - cur]); preloadId = null; }
+      pushPlayer();
+    },
+    async setCellularQuality(q) {
+      player.cellularQuality = q; storage.set('sonus.quality.cellular', q);
+      autoDowngradeSteps = 0; smoothTracksSinceDowngrade = 0;
+      if (preloadId) { unload(audio[1 - cur]); preloadId = null; }
+      pushPlayer();
+    },
+    async setLoudnessLevel(level) {
+      player.loudnessLevel = level; storage.set('sonus.loudness.level', level);
+      if (level !== 'off' && player.replayGain !== 'off') { player.replayGain = 'off'; storage.set('sonus.replaygain', 'off'); }
+      applyVolume(); pushPlayer();
+    },
+    async setLoudnessMode(mode) { player.loudnessMode = mode; storage.set('sonus.loudness.mode', mode); applyVolume(); pushPlayer(); },
+    async setAlwaysOriginal(on) {
+      player.alwaysOriginal = !!on; storage.set('sonus.quality.original', player.alwaysOriginal);
+      autoDowngradeSteps = 0; smoothTracksSinceDowngrade = 0;
+      if (preloadId) { unload(audio[1 - cur]); preloadId = null; }
+      pushPlayer();
+    },
     // ---- Sonus Connect version 2 (contract.js, ConnectClient): the user's devices, and moving playback between them
     /** True while this client shows the user's session on the server (the server offers version 2). */
     connected: () => !!sess,

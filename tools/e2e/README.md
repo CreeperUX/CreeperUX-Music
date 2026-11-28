@@ -5,7 +5,7 @@ Sonus 自己的三套客户端测试默认对着演示服务器（`tools/demo-se
 | 测试 | 命令 |
 |---|---|
 | 单元测试和集成测试（xUnit） | `dotnet test tests/Sonus.Core.Tests` |
-| Windows 程序的验收（14 轮，静默；失败时保留日志和崩溃转储，见下文） | `node tools/e2e/acceptance.mjs --arch=ARM64` |
+| Windows 程序的验收（14 轮，静默：窗口不出现，播放器静音（`SONUS_E2E_SILENT`）；失败时保留日志和崩溃转储，见下文） | `node tools/e2e/acceptance.mjs --arch=ARM64` |
 | 网页版的验收 | `node tools/check-web.mjs` |
 
 ## 选择服务器

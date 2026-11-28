@@ -694,6 +694,41 @@ try {
         await app.invoke('播放');
         await b.until(async () => (await b.state()).engine === 'Playing', 'B plays', 8000);
       });
+      // a FLAC taken over mid-song, both ways (0.7.0 skipped it: played at once, then moved to its position once open,
+      // Media Foundation's FLAC decoder failed it, DecodeError, and the session went on to the next song). The demo
+      // server's catalogue has no long FLAC; tools/server-library.mjs's library has two.
+      await check('从中间接手一首 FLAC（两个方向）：同一首、同一位置接着放，不跳到下一首', async () => {
+        const songs = (await api('search3', { query: '', songCount: 1000, albumCount: 0, artistCount: 0 })).searchResult3?.song ?? [];
+        const flac = songs.find(x => x.suffix === 'flac' && x.duration >= 120);
+        if (!flac) throw new Skip('曲库里没有 2 分钟以上的 FLAC');
+        const album = (await api('getAlbum', { id: flac.albumId })).album;
+        const index = album.song.findIndex(x => x.id === flac.id);
+        // the second device (playing now) plays the FLAC, 60 s in
+        await b.send(`do play album ${album.id} ${index}`);
+        await b.until(async () => { const s = await b.state(); return s.engineTrack === flac.id && s.engine === 'Playing'; }, 'B plays the FLAC', 10000);
+        // a moment in first: Media Foundation (the engine up to 0.7) also fails a seek made the instant a FLAC starts, a
+        // different case from the takeover this checks
+        await b.until(async () => (await b.state()).enginePosition > 2, 'B 2 s into the FLAC', 8000);
+        await b.send('do seek 60');
+        await b.until(async () => Math.abs((await b.state()).enginePosition - 60) < 3, 'B at 60 s', 8000);
+        await sleep(2000);
+        for (const [to, from, toName, fromName] of [[app, b, '第一台', '第二台'], [b, app, '第二台', '第一台']]) {
+          const at = (await from.state()).enginePosition;
+          if (!(await to.names()).some(n => n.startsWith('这台电脑 ['))) await to.invoke(`正在「${fromName}」上播放，选择设备`);
+          await to.until(async () => (await to.names()).some(n => n.startsWith('这台电脑 [')), `${toName}'s device list`, 5000);
+          await to.invoke('这台电脑');
+          // it plays once its stream has reached the position: a few seconds for a FLAC taken over late
+          await to.until(async () => { const s = await to.state(); return s.engine === 'Playing' && s.engineTrack === flac.id; }, `${toName} plays the FLAC`, 15000)
+            .catch(async () => { const s = await to.state(); throw new Error(`${toName}：${s.engine} ${s.engineTrack === flac.id ? '那首 FLAC' : s.engineTrack}，${s.error ?? ''}`); });
+          const p = (await to.state()).enginePosition;
+          assert(Math.abs(p - at) < 8, `${toName} 从 ${p?.toFixed(1)} s 开始放，${fromName} 在 ${at?.toFixed(1)} s`);
+          await sleep(4000);
+          const s = await to.state();
+          assert(s.engineTrack === flac.id && s.engine === 'Playing' && s.enginePosition > p + 2, `${toName} 没有接着放那首 FLAC：${s.engine} ${s.engineTrack === flac.id ? '那首' : s.engineTrack} ${s.enginePosition?.toFixed(1)} s`);
+          assert(s.session.here === true && s.session.track === flac.id, JSON.stringify(s.session));
+          await from.until(async () => (await from.state()).engine === 'Stopped', `${fromName} stopped`, 5000);
+        }
+      });
       // a network loss: the demo server cuts one device's connection (its test hook); another server has no such hook
       if (server.demo) await check('第二台断网超过 10 秒：一直在放；服务器上会话停在原处，回来后用 resume 接着当出声的设备', async () => {
         const id = (await session(b)).id;

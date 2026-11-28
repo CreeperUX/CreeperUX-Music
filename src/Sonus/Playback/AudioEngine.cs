@@ -39,6 +39,11 @@ public sealed class AudioEngine : IDisposable
     private Timer? _poll;
     private bool _wantPlay;
     private double _pendingSeek; // where a loaded song starts, applied once Media Foundation has opened it
+    private double _startAt; // where the song being loaded starts (the watchdog in Poll)
+    // A song loaded to play from a position plays once it is open and there (SeekCompleted), as a song loaded paused and
+    // played later does. Played at once, Media Foundation's FLAC decoder starts from the beginning, and the seek once open
+    // fails it (DecodeError): a song taken over from another device mid-song was skipped (the owner's FLACs, 0.7.0).
+    private bool _playWhenOpen;
     private DateTime _loadingSince = DateTime.MaxValue; // a play that has not started yet (the watchdog in Poll)
     private int _nudges;
 
@@ -49,6 +54,9 @@ public sealed class AudioEngine : IDisposable
     private double? _duration;
     private double? _staleDuration; // the song before a gapless change: the session can report its length for a while
     private volatile bool _muted;
+    /// <summary>A test instance that must not be heard (SONUS_E2E_SILENT=1, set by tools/e2e): its player stays muted, whatever
+    /// the app's own volume and mute say (the tests read those, and set them).</summary>
+    private static readonly bool Silent = Environment.GetEnvironmentVariable("SONUS_E2E_SILENT") == "1";
     /// <summary>Counts loads (written on the UI thread). An event raised for an earlier load is dropped, so a late "ended" or
     /// "failed" of the previous song never acts on the one just chosen.</summary>
     private int _generation;
@@ -101,14 +109,18 @@ public sealed class AudioEngine : IDisposable
 
     private void Create()
     {
-        _player = new MediaPlayer { AudioCategory = MediaPlayerAudioCategory.Media, AutoPlay = false, Volume = _volume, IsMuted = _muted };
+        _player = new MediaPlayer { AudioCategory = MediaPlayerAudioCategory.Media, AutoPlay = false, Volume = _volume, IsMuted = _muted || Silent };
         _list = NewList();
         _player.Source = _list;
         _player.MediaOpened += (_, _) => Do(() =>
         {
             if (_loadClock is { } c && _openedAt < 0) _openedAt = c.ElapsedMilliseconds;
+            bool moving = _pendingSeek > 0;
             ApplyPendingSeek();
+            if (!moving) PlayWhenOpen(); // nowhere to move to: now
         });
+        // the move to a loaded song's start position is done: it plays now
+        _player.PlaybackSession.SeekCompleted += (_, _) => Do(PlayWhenOpen);
         _player.MediaEnded += (_, _) =>
         {
             int g = Volatile.Read(ref _generation);
@@ -172,8 +184,13 @@ public sealed class AudioEngine : IDisposable
         if (_wantPlay && _state == EngineState.Loading && session.PlaybackState is MediaPlaybackState.Paused or MediaPlaybackState.None)
         {
             double waited = (DateTime.UtcNow - _loadingSince).TotalSeconds;
-            if (waited > 6 && _nudges < 2) { _nudges = 2; Log.Write($"[engine] play did not start in 6 s: attaching the list again ({_currentId})"); _player.Source = null; _player.Source = _list; _player.Play(); }
-            else if (waited > 2.5 && _nudges < 1) { _nudges = 1; Log.Write($"[engine] play did not start in 2.5 s: asking again ({_currentId})"); _player.Play(); }
+            // A song from a position, open and moved there, waits for its stream to get that far (Media Foundation reads a
+            // FLAC from the start: seconds for a song taken over late in it): asked again, never attached again (a list
+            // attached again after that move fails the song, DecodeError). One not yet open is not played before it is.
+            bool moved = _startAt > 0 && !_playWhenOpen;
+            if (waited > 6 && _nudges < 2 && moved) { _nudges = 2; Log.Write($"[engine] play did not start in 6 s from {_startAt:0} s: asking again, the stream is still on its way ({_currentId})"); _player.Play(); }
+            else if (waited > 6 && _nudges < 2) { _nudges = 2; Log.Write($"[engine] play did not start in 6 s: attaching the list again ({_currentId})"); _player.Source = null; _player.Source = _list; if (!_playWhenOpen) _player.Play(); }
+            else if (waited > 2.5 && _nudges < 1) { _nudges = 1; Log.Write($"[engine] play did not start in 2.5 s: asking again ({_currentId}{(moved ? $", from {_startAt:0} s" : "")})"); if (!_playWhenOpen) _player.Play(); }
         }
     }
 
@@ -257,7 +274,10 @@ public sealed class AudioEngine : IDisposable
             _nudges = 0;
             _loadingSince = autoplay ? DateTime.UtcNow : DateTime.MaxValue;
             _loadClock = autoplay ? System.Diagnostics.Stopwatch.StartNew() : null; _openedAt = -1;
-            if (autoplay) _player.Play();
+            // from the start: played at once; from a position: once open and there (_playWhenOpen)
+            _startAt = item.StartAt;
+            _playWhenOpen = autoplay && item.StartAt > 0;
+            if (autoplay && !_playWhenOpen) _player.Play();
         });
     }
 
@@ -285,7 +305,12 @@ public sealed class AudioEngine : IDisposable
     {
         if (_state is EngineState.Error or EngineState.Stopped) return; // the service reloads instead
         SetState(EngineState.Loading);
-        Do(() => { _wantPlay = true; _nudges = 0; _loadingSince = DateTime.UtcNow; _player.Play(); });
+        Do(() =>
+        {
+            _wantPlay = true; _nudges = 0; _loadingSince = DateTime.UtcNow;
+            if (_pendingSeek > 0) _playWhenOpen = true; // loaded paused from a position, not yet open: played once open and there
+            if (!_playWhenOpen) _player.Play();
+        });
     }
 
     public void Pause()
@@ -299,7 +324,7 @@ public sealed class AudioEngine : IDisposable
         Interlocked.Increment(ref _generation);
         SetState(EngineState.Stopped);
         _currentId = null; _nextId = null;
-        Do(() => { _wantPlay = false; _player.Pause(); var old = _list; _list = NewList(); _player.Source = _list; Release(old); });
+        Do(() => { _wantPlay = false; _playWhenOpen = false; _startAt = 0; _player.Pause(); var old = _list; _list = NewList(); _player.Source = _list; Release(old); });
     }
 
     public void Seek(double seconds)
@@ -317,10 +342,18 @@ public sealed class AudioEngine : IDisposable
     public bool Muted
     {
         get => _muted;
-        set { _muted = value; Do(() => _player.IsMuted = value); }
+        set { _muted = value; Do(() => _player.IsMuted = value || Silent); }
     }
 
     // ---------------------------------------------------------------- what Media Foundation reports (engine thread)
+    /// <summary>A song loaded to play from a position (<see cref="_playWhenOpen"/>): played now, open and moved there.</summary>
+    private void PlayWhenOpen()
+    {
+        if (!_playWhenOpen) return;
+        _playWhenOpen = false;
+        if (_wantPlay) _player.Play();
+    }
+
     /// <summary>A start position given with the song (taking it over on another device, continuing where it stopped), set
     /// once the song is open; the only place it is set (a start time on the MediaPlaybackItem too would add up with it, and
     /// is not kept anyway when the song is loaded paused and played later).</summary>
@@ -339,6 +372,7 @@ public sealed class AudioEngine : IDisposable
         switch (s)
         {
             case MediaPlaybackState.Playing:
+                _startAt = 0; // it plays: no longer a song waiting to reach its start position
                 if (_loadClock is { } c) { Log.Write($"[engine] {_currentId} playing after {c.ElapsedMilliseconds} ms (opened after {_openedAt} ms)"); _loadClock = null; }
                 SetState(EngineState.Playing);
                 break;

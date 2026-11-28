@@ -350,7 +350,12 @@ impl Gateway {
                 return text(StatusCode::BAD_GATEWAY, "The music server (Navidrome) did not answer");
             };
             let bytes = read.to_bytes();
-            let merged = connect::extensions::merge(&bytes, connect::extensions::OURS).map(Bytes::from).unwrap_or(bytes);
+            let extensions = if self.inner.library.get().is_some_and(|l| l.has_renditions()) {
+                connect::extensions::OURS_WITH_RENDITIONS
+            } else {
+                connect::extensions::OURS
+            };
+            let merged = connect::extensions::merge(&bytes, extensions).map(Bytes::from).unwrap_or(bytes);
             parts.headers.insert(header::CONTENT_LENGTH, HeaderValue::from(merged.len()));
             return Response::from_parts(parts, Full::new(merged).map_err(|never: Infallible| match never {}).boxed());
         }

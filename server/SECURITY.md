@@ -631,6 +631,41 @@ place.
 Failing files back off, and after 5 failures wait for the daily check. A refusal (401/403) stops everything until the
 health check passes again.
 
+## The playback library (renditions)
+
+`src/renditions/`, protocol in `docs/protocol/renditions.md`. Pre-generates clean, seekable FLAC (1-second `SEEKTABLE`)
+and Opus (256 / 160 / 96 kbps in Ogg) renditions plus EBU R128 loudness measurements in the server's own folder and
+ledger (`sonus-renditions.db`), without touching original files or Navidrome's database.
+
+**Off by default.** Unless `SONUS_RENDITIONS_ENABLED=true`, no background worker runs, `sonusRenditions` is not
+advertised in `getOpenSubsonicExtensions`, and requests without `sonusQuality` execute the exact unchanged path.
+
+**What runs.** Only the same ffmpeg binary resolved for on-demand transcoding (`FFmpegPath`, else `ffmpeg` on `PATH`),
+started directly (never through a shell; on Unix wrapped with `nice -n 10` when present, on Windows created with
+`BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW`). Arguments are completely fixed constants per tier; no client input
+ever reaches ffmpeg. Source paths come from Navidrome's `media_file` + `library` rows, checked with `inside_library`,
+and passed as `file:<absolute path>` with `-nostdin -protocol_whitelist file`. Every background ffmpeg process is
+bounded by `SONUS_RENDITIONS_CONCURRENCY` (default 8, max 32), a 120 s stall timeout, a 4 GiB output cap, and
+`kill_on_drop`, and yields before starting new work whenever live on-demand transcodes are active.
+
+**Files and names.** Rendition filenames are built strictly from validated `song_id` (ASCII letters, digits, `-`, `_`),
+the 16-hex-digit file stamp version, and the fixed tier name (`<root>/<2-char shard>/<id>_<version>_<tier>.<ext>`): no
+song title, original path, or client string ever enters a filename. Files are written to random `.part` paths,
+verified end-to-end (full decode + duration diff <= 0.1 s + source stamp unchanged), and atomically renamed into place.
+
+**Deletions.** Same 7-day grace period and deletion brake (`SONUS_RENDITIONS_DELETE_BRAKE`, default `10%`, minimum 20
+songs) as the R2 mirror: if a disk unmounts, renditions stay until the owner runs `sonus-server
+renditions-allow-deletions`. Original files are never written or deleted.
+
+**Endpoints and authorization.**
+- `stream?sonusQuality=...`: runs after Subsonic authentication and `Viewer` library filtering, identical to `stream`.
+  Invalid values answer Subsonic error `0`; unauthorized songs answer `70`.
+- `getSonusRenditions`: behind Subsonic authentication, capped at 500 song IDs per request, filtered through
+  `query::songs` so users only learn rendition/loudness metadata for songs in libraries granted to them.
+- `getSonusLibraryHealth`: behind Subsonic authentication and restricted strictly to admins (`viewer.is_admin`);
+  non-admins receive Subsonic error `50`. Issues are paginated (`limit` capped at 1000).
+
+
 
 ## Secrets
 

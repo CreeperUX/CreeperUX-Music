@@ -376,7 +376,33 @@ for (const [engine, launch] of engines) {
       await app(() => __app.adapter.setReplayGain('track'));
       const [g, v] = [await app(() => __app.currentTrack().replayGain.track), (await audio()).volume];
       assert(g != null && Math.abs(v - 10 ** (g / 20)) < 0.01, `gain ${g} dB, volume ${v}`);
-      await app(() => __app.adapter.setReplayGain('album'));
+      await app(() => __app.adapter.setReplayGain('off'));
+    });
+    await check('quality settings, loudness normalization, always-original and playback bar badge', async () => {
+      if (!(await app(() => __app.player.trackId))) {
+        await app(id => __app.playContext('album', id), album.id);
+        await until(async () => !(await audio()).paused, 'playing', 8000);
+      }
+      const badge = page.locator('.cm-bar .cm-quality-badge');
+      await until(async () => (await badge.isVisible()) && (await badge.textContent()).trim().length > 0, 'quality badge visible');
+      await app(() => { location.hash = '#/settings'; });
+      await page.locator('.cm-settings').waitFor();
+      const s0 = await app(() => ({ w: __app.player.wifiQuality, c: __app.player.cellularQuality, l: __app.player.loudnessLevel, m: __app.player.loudnessMode, o: __app.player.alwaysOriginal }));
+      assert(s0.w === 'auto' && s0.c === 'auto' && s0.l === 'off' && s0.m === 'album' && s0.o === false, JSON.stringify(s0));
+      await app(() => __app.adapter.setWifiQuality('lossless'));
+      await app(() => __app.adapter.setCellularQuality('high'));
+      await app(() => __app.adapter.setLoudnessLevel('normal'));
+      await app(() => __app.adapter.setLoudnessMode('track'));
+      await app(() => __app.adapter.setAlwaysOriginal(true));
+      const s1 = await app(() => ({ w: __app.player.wifiQuality, c: __app.player.cellularQuality, l: __app.player.loudnessLevel, m: __app.player.loudnessMode, o: __app.player.alwaysOriginal }));
+      assert(s1.w === 'lossless' && s1.c === 'high' && s1.l === 'normal' && s1.m === 'track' && s1.o === true, JSON.stringify(s1));
+      await snap(page, 'settings-loudness-on');
+      // restore clean defaults
+      await app(() => __app.adapter.setWifiQuality('auto'));
+      await app(() => __app.adapter.setCellularQuality('auto'));
+      await app(() => __app.adapter.setLoudnessLevel('off'));
+      await app(() => __app.adapter.setLoudnessMode('album'));
+      await app(() => __app.adapter.setAlwaysOriginal(false));
     });
     const dsdId = await app(() => __app.lib.trackList.find(t => t.codec?.startsWith('DSD'))?.id ?? null);
     if (!dsdId && !demo) skip('a DSD song is asked for as Opus (the browser cannot decode DSD)', 'no DSD song on this server');

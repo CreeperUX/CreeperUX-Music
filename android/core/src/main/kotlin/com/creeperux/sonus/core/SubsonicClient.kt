@@ -54,6 +54,9 @@ class SubsonicClient(login: Login, val clientName: String, private val http: OkH
     var extensionVersions: Map<String, Set<Int>> = emptyMap()
         private set
 
+    /** Whether the server advertises the Sonus playback library extension (`sonusRenditions` v1). */
+    val supportsRenditions: Boolean get() = "sonusRenditions" in extensions
+
     private val online = MutableStateFlow(true)
 
     /** Reachable / not reachable, as the last request found it. */
@@ -320,9 +323,67 @@ class SubsonicClient(login: Login, val clientName: String, private val http: OkH
     /** The cover at a size: the URL is the same every time (a fixed salt), so caches keep it. */
     fun coverUrl(coverArt: String, size: Int = 600): String = url("getCoverArt", "id" to coverArt, "size" to size)
 
-    /** The song's audio; [transcodeTo] asks the server to convert it (e.g. "mp3"). */
-    fun streamUrl(songId: String, transcodeTo: String? = null): String =
-        if (transcodeTo == null) url("stream", "id" to songId) else url("stream", "id" to songId, "format" to transcodeTo, "maxBitRate" to 320)
+    /** The song's audio; [sonusQuality] requests a playback-library tier when supported, while [transcodeTo] asks a
+     *  plain Subsonic server to convert it (e.g. "mp3"). */
+    fun streamUrl(songId: String, transcodeTo: String? = null, sonusQuality: String? = null): String = when {
+        !sonusQuality.isNullOrEmpty() -> url("stream", "id" to songId, "sonusQuality" to sonusQuality)
+        transcodeTo == null -> url("stream", "id" to songId)
+        else -> url("stream", "id" to songId, "format" to transcodeTo, "maxBitRate" to 320)
+    }
+
+    /** Queries ready renditions and EBU R128 loudness measurements for a batch of songs (`sonusRenditions` v1). */
+    suspend fun getSonusRenditions(songIds: List<String>): Map<String, SongRenditions> {
+        if (!supportsRenditions) return emptyMap()
+        val ids = songIds.filter { it.isNotBlank() }.distinct().take(500)
+        if (ids.isEmpty()) return emptyMap()
+        return try {
+            val body = call("getSonusRenditions", listOf("id" to ids))
+            val root = J.obj(body, "sonusRenditions") ?: return emptyMap()
+            if (!J.bool(root, "enabled")) return emptyMap()
+            buildMap {
+                for (s in J.array(root, "songs")) {
+                    val id = J.str(s, "id")?.takeIf { it.isNotEmpty() } ?: continue
+                    val lObj = J.obj(s, "loudness")
+                    val loudness = lObj?.let {
+                        LoudnessInfo(
+                            trackLufs = J.numOrNull(it, "trackLufs"),
+                            trackPeak = J.numOrNull(it, "trackPeak"),
+                            albumLufs = J.numOrNull(it, "albumLufs"),
+                            albumPeak = J.numOrNull(it, "albumPeak"),
+                        )
+                    }
+                    val renditions = J.array(s, "renditions").mapNotNull { r ->
+                        val tier = J.str(r, "tier")?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+                        RenditionInfo(
+                            tier = tier,
+                            format = J.str(r, "format").orEmpty(),
+                            sampleRate = J.int(r, "sampleRate"),
+                            bitDepth = J.int(r, "bitDepth"),
+                            channels = J.int(r, "channels"),
+                            totalSamples = J.num(r, "totalSamples").toLong(),
+                            bitRate = J.int(r, "bitRate"),
+                            fileSize = J.num(r, "fileSize").toLong(),
+                        )
+                    }
+                    put(
+                        id,
+                        SongRenditions(
+                            id = id,
+                            sourceFormat = J.str(s, "sourceFormat").orEmpty(),
+                            sourceLossless = J.bool(s, "sourceLossless"),
+                            sourceSampleRate = J.int(s, "sourceSampleRate"),
+                            sourceBitDepth = J.int(s, "sourceBitDepth"),
+                            sourceBitRate = J.int(s, "sourceBitRate"),
+                            loudness = loudness,
+                            renditions = renditions,
+                        ),
+                    )
+                }
+            }
+        } catch (_: SubsonicException) {
+            emptyMap()
+        }
+    }
 
     /** The server answered something that is not a Subsonic answer (a web page, a proxy's error). */
     class NotSubsonicException(cause: Throwable?) : Exception("not a Subsonic answer", cause)

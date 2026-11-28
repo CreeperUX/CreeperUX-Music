@@ -4,6 +4,7 @@
 import { h, ic } from '../dom.js';
 import { scope, tint } from './common.js';
 import { orderToBar, barToOrder } from '../api/contract.js';
+import { formatQualityBadge } from '../api/quality.js';
 import { mountDevicePicker, whereLine } from '../shell/devices.js';
 
 export function nowView(holder, route, ctx) {
@@ -19,7 +20,8 @@ export function nowView(holder, route, ctx) {
   const artBox = h('div', { class: 'cm-now-art' });
   const art = bag.add(P.createImage(artBox, { alt: '', lazy: false, placeholder: 'album', shape: 'rounded' }, S));
   const title = h('a', { class: 'cm-now-title' }), artist = h('a', { class: 'cm-now-artist' });
-  const names = h('div', { class: 'cm-now-names' }, h('h1', {}, title), artist);
+  const qualityBadge = h('span', { class: 'cm-quality-badge cm-now-quality', hidden: true });
+  const names = h('div', { class: 'cm-now-names' }, h('h1', {}, title), artist, qualityBadge);
   const meta = h('div', { class: 'cm-now-meta' }, names);
   const like = bag.add(UI.createToggleButton(meta, { label: t.like, icon: 'heart', iconOnly: true, variant: 'ghost', pressed: false,
     onPressedChange: e => { const c = ctx.currentTrack(); if (c) ctx.setLiked(c.id, e.pressed); } }, S));
@@ -69,6 +71,14 @@ export function nowView(holder, route, ctx) {
     repeat.update({ icon: o.repeat === 'one' ? 'repeat-one' : 'repeat', label: o.repeat === 'one' ? t.repeatOne : o.repeat === 'all' ? t.repeatAll : t.repeat });
     repeat.element.setAttribute('aria-pressed', String(o.repeat !== 'off'));
     seek.update({ position: p.position, duration: p.duration });
+    const qb = !p.remote && p.state !== 'error' && p.state !== 'stopped'
+      ? formatQualityBadge({ ...(p.qualitySource ?? {}), track: c, locale: ctx.prefs.locale })
+      : { text: '', isLossless: false };
+    qualityBadge.hidden = !qb.text;
+    qualityBadge.textContent = qb.text;
+    qualityBadge.toggleAttribute('data-lossless', qb.isLossless);
+    if (qb.text) qualityBadge.setAttribute('aria-label', t.currentQuality(qb.text));
+    else qualityBadge.removeAttribute('aria-label');
     if (shown === c.id) return;
     shown = c.id;
     art.update({ src: ctx.art(c.albumId) });

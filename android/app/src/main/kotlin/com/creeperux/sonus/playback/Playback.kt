@@ -19,6 +19,9 @@ data class PlayerState(
     val queueVersion: Int = 0,
     /** Seconds; 0 while unknown. */
     val duration: Double = 0.0,
+    /** Concise active quality label shown on the playback bar / player (e.g. "无损 · 96 kHz/24 位", "Opus 160"). */
+    val qualityBadge: String? = null,
+    val qualityIsLossless: Boolean = false,
 ) {
     val isActive: Boolean get() = status == PlayerStatus.Playing || status == PlayerStatus.Loading
 }

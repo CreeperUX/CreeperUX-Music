@@ -16,6 +16,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeDown
@@ -28,6 +29,9 @@ import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.Until
+import com.creeperux.sonus.core.AudioQuality
+import com.creeperux.sonus.core.LoudnessLevel
+import com.creeperux.sonus.core.LoudnessMode
 import com.creeperux.sonus.core.SubsonicClient
 import com.creeperux.sonus.core.SubsonicException
 import com.creeperux.sonus.playback.PlaybackService
@@ -354,6 +358,67 @@ class DeviceTest {
             compose.onNodeWithTag("panel-cover").performTouchInput { swipeRight() }
             compose.waitForIdle()
             assertThat(state().trackId).isEqualTo(first)
+        }
+        instrumentation.runOnMainSync { graph.playback.pause() }
+    }
+
+    @Test
+    fun qualitySettingsLoudnessAndBadgeWork() {
+        signIn()
+        compose.waitUntil(30_000) { exists("home") }
+        val session = (graph.state.value as AppState.Ready).session
+        val album = TestServer.playableAlbum(session.lib)
+        instrumentation.runOnMainSync {
+            val (ctx, ids) = session.contextOf("album", album.id)
+            graph.playback.play(ctx, ids, album.trackIds[0])
+        }
+        waitFor(what = "playing with badge") { state().status == PlayerStatus.Playing && !state().qualityBadge.isNullOrEmpty() }
+
+        // Open Settings and verify quality & loudness controls
+        compose.onNodeWithContentDescription("设置", substring = true).performClick()
+        compose.waitUntil(5_000) { exists("settings") }
+        assertThat(graph.playback.wifiQuality).isEqualTo(AudioQuality.Auto)
+        assertThat(graph.playback.cellularQuality).isEqualTo(AudioQuality.Auto)
+        assertThat(graph.playback.loudnessLevel).isEqualTo(LoudnessLevel.Off)
+        assertThat(graph.playback.alwaysOriginal).isFalse()
+
+        compose.onNodeWithTag("wifi-quality-Lossless").performScrollTo().performClick()
+        compose.onNodeWithTag("cell-quality-High").performScrollTo().performClick()
+        compose.onNodeWithTag("loudness-Normal").performScrollTo().performClick()
+        compose.waitUntil(3_000) { exists("loudness-mode-Track") }
+        compose.onNodeWithTag("loudness-mode-Track").performScrollTo().performClick()
+        compose.waitForIdle()
+        Thread.sleep(200)
+        shot("10-settings-quality")
+        compose.onNodeWithTag("always-original").performScrollTo().performClick()
+        compose.waitForIdle()
+        Thread.sleep(200)
+        assertThat(graph.playback.wifiQuality).isEqualTo(AudioQuality.Lossless)
+        assertThat(graph.playback.cellularQuality).isEqualTo(AudioQuality.High)
+        assertThat(graph.playback.loudnessLevel).isEqualTo(LoudnessLevel.Normal)
+        assertThat(graph.playback.loudnessMode).isEqualTo(LoudnessMode.Track)
+        assertThat(graph.playback.alwaysOriginal).isTrue()
+        shot("11-settings-advanced")
+
+        // Restore defaults
+        instrumentation.runOnMainSync {
+            graph.playback.wifiQuality = AudioQuality.Auto
+            graph.playback.cellularQuality = AudioQuality.Auto
+            graph.playback.loudnessLevel = LoudnessLevel.Off
+            graph.playback.loudnessMode = LoudnessMode.Album
+            graph.playback.alwaysOriginal = false
+        }
+
+        // Verify quality badge is visible in player (phone FullPlayer or tablet PlaybackBar)
+        if (exists("mini-player")) {
+            compose.onNodeWithTag("mini-player").performClick()
+            compose.waitUntil(5_000) { exists("full-player") }
+            compose.waitUntil(5_000) { exists("quality-badge") }
+            Thread.sleep(600)
+            shot("12-player-badge")
+        } else {
+            compose.waitUntil(5_000) { exists("quality-badge") }
+            shot("12-bar-badge")
         }
         instrumentation.runOnMainSync { graph.playback.pause() }
     }

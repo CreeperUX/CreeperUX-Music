@@ -35,6 +35,16 @@ public sealed class PlaybackBar : UserControl
     private readonly Button _mute;
     private readonly TextBlock _error = Ui.Text("", size: 12, foreground: Ui.Brush("BadBrush"));
     private readonly TextBlock _where = Ui.Text("", size: 12, foreground: Ui.Brush("AccentTextBrush"));
+    private readonly TextBlock _qualityText = Ui.Text("", size: 10.5, foreground: Ui.Brush("TextSecondaryBrush"), bold: true);
+    private readonly Border _qualityBadge = new()
+    {
+        HorizontalAlignment = HorizontalAlignment.Left,
+        Padding = new Thickness(6, 1, 6, 1),
+        Margin = new Thickness(0, 3, 0, 0),
+        CornerRadius = new CornerRadius(4),
+        BorderThickness = new Thickness(1),
+        Visibility = Visibility.Collapsed,
+    };
     // Spotify's strip under the bar while another device plays
     private readonly TextBlock _elsewhereText = Ui.Text("", size: 12.5, foreground: Ui.Brush("OnAccentBrush"), bold: true);
     private readonly Button _elsewhere = new() { HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Right, Height = 26, Margin = new Thickness(8, 0, 8, 6), Padding = new Thickness(12, 0, 12, 0), CornerRadius = new CornerRadius(4), BorderThickness = new Thickness(0), Visibility = Visibility.Collapsed };
@@ -108,7 +118,10 @@ public sealed class PlaybackBar : UserControl
         Motion.Press(_like);
         _where.Visibility = Visibility.Collapsed;
         AutomationProperties.SetLiveSetting(_where, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
-        var songText = _songText = Ui.Column(0, _title, _artist, _error, _where);
+        _qualityBadge.Background = Ui.Brush("HoverBrush");
+        _qualityBadge.BorderBrush = Ui.Brush("SurfaceHoverBrush");
+        _qualityBadge.Child = _qualityText;
+        var songText = _songText = Ui.Column(0, _title, _artist, _qualityBadge, _error, _where);
         songText.VerticalAlignment = VerticalAlignment.Center;
         songText.MaxWidth = 240;
         // the heart sits right after the title, as in foobar2k (not at the far end of the column)
@@ -327,6 +340,14 @@ public sealed class PlaybackBar : UserControl
         _where.Text = last ?? "";
         _where.Visibility = last is null ? Visibility.Collapsed : Visibility.Visible;
         AutomationProperties.SetName(_where, _where.Text);
+        var badge = m.QualityBadge;
+        bool showBadge = m.State != PlayerState.Error && last is null && !string.IsNullOrEmpty(badge.Text);
+        _qualityText.Text = badge.Text;
+        _qualityText.Foreground = badge.IsLossless ? Ui.Brush("AccentTextBrush") : Ui.Brush("TextSecondaryBrush");
+        _qualityBadge.BorderBrush = badge.IsLossless ? Ui.Brush("AccentBrush") : Ui.Brush("SurfaceHoverBrush");
+        _qualityBadge.Visibility = showBadge ? Visibility.Visible : Visibility.Collapsed;
+        AutomationProperties.SetName(_qualityText, showBadge ? $"当前音质：{badge.Text}" : "");
+        ToolTipService.SetToolTip(_qualityBadge, showBadge ? badge.Text : null);
         var order = m.Queue.Order;
         _shuffle.IsChecked = order is PlaybackOrder.ShuffleTracks or PlaybackOrder.ShuffleAlbums or PlaybackOrder.ShuffleFolders or PlaybackOrder.Random;
         _repeat.IsChecked = order is PlaybackOrder.RepeatPlaylist or PlaybackOrder.RepeatTrack;
@@ -363,6 +384,7 @@ public sealed class PlaybackBar : UserControl
         ShowPlay(playing ? Glyphs.Pause : Glyphs.Play, playing ? "暂停" : "播放");
         _error.Visibility = Visibility.Collapsed;
         _artist.Visibility = s?.TrackId is null ? Visibility.Collapsed : Visibility.Visible;
+        _qualityBadge.Visibility = Visibility.Collapsed;
         _where.Visibility = Visibility.Collapsed; // the strip says it
         foreach (var c in new Control[] { _shuffle, _repeat }) { c.IsEnabled = false; c.Foreground = Ui.Brush("TextTertiaryBrush"); }
         _mute.IsEnabled = false;

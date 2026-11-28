@@ -96,6 +96,31 @@ class LoginStoreTest {
         LoginStore(prefs, MemoryBox()).save(Login("http://h", "u", "s", "t"))
         assertThat(LoginStore(prefs, MemoryBox()).load()).isNull() // the Keystore key was reset, or a backup restored elsewhere
     }
+
+    @Test
+    fun qualityAndLoudnessSettingsHaveExpectedDefaultsAndPersist() {
+        val prefs = context.getSharedPreferences("test-quality-settings", Context.MODE_PRIVATE)
+        prefs.edit().clear().commit()
+        val s1 = com.creeperux.sonus.data.Settings(prefs)
+        assertThat(s1.wifiQuality).isEqualTo(com.creeperux.sonus.core.AudioQuality.Auto)
+        assertThat(s1.cellularQuality).isEqualTo(com.creeperux.sonus.core.AudioQuality.Auto)
+        assertThat(s1.loudnessLevel).isEqualTo(com.creeperux.sonus.core.LoudnessLevel.Off)
+        assertThat(s1.loudnessMode).isEqualTo(com.creeperux.sonus.core.LoudnessMode.Album)
+        assertThat(s1.alwaysOriginal).isFalse()
+
+        s1.wifiQuality = com.creeperux.sonus.core.AudioQuality.Lossless
+        s1.cellularQuality = com.creeperux.sonus.core.AudioQuality.Lossless
+        s1.loudnessLevel = com.creeperux.sonus.core.LoudnessLevel.Normal
+        s1.loudnessMode = com.creeperux.sonus.core.LoudnessMode.Track
+        s1.alwaysOriginal = true
+
+        val s2 = com.creeperux.sonus.data.Settings(prefs)
+        assertThat(s2.wifiQuality).isEqualTo(com.creeperux.sonus.core.AudioQuality.Lossless)
+        assertThat(s2.cellularQuality).isEqualTo(com.creeperux.sonus.core.AudioQuality.Lossless)
+        assertThat(s2.loudnessLevel).isEqualTo(com.creeperux.sonus.core.LoudnessLevel.Normal)
+        assertThat(s2.loudnessMode).isEqualTo(com.creeperux.sonus.core.LoudnessMode.Track)
+        assertThat(s2.alwaysOriginal).isTrue()
+    }
 }
 
 class NavigatorTest {

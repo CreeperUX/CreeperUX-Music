@@ -84,7 +84,13 @@ pub const METHODS: &[&str] = &[
     "reportPlayback",
     // phase 5: media (stream.rs)
     "stream",
+    // playback library (renditions/)
+    "getSonusRenditions",
+    "getSonusLibraryHealth",
 ];
+
+/// Methods defined by Sonus itself (never forwarded to Navidrome; always answered in JSON, no player cookie needed).
+const SONUS_ONLY: &[&str] = &["getSonusRenditions", "getSonusLibraryHealth"];
 
 /// The methods whose answer is the media itself, whatever format the request names: an error is rendered in that
 /// format, so one asked for in another than JSON is Navidrome's.
@@ -135,6 +141,8 @@ pub struct Library {
     passed: AtomicU64,
     /// The R2 mirror, once it runs: clients that ask are sent to it (`stream`, `getCoverArt`).
     mirror: std::sync::OnceLock<Arc<crate::mirror::Mirror>>,
+    /// The playback library, once enabled (`SONUS_RENDITIONS_ENABLED`): serves pre-generated renditions and loudness.
+    renditions: std::sync::OnceLock<Arc<crate::renditions::Renditions>>,
 }
 
 /// The parameter a client sends when it follows a redirect to the R2 mirror (and falls back to `0` when that fails).
@@ -233,6 +241,8 @@ pub struct Scope<'a> {
     pub images: Option<&'a filecache::Cache>,
     /// The R2 mirror, while it runs and its bucket answers: resized covers are offered to it.
     pub mirror: Option<&'a crate::mirror::Mirror>,
+    /// The playback library, when enabled (`SONUS_RENDITIONS_ENABLED`).
+    pub renditions: Option<&'a crate::renditions::Renditions>,
     /// Whether this request may be sent to the mirror: it asked (`sonusMirror=1`), from where the owner allows.
     pub redirect: bool,
 }
@@ -283,12 +293,28 @@ impl Library {
             answered: AtomicU64::new(0),
             passed: AtomicU64::new(0),
             mirror: std::sync::OnceLock::new(),
+            renditions: std::sync::OnceLock::new(),
         }
     }
 
     /// Gives the library the R2 mirror. Once: a second call changes nothing.
     pub fn set_mirror(&self, mirror: Arc<crate::mirror::Mirror>) {
         let _ = self.mirror.set(mirror);
+    }
+
+    /// Gives the library the playback library handle. Once: a second call changes nothing.
+    pub fn set_renditions(&self, renditions: Arc<crate::renditions::Renditions>) {
+        let _ = self.renditions.set(renditions);
+    }
+
+    /// Whether the playback library is active (controls `sonusRenditions` in `getOpenSubsonicExtensions`).
+    pub fn has_renditions(&self) -> bool {
+        self.renditions.get().is_some()
+    }
+
+    /// Shared transcoder handle (used by the playback library worker to find ffmpeg and yield to live transcodes).
+    pub fn transcoder(&self) -> Arc<transcoder::Transcoder> {
+        self.transcoder.clone()
     }
 
     /// How many requests were answered here, and how many of the library's methods went on to Navidrome.
@@ -319,13 +345,14 @@ impl Library {
         }
         // a cover is a picture whatever format the request names, and Navidrome registers no player for it
         let cover = method == "getCoverArt";
+        let sonus_only = SONUS_ONLY.contains(&method);
         let writing = writes::METHODS.contains(&method);
-        let json = Format::of(params.get("f"), params.get("callback")) == Format::Json;
+        let json = Format::of(params.get("f"), params.get("callback")) == Format::Json || sonus_only;
         if !MEDIA.contains(&method) && !json {
             return Err("not JSON");
         }
         let Ok(client) = std::str::from_utf8(params.get("c")) else { return Err("a client name that is not text") };
-        let player = if cover {
+        let player = if cover || sonus_only {
             None
         } else {
             // Navidrome registers the player before the method runs (getPlayer), and answers with its cookie
@@ -362,6 +389,7 @@ impl Library {
         let image_links = links::for_request(self.public_signer.as_ref(), &self.link_settings, headers);
         // the mirror while its bucket answers; a request that asks for it, from where the owner allows, may be sent
         let mirror = self.mirror.get().filter(|mirror| mirror.health.ok()).cloned();
+        let renditions = self.renditions.get().cloned();
         let redirect = params.get(MIRROR_PARAM) == b"1" && mirror.as_ref().is_some_and(|mirror| mirror.sends(address));
         let reply = tokio::task::spawn_blocking(move || {
             let run = |conn: &rusqlite::Connection| {
@@ -383,6 +411,7 @@ impl Library {
                     transcoder: &transcoder,
                     images: images.as_deref(),
                     mirror: mirror.as_deref(),
+                    renditions: renditions.as_deref(),
                     redirect,
                 };
                 Ok(browse::answer(method, &scope))
@@ -624,6 +653,7 @@ impl Library {
             (header::ACCEPT_RANGES, HeaderValue::from_static("none")),
             (header::CONTENT_TYPE, HeaderValue::from_static(pending.content_type)),
         ];
+        headers.extend(pending.extra_headers);
         if let Some(length) = pending.length {
             headers.push((header::CONTENT_LENGTH, HeaderValue::from(length)));
         }

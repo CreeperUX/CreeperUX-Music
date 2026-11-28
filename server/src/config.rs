@@ -48,6 +48,8 @@ pub struct Config {
     pub shared: Shared,
     /// The R2 mirror (SONUS_R2_*); none: off, the default.
     pub mirror: Option<crate::mirror::Settings>,
+    /// The playback library (SONUS_RENDITIONS_*); none: off, the default.
+    pub renditions: Option<crate::renditions::Settings>,
 }
 
 /// Navidrome's settings that the parts of the server answered here need too, read as Navidrome reads them.
@@ -460,7 +462,20 @@ impl Config {
             }
         };
         let mirror = crate::mirror::Settings::from_env(var)?;
-        Ok(Config { listen, upstream, navidrome, trusted, user_header, upstream_user_header, base_path, config_file: file.map(|f| f.path), shared, mirror })
+        let renditions = crate::renditions::Settings::from_env(var)?;
+        Ok(Config {
+            listen,
+            upstream,
+            navidrome,
+            trusted,
+            user_header,
+            upstream_user_header,
+            base_path,
+            config_file: file.map(|f| f.path),
+            shared,
+            mirror,
+            renditions,
+        })
     }
 }
 

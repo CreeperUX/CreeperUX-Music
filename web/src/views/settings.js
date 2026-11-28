@@ -19,11 +19,35 @@ export function settingsView(holder, route, ctx) {
     options: Object.entries(t.orders).map(([value, label]) => ({ value, label })),
     onChange: e => ctx.run(a.setOrder(e.value)) }, ctx.S));
   const stop = bag.add(UI.createSwitch(row(play), { label: t.stopAfterCurrent, checked: !!ctx.player.stopAfterCurrent, onChange: e => ctx.run(a.setStopAfterCurrent(e.checked)) }, ctx.S));
-  bag.add(UI.createRadioGroup(row(play), { label: t.replayGainMode, value: ctx.player.replayGain, orientation: 'horizontal',
-    options: Object.entries(t.rgModes).map(([value, label]) => ({ value, label })), onChange: e => ctx.run(a.setReplayGain(e.value)) }, ctx.S));
+
+  // ------------------------------------------------ quality & volume normalization
+  const qual = section(s.quality, s.qualityIntro);
+  const tierOpts = Object.entries(t.qualityTiers).map(([value, label]) => ({ value, label }));
+  const wifiQ = bag.add(UI.createRadioGroup(row(qual), { label: s.wifiQuality, value: ctx.player.wifiQuality ?? 'auto', orientation: 'horizontal',
+    options: tierOpts, onChange: e => ctx.run(a.setWifiQuality(e.value)) }, ctx.S));
+  const cellQ = bag.add(UI.createRadioGroup(row(qual), { label: s.cellularQuality, value: ctx.player.cellularQuality ?? 'auto', orientation: 'horizontal',
+    options: tierOpts, onChange: e => ctx.run(a.setCellularQuality(e.value)) }, ctx.S));
+  const qNote = row(qual, 'cm-set-note'); qNote.append(ic('info'), h('span', {}, s.qualityNote));
+  const loudLvl = bag.add(UI.createRadioGroup(row(qual), { label: s.loudness, value: ctx.player.loudnessLevel ?? 'off', orientation: 'horizontal',
+    options: Object.entries(t.loudnessLevels).map(([value, label]) => ({ value, label })),
+    onChange: e => ctx.run(a.setLoudnessLevel(e.value)) }, ctx.S));
+  const loudModeRow = row(qual);
+  const loudMode = bag.add(UI.createRadioGroup(loudModeRow, { label: s.loudnessMode, value: ctx.player.loudnessMode ?? 'album', orientation: 'horizontal',
+    options: Object.entries(t.loudnessModes).map(([value, label]) => ({ value, label })),
+    onChange: e => ctx.run(a.setLoudnessMode(e.value)) }, ctx.S));
+  loudModeRow.hidden = (ctx.player.loudnessLevel ?? 'off') === 'off';
+  const lNote = row(qual, 'cm-set-note'); lNote.append(ic('info'), h('span', {}, s.loudnessNote));
+
   bag.add(ctx.on('player', ({ player, prev }) => {
     if (player.order !== prev?.order) order.update({ value: player.order });
     if (player.stopAfterCurrent !== prev?.stopAfterCurrent) stop.update({ checked: !!player.stopAfterCurrent });
+    if (player.wifiQuality !== prev?.wifiQuality) wifiQ.update({ value: player.wifiQuality ?? 'auto' });
+    if (player.cellularQuality !== prev?.cellularQuality) cellQ.update({ value: player.cellularQuality ?? 'auto' });
+    if (player.loudnessLevel !== prev?.loudnessLevel) {
+      loudLvl.update({ value: player.loudnessLevel ?? 'off' });
+      loudModeRow.hidden = (player.loudnessLevel ?? 'off') === 'off';
+    }
+    if (player.loudnessMode !== prev?.loudnessMode) loudMode.update({ value: player.loudnessMode ?? 'album' });
   }));
 
   // ------------------------------------------------ output device
@@ -57,6 +81,14 @@ export function settingsView(holder, route, ctx) {
   bag.add(UI.createSegmented(row(look), { label: t.language, value: ctx.prefs.locale, options: [{ value: 'zh-CN', label: '简体中文' }, { value: 'en', label: 'English' }],
     onChange: e => { ctx.prefs.locale = e.value; ctx.savePrefs(); location.reload(); } }, ctx.S));
   bag.add(UI.createButton(row(look), { label: t.shortcuts, icon: 'info', variant: 'secondary', onClick: () => ctx.keys.openHelp() }, ctx.S));
+
+  // ------------------------------------------------ advanced
+  const adv = section(s.advanced);
+  const orig = bag.add(UI.createSwitch(row(adv), { label: s.alwaysOriginal, checked: !!ctx.player.alwaysOriginal, onChange: e => ctx.run(a.setAlwaysOriginal(e.checked)) }, ctx.S));
+  const origNote = row(adv, 'cm-set-note'); origNote.append(ic('info'), h('span', {}, s.alwaysOriginalNote));
+  bag.add(ctx.on('player', ({ player, prev }) => {
+    if (player.alwaysOriginal !== prev?.alwaysOriginal) orig.update({ checked: !!player.alwaysOriginal });
+  }));
 
   // ------------------------------------------------ about
   const about = section(s.about);

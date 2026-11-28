@@ -27,7 +27,17 @@ public sealed class AppSettings
 {
     public double Volume { get; set; } = 0.8;
     public bool Muted { get; set; }
-    public ReplayGainMode ReplayGain { get; set; } = ReplayGainMode.Album;
+    public ReplayGainMode ReplayGain { get; set; } = ReplayGainMode.Off;
+    /// <summary>Preferred quality on Wi-Fi / unmetered networks (default Auto = lossless).</summary>
+    public Sonus.Core.Audio.AudioQuality WifiQuality { get; set; } = Sonus.Core.Audio.AudioQuality.Auto;
+    /// <summary>Preferred quality on cellular / metered networks (default Auto = Opus 160).</summary>
+    public Sonus.Core.Audio.AudioQuality CellularQuality { get; set; } = Sonus.Core.Audio.AudioQuality.Auto;
+    /// <summary>EBU R128 loudness normalization level (default Off).</summary>
+    public Sonus.Core.Audio.LoudnessLevel LoudnessLevel { get; set; } = Sonus.Core.Audio.LoudnessLevel.Off;
+    /// <summary>EBU R128 loudness normalization scope when enabled (default Album).</summary>
+    public Sonus.Core.Audio.LoudnessMode LoudnessMode { get; set; } = Sonus.Core.Audio.LoudnessMode.Album;
+    /// <summary>Advanced override: always stream original source files and ignore quality tiers.</summary>
+    public bool AlwaysOriginal { get; set; }
     public PlaybackOrder Order { get; set; } = PlaybackOrder.Default;
     public string? OutputDeviceId { get; set; }
     public bool LibraryOpen { get; set; } = true;
@@ -42,6 +52,8 @@ public sealed class AppSettings
     /// <summary>Offer test versions (GitHub pre-releases) too.</summary>
     public bool UpdatePrerelease { get; set; }
     public DateTime? LastUpdateCheck { get; set; }
+    /// <summary>Which Windows playback core to use (built-in pure C# + WASAPI by default; legacy Media Foundation kept as fallback).</summary>
+    public Sonus.Core.Audio.AudioCore PlaybackCore { get; set; } = Sonus.Core.Audio.AudioCore.Native;
     /// <summary>This installation's own id in Sonus Connect, made once and kept: after a reconnect or a restart it is the
     /// same device.</summary>
     public string? ConnectDeviceId { get; set; }

@@ -1,6 +1,10 @@
 package com.creeperux.sonus.playback
 
 import android.content.Context
+import android.media.audiofx.LoudnessEnhancer
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -20,14 +24,21 @@ import androidx.media3.exoplayer.ExoPlaybackException
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.UnrecognizedInputFormatException
+import com.creeperux.sonus.core.AudioQuality
+import com.creeperux.sonus.core.LoudnessLevel
+import com.creeperux.sonus.core.LoudnessMode
 import com.creeperux.sonus.core.PlayContext
 import com.creeperux.sonus.core.PlayQueue
 import com.creeperux.sonus.core.PlaybackOrder
+import com.creeperux.sonus.core.QualityBadgeInfo
+import com.creeperux.sonus.core.QualityPolicy
 import com.creeperux.sonus.core.QueueEntry
 import com.creeperux.sonus.core.RemoteQueue
 import com.creeperux.sonus.core.ReplayGainMode
 import com.creeperux.sonus.core.Scrobbling
 import com.creeperux.sonus.core.ServerUnreachableException
+import com.creeperux.sonus.core.SongRenditions
+import com.creeperux.sonus.core.StreamHeaderInfo
 import com.creeperux.sonus.core.SubsonicException
 import com.creeperux.sonus.core.Track
 import com.creeperux.sonus.core.connect.PlaybackSession
@@ -55,12 +66,15 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
+import kotlin.math.log10
 import kotlin.math.min
 import kotlin.math.pow
+import kotlin.math.roundToInt
 
 /**
  * This device's own player (the playing half of the Windows app's MusicService): the queue ([PlayQueue]) decides what
@@ -96,6 +110,19 @@ class LocalPlayback(
     private var failures = 0 // songs in a row that could not play (without a session: skipped, up to five)
     private val noPreload = mutableSetOf<String>() // songs whose early load failed: loaded only when they come up
     private var positionHeldUntil = 0L // a seek sent for another device: the session's position is not shown until it says so
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val renditionsCache = ConcurrentHashMap<String, SongRenditions>()
+    private val renditionsLoading = mutableSetOf<String>()
+    private val streamHeaders = ConcurrentHashMap<String, StreamHeaderInfo>()
+    private val requestedTiers = ConcurrentHashMap<String, String>()
+    @Volatile private var meteredNetwork = false
+    private var autoDowngradeSteps = 0
+    private var smoothTracksSinceDowngrade = 0
+    private var bufferingSinceMs = 0L
+    private var downgradedThisStall = false
+    private var loudnessEnhancer: LoudnessEnhancer? = null
+    private var enhancerSessionId: Int = C.AUDIO_SESSION_ID_UNSET
+    private var networkCallbackRegistered = false
 
     // Sonus Connect version 2: the session as last applied, and what the player has of it
     private var remote: PlaybackSession? = null
@@ -123,6 +150,83 @@ class LocalPlayback(
             applyVolume(current)
         }
 
+    var wifiQuality: AudioQuality = settings.wifiQuality
+        set(v) {
+            if (field == v) return
+            field = v
+            settings.wifiQuality = v
+            autoDowngradeSteps = 0
+            smoothTracksSinceDowngrade = 0
+            refreshPreload()
+        }
+
+    var cellularQuality: AudioQuality = settings.cellularQuality
+        set(v) {
+            if (field == v) return
+            field = v
+            settings.cellularQuality = v
+            autoDowngradeSteps = 0
+            smoothTracksSinceDowngrade = 0
+            refreshPreload()
+        }
+
+    var loudnessLevel: LoudnessLevel = settings.loudnessLevel
+        set(v) {
+            if (field == v) return
+            field = v
+            settings.loudnessLevel = v
+            if (v != LoudnessLevel.Off && replayGain != ReplayGainMode.Off) {
+                replayGain = ReplayGainMode.Off
+            }
+            applyVolume(current)
+        }
+
+    var loudnessMode: LoudnessMode = settings.loudnessMode
+        set(v) {
+            if (field == v) return
+            field = v
+            settings.loudnessMode = v
+            applyVolume(current)
+        }
+
+    var alwaysOriginal: Boolean = settings.alwaysOriginal
+        set(v) {
+            if (field == v) return
+            field = v
+            settings.alwaysOriginal = v
+            autoDowngradeSteps = 0
+            smoothTracksSinceDowngrade = 0
+            refreshPreload()
+        }
+
+    private val activeNetworkQuality: AudioQuality get() = if (meteredNetwork) cellularQuality else wifiQuality
+
+    /** OkHttp derivative for ExoPlayer that captures X-Sonus-* rendition headers from stream responses. */
+    private val streamHttp: OkHttpClient by lazy {
+        http.newBuilder()
+            .addNetworkInterceptor { chain ->
+                val res = chain.proceed(chain.request())
+                val url = res.request.url
+                if (url.encodedPath.endsWith("/stream.view")) {
+                    val songId = url.queryParameter("id")
+                    val q = res.header("X-Sonus-Quality")
+                    val fmt = res.header("X-Sonus-Format")
+                    if (!songId.isNullOrEmpty() && (!q.isNullOrEmpty() || !fmt.isNullOrEmpty())) {
+                        streamHeaders[songId] = StreamHeaderInfo(
+                            quality = q,
+                            format = fmt,
+                            sampleRate = res.header("X-Sonus-Sample-Rate")?.toIntOrNull(),
+                            bitDepth = res.header("X-Sonus-Bit-Depth")?.toIntOrNull(),
+                            bitRate = res.header("X-Sonus-Bit-Rate")?.toIntOrNull(),
+                        )
+                        mainHandler.post { if (current?.id == songId) updateBadge(current) }
+                    }
+                }
+                res
+            }
+            .build()
+    }
+
     val current: Track? get() = session?.lib?.track(queue.current)
 
     /** With a session, another device plays it (or none does): this one shows it and its player is silent. */
@@ -142,14 +246,45 @@ class LocalPlayback(
 
     /** The player: made on first use, on the main thread, and kept for the life of the app. */
     val exo: ExoPlayer by lazy {
+        ensureNetworkObserver()
         ExoPlayer.Builder(context)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(OkHttpDataSource.Factory(http)))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(OkHttpDataSource.Factory(streamHttp)))
             .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(), true)
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
             .also { it.addListener(listener) }
     }
+
+    private fun ensureNetworkObserver() {
+        if (networkCallbackRegistered) return
+        networkCallbackRegistered = true
+        meteredNetwork = detectMeteredNetwork()
+        runCatching {
+            val cm = context.getSystemService(ConnectivityManager::class.java) ?: return
+            cm.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
+                override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                    val metered = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
+                        !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+                    if (metered != meteredNetwork) {
+                        meteredNetwork = metered
+                        mainHandler.post {
+                            autoDowngradeSteps = 0
+                            smoothTracksSinceDowngrade = 0
+                            Log.i(TAG, "network changed -> ${if (metered) "metered/cellular" else "wifi/unmetered"} (next track)")
+                            refreshPreload()
+                        }
+                    }
+                }
+            })
+        }
+    }
+
+    private fun detectMeteredNetwork(): Boolean = runCatching {
+        val cm = context.getSystemService(ConnectivityManager::class.java) ?: return false
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+    }.getOrDefault(false)
 
     /** What the system's media controls (notification, lock screen, headphones, car) talk to: the player, with next and
      *  previous going through the queue, or another device's playback while that one plays the session. */
@@ -168,6 +303,12 @@ class LocalPlayback(
         remote = null
         engineKey = null
         advancedTo = null
+        renditionsCache.clear()
+        renditionsLoading.clear()
+        streamHeaders.clear()
+        requestedTiers.clear()
+        autoDowngradeSteps = 0
+        smoothTracksSinceDowngrade = 0
         queue = newQueue()
         stateFlow.value = PlayerState(order = queue.order)
         sessionPlayer.refresh()
@@ -269,7 +410,7 @@ class LocalPlayback(
     fun stop() {
         exo.stop()
         positionFlow.value = 0.0
-        setStatus(PlayerStatus.Stopped)
+        stateFlow.update { it.copy(status = PlayerStatus.Stopped, error = null, qualityBadge = null, qualityIsLossless = false) }
         ticker?.cancel()
     }
 
@@ -359,6 +500,7 @@ class LocalPlayback(
                 trackId = s.current?.trackId, error = null,
                 status = if (s.current == null) PlayerStatus.Stopped else if (s.playing) PlayerStatus.Playing else PlayerStatus.Paused,
                 duration = if (s.durationMs > 0) s.durationMs / 1000.0 else t?.duration ?: 0.0,
+                qualityBadge = null, qualityIsLossless = false,
             )
         }
         positionFlow.value = s.positionAt(linkFlow.value?.serverNow ?: System.currentTimeMillis()) / 1000.0
@@ -484,14 +626,71 @@ class LocalPlayback(
 
     private fun itemFor(t: Track): MediaItem {
         val s = session!!
-        // ExoPlayer plays FLAC, ALAC, AAC, MP3, WAV, Opus and Vorbis; the rest is asked for as MP3, which every server
-        // can transcode to (the same list as the Windows app)
-        val transcode = if (t.suffix in TRANSCODED) "mp3" else null
+        meteredNetwork = detectMeteredNetwork()
+        val tier = QualityPolicy.resolveTier(
+            setting = activeNetworkQuality,
+            metered = meteredNetwork,
+            alwaysOriginal = alwaysOriginal,
+            autoDowngradeSteps = autoDowngradeSteps,
+            serverHasRenditions = s.client.supportsRenditions,
+        )
+        if (tier != null) requestedTiers[t.id] = tier else requestedTiers.remove(t.id)
+        val streamUrl = if (tier != null) {
+            s.client.streamUrl(t.id, sonusQuality = tier)
+        } else {
+            // ExoPlayer plays FLAC, ALAC, AAC, MP3, WAV, Opus and Vorbis; the rest is asked for as MP3, which every server
+            // can transcode to (the same list as the Windows app)
+            val transcode = if (t.suffix in TRANSCODED) "mp3" else null
+            s.client.streamUrl(t.id, transcode)
+        }
         return MediaItem.Builder()
             .setMediaId(t.id)
-            .setUri(s.client.streamUrl(t.id, transcode))
+            .setUri(streamUrl)
             .setMediaMetadata(metadataFor(t))
             .build()
+    }
+
+    private fun ensureRenditions(vararg ids: String?) {
+        val s = session ?: return
+        if (!s.client.supportsRenditions) return
+        val need = ids.filterNotNull().filter { it.isNotEmpty() && !renditionsCache.containsKey(it) && renditionsLoading.add(it) }.distinct()
+        if (need.isEmpty()) return
+        scope.launch {
+            try {
+                val found = s.client.getSonusRenditions(need)
+                mainHandler.post {
+                    need.forEach { renditionsLoading.remove(it) }
+                    if (found.isNotEmpty()) {
+                        renditionsCache.putAll(found)
+                        current?.let { cur ->
+                            if (cur.id in found) {
+                                applyVolume(cur)
+                                updateBadge(cur)
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                mainHandler.post { need.forEach { renditionsLoading.remove(it) } }
+                Log.i(TAG, "getSonusRenditions: ${e.message}")
+            }
+        }
+    }
+
+    private fun badgeFor(t: Track?): QualityBadgeInfo = if (t == null || elsewhere) {
+        QualityBadgeInfo.Empty
+    } else {
+        QualityPolicy.formatBadge(
+            stream = streamHeaders[t.id],
+            renditions = renditionsCache[t.id],
+            track = t,
+            requestedTier = requestedTiers[t.id],
+        )
+    }
+
+    private fun updateBadge(t: Track?) {
+        val b = badgeFor(t)
+        stateFlow.update { it.copy(qualityBadge = b.text.ifEmpty { null }, qualityIsLossless = b.isLossless) }
     }
 
     /** What the system's media controls show of a song. */
@@ -527,15 +726,27 @@ class LocalPlayback(
         }
         counted = false
         nowPlayingSent = false
+        bufferingSinceMs = 0L
+        downgradedThisStall = false
         startedAt = System.currentTimeMillis()
         positionFlow.value = at
         noPreload -= trackId // tried again now that it comes up
+        streamHeaders.remove(trackId)
         // the start position is given here only, once (the session's position is not applied again unless the player
         // is more than 1.5 s off it: see followHere)
-        val items = listOfNotNull(itemFor(t), nextItem(trackId))
+        val next = nextItem(trackId)
+        val items = listOfNotNull(itemFor(t), next)
+        ensureRenditions(trackId, next?.mediaId)
         applyVolume(t)
+        val badge = badgeFor(t)
         // the state first: the player reports what it does (playing …) from within the calls below
-        stateFlow.update { it.copy(trackId = trackId, duration = t.duration, error = null, status = if (autoplay) PlayerStatus.Loading else PlayerStatus.Paused) }
+        stateFlow.update {
+            it.copy(
+                trackId = trackId, duration = t.duration, error = null,
+                status = if (autoplay) PlayerStatus.Loading else PlayerStatus.Paused,
+                qualityBadge = badge.text.ifEmpty { null }, qualityIsLossless = badge.isLossless,
+            )
+        }
         exo.setMediaItems(items, 0, (at * 1000).toLong())
         exo.prepare()
         exo.playWhenReady = autoplay
@@ -549,9 +760,12 @@ class LocalPlayback(
         if (exo.getMediaItemAt(i).mediaId != queue.current) return
         val wanted = nextItem(queue.current)
         val have = if (i + 1 < exo.mediaItemCount) exo.getMediaItemAt(i + 1) else null
-        if (have?.mediaId == wanted?.mediaId) return
+        if (have?.mediaId == wanted?.mediaId && have?.localConfiguration?.uri == wanted?.localConfiguration?.uri) return
         if (i + 1 < exo.mediaItemCount) exo.removeMediaItems(i + 1, exo.mediaItemCount)
-        wanted?.let(exo::addMediaItem)
+        wanted?.let {
+            ensureRenditions(it.mediaId)
+            exo.addMediaItem(it)
+        }
     }
 
     private val listener = object : Player.Listener {
@@ -577,12 +791,30 @@ class LocalPlayback(
             refreshPreload()
             counted = false
             nowPlayingSent = false
+            if (autoDowngradeSteps > 0 && !downgradedThisStall && ++smoothTracksSinceDowngrade >= 2) {
+                autoDowngradeSteps--
+                smoothTracksSinceDowngrade = 0
+                Log.i(TAG, "recovered one quality step -> downgrade=$autoDowngradeSteps")
+            }
+            bufferingSinceMs = 0L
+            downgradedThisStall = false
             startedAt = System.currentTimeMillis()
             val t = session?.lib?.track(id)
+            ensureRenditions(id, nextTrackId)
             applyVolume(t)
-            stateFlow.update { it.copy(trackId = id, duration = t?.duration ?: 0.0, error = null) }
+            val badge = badgeFor(t)
+            stateFlow.update {
+                it.copy(
+                    trackId = id, duration = t?.duration ?: 0.0, error = null,
+                    qualityBadge = badge.text.ifEmpty { null }, qualityIsLossless = badge.isLossless,
+                )
+            }
             positionFlow.value = 0.0
             if (exo.isPlaying) nowPlaying()
+        }
+
+        override fun onAudioSessionIdChanged(audioSessionId: Int) {
+            applyVolume(current)
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -738,9 +970,28 @@ class LocalPlayback(
                     sayHere("position") // a seek done
                 }
                 if (!exo.isPlaying) {
+                    if (exo.playbackState == Player.STATE_BUFFERING && exo.playWhenReady) {
+                        val now = System.currentTimeMillis()
+                        if (bufferingSinceMs == 0L) bufferingSinceMs = now
+                        else if (!downgradedThisStall && now - bufferingSinceMs >= 4_500 &&
+                            session?.client?.supportsRenditions == true && !alwaysOriginal &&
+                            activeNetworkQuality == AudioQuality.Auto && autoDowngradeSteps < 3
+                        ) {
+                            downgradedThisStall = true
+                            autoDowngradeSteps++
+                            smoothTracksSinceDowngrade = 0
+                            Log.i(TAG, "slow buffering (>4.5s), auto-downgrade step -> $autoDowngradeSteps (next track)")
+                            refreshPreload()
+                        }
+                    } else {
+                        bufferingSinceMs = 0L
+                        downgradedThisStall = false
+                    }
                     if (state.value.status != PlayerStatus.Loading) break
                     continue
                 }
+                bufferingSinceMs = 0L
+                downgradedThisStall = false
                 val p = exo.currentPosition / 1000.0
                 positionFlow.value = p
                 val t = session?.lib?.track(currentPlayerId())
@@ -774,11 +1025,51 @@ class LocalPlayback(
         }
     }
 
-    /** The volume after replay gain: gains only lower it (ExoPlayer cannot go above full volume). */
+    /** Applies EBU R128 loudness normalization (using exo.volume for attenuation and LoudnessEnhancer for peak-safe
+     *  boost) or legacy ReplayGain when loudness normalization is off. */
     private fun applyVolume(t: Track?) {
+        if (loudnessLevel != LoudnessLevel.Off) {
+            val loudness = t?.let { renditionsCache[it.id]?.loudness }
+            val linear = QualityPolicy.computeLoudnessGain(
+                level = loudnessLevel,
+                mode = loudnessMode,
+                loudness = loudness,
+                rgAlbum = t?.albumGain,
+                rgTrack = t?.trackGain,
+                allowBoost = true,
+            )
+            if (linear <= 1.0) {
+                exo.volume = linear.toFloat().coerceIn(0f, 1f)
+                setEnhancerBoostMb(0)
+            } else {
+                exo.volume = 1.0f
+                val boostMb = (20.0 * log10(linear) * 100.0).roundToInt().coerceIn(0, 1200)
+                setEnhancerBoostMb(boostMb)
+            }
+            return
+        }
+        setEnhancerBoostMb(0)
         val gain = if (t == null || replayGain == ReplayGainMode.Off) null
         else if (replayGain == ReplayGainMode.Album) t.albumGain ?: t.trackGain else t.trackGain ?: t.albumGain
         exo.volume = (gain?.let { min(1.0, 10.0.pow(it / 20)) } ?: 1.0).toFloat()
+    }
+
+    private fun setEnhancerBoostMb(gainMb: Int) {
+        if (gainMb <= 0) {
+            runCatching { loudnessEnhancer?.enabled = false }
+            return
+        }
+        val sid = exo.audioSessionId
+        if (sid == C.AUDIO_SESSION_ID_UNSET || sid <= 0) return
+        runCatching {
+            if (loudnessEnhancer == null || enhancerSessionId != sid) {
+                runCatching { loudnessEnhancer?.release() }
+                loudnessEnhancer = LoudnessEnhancer(sid)
+                enhancerSessionId = sid
+            }
+            loudnessEnhancer?.setTargetGain(gainMb)
+            loudnessEnhancer?.enabled = true
+        }.onFailure { Log.i(TAG, "LoudnessEnhancer unavailable: ${it.message}") }
     }
 
     // ---------------------------------------------------------------- continue on another device (without Connect v2)

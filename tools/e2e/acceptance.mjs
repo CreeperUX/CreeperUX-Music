@@ -318,10 +318,38 @@ try {
       await app.invoke('播放');
       await until(async () => (await state()).engine === 'Playing', 'playing again');
     });
-    await check('拖动进度：MediaPlayer 跳到 30 秒', async () => {
+    await check('拖动进度：跳到 30 秒（新核心 1 秒内出声）', async () => {
+      const t0 = Date.now();
       await app.send('do seek 30');
-      await until(async () => Math.abs((await state()).enginePosition - 30) < 1.5, 'at 30 s');
+      await until(async () => { const s = await state(); return s.engine === 'Playing' && Math.abs(s.enginePosition - 30) < 1.5; }, 'at 30 s');
+      const ms = Date.now() - t0;
+      const core = (await state()).engineCore;
+      log(`    核心=${core}，跳到 30 s 耗时 ${ms} ms`);
+      if (core === 'Native') assert(ms < 1000, `新核心跳进度超过 1 秒：${ms} ms`);
     });
+    if ((await state()).engineCore === 'Native') await check('FLAC 开播立刻跳进度（仅要求新核心通过，1 秒内出声）', async () => {
+      const songs = (await api('search3', { query: '', songCount: 1000, albumCount: 0, artistCount: 0 })).searchResult3?.song ?? [];
+      const flac = songs.find(x => x.suffix === 'flac' && x.duration >= 90);
+      if (!flac) throw new Skip('曲库里没有 90 秒以上的 FLAC');
+      const al = (await api('getAlbum', { id: flac.albumId })).album;
+      const idx = al.song.findIndex(x => x.id === flac.id);
+      const t0 = Date.now();
+      await app.send(`do play album ${al.id} ${idx}`);
+      await until(async () => (await state()).engineTrack === flac.id, 'FLAC loaded', 5000);
+      // Seek immediately without waiting 2 s (what Media Foundation failed on)
+      await app.send('do seek 60');
+      await until(async () => { const s = await state(); return s.engine === 'Playing' && s.engineTrack === flac.id && Math.abs(s.enginePosition - 60) < 2; }, 'FLAC playing at 60 s', 8000);
+      const ms = Date.now() - t0;
+      log(`    FLAC 开播即跳 60 s 耗时 ${ms} ms`);
+      assert(ms < 1000, `新核心 FLAC 开播即跳超过 1 秒：${ms} ms`);
+      await sleep(1500);
+      const after = await state();
+      assert(after.engine === 'Playing' && after.engineTrack === flac.id && after.enginePosition > 60.5, `跳后没接着放：${after.engine} ${after.enginePosition}`);
+      // Return to playable album first track for the rest of round 3
+      await app.send(`do play album ${cat.playable.id} 0`);
+      await until(async () => { const s = await state(); return s.engineTrack === pt[0] && s.engine === 'Playing'; }, 'back to playable track 0', 10000);
+    });
+    else skip('FLAC 开播立刻跳进度（仅要求新核心通过，1 秒内出声）', '旧核心（Media Foundation）开播立刻跳 FLAC 已知失败');
     await check('播过一半计一次播放（scrobble），服务器和界面都 +1', async () => {
       const before = (await api('getSong', { id: pt[0] })).song.playCount ?? 0;
       const d = (await state()).duration;
@@ -462,6 +490,52 @@ try {
       await shot('lyrics');
     });
     else skip('全屏歌词：当前行随播放变亮', '服务器上找不到有同步歌词的歌（track.syncedLyrics）');
+    await check('设置 › 高级：新旧播放核心可以切换，切完继续播放', async () => {
+      const orig = (await state()).engineCore;
+      const otherLabel = orig === 'Native' ? '旧（Windows Media Foundation）' : '新（自带解码）';
+      const origLabel = orig === 'Native' ? '新（自带解码）' : '旧（Windows Media Foundation）';
+      const otherCore = orig === 'Native' ? 'Legacy' : 'Native';
+      await app.send('nav settings'); await sleep(600);
+      await app.send('scroll 90'); await sleep(300);
+      await shot('settings-advanced');
+      await app.invoke(otherLabel);
+      await until(async () => (await state()).engineCore === otherCore, `switched to ${otherCore}`, 5000);
+      await until(async () => (await state()).engine === 'Playing', `playing on ${otherCore}`, 10000);
+      await app.invoke(origLabel);
+      await until(async () => (await state()).engineCore === orig, `switched back to ${orig}`, 5000);
+      await until(async () => (await state()).engine === 'Playing', `playing on ${orig}`, 10000);
+      await app.send('do pause');
+    });
+    await check('播放栏音质徽标与设置 › 音质与音量 / 高级（含无障碍检查）', async () => {
+      await app.send(`do play album ${cat.playable.id} 0`);
+      await until(async () => (await state()).engine === 'Playing', 'playing');
+      const s0 = await state();
+      assert(s0.qualityBadge && s0.qualityBadge.length > 0, `没有音质徽标：${JSON.stringify(s0.qualityBadge)}`);
+      assert((await app.texts()).includes(s0.qualityBadge), `界面未显示音质徽标 ${s0.qualityBadge}`);
+      assert(s0.wifiQuality === 'Auto' && s0.cellularQuality === 'Auto' && s0.loudnessLevel === 'Off' && s0.alwaysOriginal === false,
+        `默认值不对：${JSON.stringify({ w: s0.wifiQuality, c: s0.cellularQuality, l: s0.loudnessLevel, o: s0.alwaysOriginal })}`);
+      await app.send('nav settings'); await sleep(600);
+      await app.send('scroll 18'); await sleep(300);
+      await shot('settings-quality');
+      await app.invoke('Wi-Fi 音质：无损');
+      await app.invoke('移动网络音质：高');
+      await app.invoke('音量均衡：正常');
+      await until(async () => { const s = await state(); return s.wifiQuality === 'Lossless' && s.cellularQuality === 'High' && s.loudnessLevel === 'Normal'; }, 'quality & loudness updated');
+      await app.invoke('音量均衡方式：按歌曲');
+      await until(async () => (await state()).loudnessMode === 'Track', 'loudness mode Track');
+      const unnamed = (await audit()).filter(x => x.startsWith('no name:'));
+      assert(unnamed.length === 0, unnamed.join(' | '));
+      await app.send('scroll 92'); await sleep(300);
+      await app.invoke('始终用原文件');
+      await until(async () => (await state()).alwaysOriginal === true, 'alwaysOriginal on');
+      await app.invoke('始终用原文件');
+      await until(async () => (await state()).alwaysOriginal === false, 'alwaysOriginal off');
+      // restore clean defaults
+      await app.send('do quality wifi Auto');
+      await app.send('do quality cellular Auto');
+      await app.send('do loudness Off Album');
+      await app.send('do pause');
+    });
     quiet(app);
   }
 
@@ -682,8 +756,13 @@ try {
       });
       await check('选“这台电脑”：播放转到第二台，同一首、同一位置；第一台停下，显示“正在「第二台」上播放”（规则 4）', async () => {
         const before = await state();
+        const tTakeover = Date.now();
         await b.invoke('这台电脑');
         await b.until(async () => { const s = await b.state(); return s.engine === 'Playing' && s.engineTrack === before.engineTrack; }, 'B plays A\'s song', 10000);
+        const takeoverMs = Date.now() - tTakeover;
+        const bCore = (await b.state()).engineCore;
+        log(`    接手耗时（${bCore}）：${takeoverMs} ms`);
+        if (bCore === 'Native') assert(takeoverMs < 1000, `新核心接手超过 1 秒：${takeoverMs} ms`);
         await until(async () => (await state()).engine === 'Stopped', 'A stopped', 5000);
         // the position it starts from is applied once the stream is open (a far one takes a moment)
         await b.until(async () => Math.abs((await b.state()).enginePosition - before.enginePosition) < 5, 'B at A’s position', 5000)
@@ -722,11 +801,16 @@ try {
           const at = (await from.state()).enginePosition;
           if (!(await to.names()).some(n => n.startsWith('这台电脑 ['))) await to.invoke(`正在「${fromName}」上播放，选择设备`);
           await to.until(async () => (await to.names()).some(n => n.startsWith('这台电脑 [')), `${toName}'s device list`, 5000);
+          const tTakeover = Date.now();
           await to.invoke('这台电脑');
-          // it plays once its stream has reached the position: a few seconds for a FLAC taken over late
+          // it plays once its stream has reached the position: sub-second on native core, a few seconds on legacy MF
           await to.until(async () => { const s = await to.state(); return s.engine === 'Playing' && s.engineTrack === flac.id; }, `${toName} plays the FLAC`, 15000)
             .catch(async () => { const s = await to.state(); throw new Error(`${toName}：${s.engine} ${s.engineTrack === flac.id ? '那首 FLAC' : s.engineTrack}，${s.error ?? ''}`); });
+          const takeoverMs = Date.now() - tTakeover;
           const p = (await to.state()).enginePosition;
+          const toCore = (await to.state()).engineCore;
+          log(`    ${fromName} → ${toName}（${toCore}）：${takeoverMs} ms 出声（${at?.toFixed(1)} s → ${p?.toFixed(1)} s）`);
+          if (toCore === 'Native') assert(takeoverMs < 1000, `${toName} 新核心接手 FLAC 超过 1 秒：${takeoverMs} ms`);
           assert(Math.abs(p - at) < 8, `${toName} 从 ${p?.toFixed(1)} s 开始放，${fromName} 在 ${at?.toFixed(1)} s`);
           await sleep(4000);
           const s = await to.state();
@@ -899,12 +983,19 @@ try {
   // ---------------------------------------------------------------- 10. restart, sign out
   if (want('restart')) {
     round('restart', '第 10 轮：重新启动与退出登录');
-    await check('关掉再打开：不用再登录，音量等设置还在', async () => {
+    await check('关掉再打开：不用再登录，音量和音质等设置还在', async () => {
       await app.send('do volume 0.42');
+      await app.send('do quality wifi Lossless');
+      await app.send('do loudness Normal Track');
       await app.stop();
       app = await new TestApp('main', { demo: demoUrl, fresh: false, exe, env: appEnv }).start();
       await until(async () => (await app.send('ready')) === 'yes', 'signed in from Credential Manager', 30000);
-      assert(Math.abs((await state()).volume - 0.42) < 0.02 || (await state()).volume <= 0.42, `音量 ${(await state()).volume}`);
+      const s = await state();
+      assert(Math.abs(s.volume - 0.42) < 0.02 || s.volume <= 0.42, `音量 ${s.volume}`);
+      assert(s.wifiQuality === 'Lossless' && s.loudnessLevel === 'Normal' && s.loudnessMode === 'Track',
+        `音质/响度设置未持久化：${JSON.stringify({ w: s.wifiQuality, l: s.loudnessLevel, m: s.loudnessMode })}`);
+      await app.send('do quality wifi Auto');
+      await app.send('do loudness Off Album');
     });
     await check('设置页“退出登录”：回到登录页，凭据被删除', async () => {
       await app.send('nav settings'); await sleep(800);

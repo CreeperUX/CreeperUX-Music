@@ -341,18 +341,6 @@ public sealed class SettingsPage : View
         var stop = new ToggleSwitch { Header = "播完当前歌曲后停止", IsOn = music.Queue.StopAfterCurrent };
         stop.Toggled += (_, _) => music.SetStopAfterCurrent(stop.IsOn);
         play.Children.Add(stop);
-        var rgRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 20 };
-        foreach (var (mode, label) in new[] { (ReplayGainMode.Album, "按专辑"), (ReplayGainMode.Track, "按音轨"), (ReplayGainMode.Off, "不使用") })
-        {
-            var rb = new RadioButton { Content = label, GroupName = "ReplayGain", MinWidth = 0, IsChecked = mode == music.ReplayGain };
-            rb.Checked += (_, _) => { if (!syncingPlay) music.SetReplayGain(mode); };
-            rgRow.Children.Add(rb);
-        }
-        var rgBox = Ui.Column(6, Ui.Text("回放增益", size: 14, foreground: Ui.Brush("TextPrimaryBrush")), rgRow);
-        AutomationProperties.SetName(rgBox, "回放增益");
-        play.Children.Add(rgBox);
-        var rgNote = Ui.Text("回放增益只降低音量，不会提高（Windows 播放器的音量上限是 100%）。", "MutedTextStyle"); rgNote.TextWrapping = TextWrapping.Wrap;
-        play.Children.Add(rgNote);
         void SyncPlay()
         {
             syncingPlay = true;
@@ -361,6 +349,97 @@ public sealed class SettingsPage : View
             syncingPlay = false;
         }
         On(() => music.PlayerChanged += SyncPlay, () => music.PlayerChanged -= SyncPlay);
+
+        var quality = Section("音质与音量", "支持播放库的服务器按所选档位串流；两项均选“无损”即为强制无损。仅在“自动”且缓冲较慢时临时降一档，手动选定的档位不会自动降档。");
+        bool syncingQuality = false;
+        var qualityOptions = new[]
+        {
+            (Core.Audio.AudioQuality.Auto, "自动"),
+            (Core.Audio.AudioQuality.Normal, "普通"),
+            (Core.Audio.AudioQuality.High, "高"),
+            (Core.Audio.AudioQuality.VeryHigh, "极高"),
+            (Core.Audio.AudioQuality.Lossless, "无损"),
+        };
+        var wifiButtons = new Dictionary<Core.Audio.AudioQuality, RadioButton>();
+        var wifiRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 20 };
+        foreach (var (q, label) in qualityOptions)
+        {
+            var rb = new RadioButton { Content = label, GroupName = "WifiQuality", MinWidth = 0, IsChecked = q == music.WifiQuality };
+            AutomationProperties.SetName(rb, $"Wi-Fi 音质：{label}");
+            rb.Checked += (_, _) => { if (!syncingQuality && q != music.WifiQuality) music.SetWifiQuality(q); };
+            wifiRow.Children.Add(rb);
+            wifiButtons[q] = rb;
+        }
+        var wifiBox = Ui.Column(6, Ui.Text("Wi-Fi 下的音质", size: 14, foreground: Ui.Brush("TextPrimaryBrush")), wifiRow);
+        AutomationProperties.SetName(wifiBox, "Wi-Fi 下的音质");
+        quality.Children.Add(wifiBox);
+
+        var cellButtons = new Dictionary<Core.Audio.AudioQuality, RadioButton>();
+        var cellRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 20 };
+        foreach (var (q, label) in qualityOptions)
+        {
+            var rb = new RadioButton { Content = label, GroupName = "CellularQuality", MinWidth = 0, IsChecked = q == music.CellularQuality };
+            AutomationProperties.SetName(rb, $"移动网络音质：{label}");
+            rb.Checked += (_, _) => { if (!syncingQuality && q != music.CellularQuality) music.SetCellularQuality(q); };
+            cellRow.Children.Add(rb);
+            cellButtons[q] = rb;
+        }
+        var cellBox = Ui.Column(6, Ui.Text("移动网络下的音质", size: 14, foreground: Ui.Brush("TextPrimaryBrush")), cellRow);
+        AutomationProperties.SetName(cellBox, "移动网络下的音质");
+        quality.Children.Add(cellBox);
+        var qualityNote = Ui.Text("自动：Wi-Fi 下默认无损，移动网络（含计费网络）下默认高（Opus 160）。极高为 Opus 256，高为 Opus 160，普通为 Opus 96；无损保留原采样率，切网络后下一首生效。", "MutedTextStyle");
+        qualityNote.TextWrapping = TextWrapping.Wrap;
+        quality.Children.Add(qualityNote);
+
+        var loudLevelButtons = new Dictionary<Core.Audio.LoudnessLevel, RadioButton>();
+        var loudLevelRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 20 };
+        foreach (var (lvl, label) in new[]
+        {
+            (Core.Audio.LoudnessLevel.Off, "关"),
+            (Core.Audio.LoudnessLevel.Quiet, "安静"),
+            (Core.Audio.LoudnessLevel.Normal, "正常"),
+            (Core.Audio.LoudnessLevel.Loud, "大声"),
+        })
+        {
+            var rb = new RadioButton { Content = label, GroupName = "LoudnessLevel", MinWidth = 0, IsChecked = lvl == music.LoudnessLevel };
+            AutomationProperties.SetName(rb, $"音量均衡：{label}");
+            rb.Checked += (_, _) => { if (!syncingQuality && lvl != music.LoudnessLevel) music.SetLoudnessLevel(lvl); };
+            loudLevelRow.Children.Add(rb);
+            loudLevelButtons[lvl] = rb;
+        }
+        var loudBox = Ui.Column(6, Ui.Text("音量均衡", size: 14, foreground: Ui.Brush("TextPrimaryBrush")), loudLevelRow);
+        AutomationProperties.SetName(loudBox, "音量均衡");
+        quality.Children.Add(loudBox);
+
+        var loudModeButtons = new Dictionary<Core.Audio.LoudnessMode, RadioButton>();
+        var loudModeRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 20 };
+        foreach (var (mode, label) in new[] { (Core.Audio.LoudnessMode.Album, "按专辑"), (Core.Audio.LoudnessMode.Track, "按歌曲") })
+        {
+            var rb = new RadioButton { Content = label, GroupName = "LoudnessMode", MinWidth = 0, IsChecked = mode == music.LoudnessMode };
+            AutomationProperties.SetName(rb, $"音量均衡方式：{label}");
+            rb.Checked += (_, _) => { if (!syncingQuality && mode != music.LoudnessMode) music.SetLoudnessMode(mode); };
+            loudModeRow.Children.Add(rb);
+            loudModeButtons[mode] = rb;
+        }
+        var loudModeBox = Ui.Column(6, Ui.Text("均衡方式", size: 14, foreground: Ui.Brush("TextPrimaryBrush")), loudModeRow);
+        AutomationProperties.SetName(loudModeBox, "均衡方式");
+        loudModeBox.Visibility = music.LoudnessLevel == Core.Audio.LoudnessLevel.Off ? Visibility.Collapsed : Visibility.Visible;
+        quality.Children.Add(loudModeBox);
+        var loudNote = Ui.Text("按曲库响度统一不同专辑的音量（安静 −18 / 正常 −14 / 大声 −11 LUFS），带防削波峰值保护；服务器无响度数据时回退到回放增益标签。", "MutedTextStyle");
+        loudNote.TextWrapping = TextWrapping.Wrap;
+        quality.Children.Add(loudNote);
+
+        void SyncQuality()
+        {
+            syncingQuality = true;
+            if (wifiButtons.TryGetValue(music.WifiQuality, out var wb)) wb.IsChecked = true;
+            if (cellButtons.TryGetValue(music.CellularQuality, out var cb)) cb.IsChecked = true;
+            if (loudLevelButtons.TryGetValue(music.LoudnessLevel, out var lb)) lb.IsChecked = true;
+            if (loudModeButtons.TryGetValue(music.LoudnessMode, out var mb)) mb.IsChecked = true;
+            loudModeBox.Visibility = music.LoudnessLevel == Core.Audio.LoudnessLevel.Off ? Visibility.Collapsed : Visibility.Visible;
+            syncingQuality = false;
+        }
+        On(() => music.PlayerChanged += SyncQuality, () => music.PlayerChanged -= SyncQuality);
 
         var look = Section("显示", "整个窗口一起缩放，像浏览器的缩放一样；也可以按 Ctrl + = 和 Ctrl + -，Ctrl + 0 恢复 100%。");
         bool syncingZoom = false;
@@ -402,6 +481,39 @@ public sealed class SettingsPage : View
         var keys = Section("键盘快捷键");
         foreach (var (k, what) in new[] { ("空格", "播放 / 暂停"), ("Ctrl + →  /  Ctrl + ←", "下一首 / 上一首"), ("Ctrl + ↑  /  Ctrl + ↓", "音量"), ("Ctrl + K  或  /", "搜索"), ("Alt + ←", "后退"), ("Alt + Shift + B", "喜欢正在播放的歌曲"), ("Ctrl + =  /  Ctrl + -  /  Ctrl + 0", "放大 / 缩小 / 恢复 100%"), ("媒体键", "播放、暂停、上一首、下一首") })
             keys.Children.Add(Fact(k, what));
+
+        var advanced = Section("高级");
+        bool syncingCore = false;
+        var coreButtons = new Dictionary<Core.Audio.AudioCore, RadioButton>();
+        var coreRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 20 };
+        foreach (var (core, label) in new[] { (Core.Audio.AudioCore.Native, "新（自带解码）"), (Core.Audio.AudioCore.Legacy, "旧（Windows Media Foundation）") })
+        {
+            var rb = new RadioButton { Content = label, GroupName = "PlaybackCore", MinWidth = 0, IsChecked = core == music.PlaybackCore };
+            rb.Checked += (_, _) => { if (!syncingCore && core != music.PlaybackCore) music.SetPlaybackCore(core); };
+            coreRow.Children.Add(rb);
+            coreButtons[core] = rb;
+        }
+        var coreBox = Ui.Column(6, Ui.Text("播放核心", size: 14, foreground: Ui.Brush("TextPrimaryBrush")), coreRow);
+        AutomationProperties.SetName(coreBox, "播放核心");
+        advanced.Children.Add(coreBox);
+        var coreNote = Ui.Text("新核心自带 FLAC、Opus、WAV 和 MP3 解码，支持按寻址表即时跳进度和精确无缝衔接；如遇问题可随时切回旧核心。", "MutedTextStyle");
+        coreNote.TextWrapping = TextWrapping.Wrap;
+        advanced.Children.Add(coreNote);
+        var alwaysOriginal = new ToggleSwitch { Header = "始终用原文件", IsOn = music.AlwaysOriginal };
+        AutomationProperties.SetName(alwaysOriginal, "始终用原文件");
+        alwaysOriginal.Toggled += (_, _) => { if (!syncingCore && alwaysOriginal.IsOn != music.AlwaysOriginal) music.SetAlwaysOriginal(alwaysOriginal.IsOn); };
+        advanced.Children.Add(alwaysOriginal);
+        var originalNote = Ui.Text("开启后始终请求服务器原始文件，音质设置不生效（用于排查问题或对比音质）。", "MutedTextStyle");
+        originalNote.TextWrapping = TextWrapping.Wrap;
+        advanced.Children.Add(originalNote);
+        void SyncCore()
+        {
+            syncingCore = true;
+            if (coreButtons.TryGetValue(music.PlaybackCore, out var rb)) rb.IsChecked = true;
+            alwaysOriginal.IsOn = music.AlwaysOriginal;
+            syncingCore = false;
+        }
+        On(() => music.PlayerChanged += SyncCore, () => music.PlayerChanged -= SyncCore);
 
         var about = Section("关于");
         about.Children.Add(Fact("程序", $"Sonus {typeof(App).Assembly.GetName().Version?.ToString(3)} · WinUI 3"));

@@ -2,6 +2,7 @@
 // repeat controls, the output device picker, and the Now playing / Lyrics / Queue actions.
 import { h } from '../dom.js';
 import { orderToBar, barToOrder } from '../api/contract.js';
+import { formatQualityBadge } from '../api/quality.js';
 import { mountDevicePicker, whereLine } from './devices.js';
 
 export function mountBar(slot, ctx) {
@@ -52,12 +53,32 @@ export function mountBar(slot, ctx) {
   const pickSlot = h('span', { class: 'cm-output' });
   if (extras && volume && ctx.adapter.capabilities?.outputs !== false) extras.insertBefore(pickSlot, volume);
   mountDevicePicker(pickSlot, ctx);
+  // active streaming quality pill under title/artist (e.g. "无损 · 96 kHz/24 位" or "Opus 160")
+  const textCol = bar.root.querySelector('.ui-pb-text');
+  const badgeEl = h('span', { class: 'cm-quality-badge', hidden: true });
+  if (textCol) textCol.append(badgeEl);
+  const syncBadge = () => {
+    const p = ctx.player, c = ctx.currentTrack();
+    if (!c || p.state === 'error' || p.state === 'stopped' || p.remote) {
+      badgeEl.hidden = true;
+      badgeEl.textContent = '';
+      badgeEl.removeAttribute('aria-label');
+      return;
+    }
+    const b = formatQualityBadge({ ...(p.qualitySource ?? {}), track: c, locale: ctx.prefs.locale });
+    badgeEl.hidden = !b.text;
+    badgeEl.textContent = b.text;
+    badgeEl.toggleAttribute('data-lossless', b.isLossless);
+    if (b.text) badgeEl.setAttribute('aria-label', t.currentQuality(b.text));
+    else badgeEl.removeAttribute('aria-label');
+  };
+  syncBadge();
   // "正在「手机」上播放": a strip under the bar while another device plays (or played last)
   bar.root.after(whereLine(ctx, 'cm-bar-where').el);
   // the volume is the playing device's while another one plays (rule 8)
   const volumeLabel = () => { const r = ctx.player.remote; if (volume) { volume.title = r ? t.dev.volumeOf(r.name) : ''; volume.toggleAttribute('data-remote', !!r); } };
 
-  ctx.on('player', () => { bar.update(state()); volumeLabel(); });
+  ctx.on('player', () => { bar.update(state()); volumeLabel(); syncBadge(); });
   ctx.on('position', pos => bar.update({ position: pos }));
   ctx.on('track', tr => { if (tr.id === ctx.player.trackId) bar.update({ liked: !!tr.liked }); });
   const syncActions = () => bar.update({ actions: actions() });

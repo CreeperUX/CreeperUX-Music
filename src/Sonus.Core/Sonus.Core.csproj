@@ -7,6 +7,11 @@
     <RootNamespace>Sonus.Core</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Concentus" Version="2.2.3" />
+    <PackageReference Include="NAudio.Core" Version="3.3.0" />
+    <PackageReference Include="NLayer" Version="3.0.1" />
+  </ItemGroup>
+  <ItemGroup>
     <InternalsVisibleTo Include="Sonus.Core.Tests" />
   </ItemGroup>
 </Project>

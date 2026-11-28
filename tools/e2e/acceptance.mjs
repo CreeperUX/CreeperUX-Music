@@ -296,6 +296,12 @@ try {
     round('playback', '第 3 轮：播放（Windows MediaPlayer）');
     // the album the round plays (the demo's 霓虹航线: t21, t22, t23 …)
     const pt = (await api('getAlbum', { id: cat.playable.id })).album.song.map(s => s.id);
+    // a server that keeps the session (not the demo, started anew each run) may still hold songs an earlier run queued by
+    // hand: they would play before the album's next song
+    if (connectV2) {
+      await until(async () => (await state()).session?.connected === true, 'the session', 10000).catch(() => {});
+      if ((await state()).manual > 0) { await app.send('do clearqueue'); await until(async () => (await state()).manual === 0, 'no songs queued by hand', 5000); }
+    }
     await check('专辑页的播放按钮：从第一首开始，位置在走，服务器显示正在播放', async () => {
       await app.send(`nav album:${cat.playable.id}`); await sleep(800);
       await app.invoke(`播放 ${cat.playable.title}`);

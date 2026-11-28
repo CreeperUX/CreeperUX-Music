@@ -119,8 +119,9 @@ class SessionLink(
     }
 
     fun start() {
-        client.resume = ::resumeState
+        client.resume = ::resumeState // the player is read on the main thread (LocalPlayback.resumeState)
         client.volumeNow = { volumeHere to mutedHere } // said in each hello (AudioManager may be read from any thread)
+        client.onProblem = { Log.w(TAG, "Connect: $it") }
         jobs += scope.launch { client.connected.collect { onConnection(it) } }
         jobs += scope.launch { client.session.collect { apply(); keepOrSleep() } }
         jobs += scope.launch { client.queue.collect { apply() } }

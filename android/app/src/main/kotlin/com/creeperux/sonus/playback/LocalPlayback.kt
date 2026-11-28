@@ -1,6 +1,8 @@
 package com.creeperux.sonus.playback
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.core.net.toUri
@@ -53,6 +55,9 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.pow
@@ -447,8 +452,28 @@ class LocalPlayback(
         saidAt = System.currentTimeMillis()
     }
 
-    /** On reconnecting while active: still playing (a short network loss) or not. */
+    /**
+     * On reconnecting while active: still playing (a short network loss) or not. Asked on the connection's thread, but
+     * the player may only be read on the main thread (Media3 throws otherwise, and the hello never went out: a phone that
+     * lost its connection while playing, as when its screen is off, never got back): read there, waited for a moment.
+     * Null when the main thread does not answer in time; the hello then says nothing of it.
+     */
     fun resumeState(rev: Long): SessionResume? {
+        if (Looper.myLooper() == Looper.getMainLooper()) return resumeHere(rev)
+        val answer = AtomicReference<SessionResume?>()
+        val read = CountDownLatch(1)
+        val posted = Handler(Looper.getMainLooper()).post {
+            try {
+                answer.set(runCatching { resumeHere(rev) }.getOrNull())
+            } finally {
+                read.countDown()
+            }
+        }
+        return if (posted && read.await(RESUME_WAIT_MS, TimeUnit.MILLISECONDS)) answer.get() else null
+    }
+
+    /** [resumeState], on the main thread. */
+    private fun resumeHere(rev: Long): SessionResume? {
         if (currentPlayerId() == null) return null
         return SessionResume(rev, exo.playWhenReady, exo.currentPosition)
     }
@@ -795,6 +820,7 @@ class LocalPlayback(
 
     private companion object {
         const val TAG = "Sonus"
+        const val RESUME_WAIT_MS = 1_000L // how long a reconnect's hello waits for the main thread to read the player
         val TRANSCODED = setOf("dsf", "dff", "ape", "wv", "tta", "tak", "mpc", "wma")
     }
 }

@@ -97,13 +97,20 @@ class SessionClient(
     /** Another device changed this one's volume. */
     val volumeAsked: SharedFlow<VolumeAsk> = volumeFlow.asSharedFlow()
 
-    /** Asked on every (re)connect: what to say as `resume` (null: nothing). Called on a background thread. */
+    /** Asked on every (re)connect: what to say as `resume` (null: nothing). Called on a background thread (OkHttp's):
+     *  what it reads must allow that. One that throws is left out of the hello, which goes out all the same. */
     @Volatile
     var resume: (() -> SessionResume?)? = null
 
-    /** Asked on every (re)connect: this device's volume (0–1) and muted, said in the hello. Called on a background thread. */
+    /** Asked on every (re)connect: this device's volume (0–1) and muted, said in the hello. Called on a background thread;
+     *  one that throws is left out, as [resume]. */
     @Volatile
     var volumeNow: (() -> Pair<Double, Boolean>)? = null
+
+    /** What went wrong with the connection, for the app's log: a connection that failed, a part of the hello left out.
+     *  Called on a background thread. */
+    @Volatile
+    var onProblem: ((String) -> Unit)? = null
 
     /** This device is the session's active device (as last heard). */
     val isActive: Boolean get() = session.value.activeDevice == deviceId
@@ -118,6 +125,11 @@ class SessionClient(
     /** Tries again now rather than after the backoff (the server answers again, or the user wants something). */
     fun reconnectNow() {
         wake.complete(Unit)
+    }
+
+    /** Cuts the connection as a network loss does (no goodbye); the client then reconnects as it would. For tests. */
+    fun simulateNetworkLoss() {
+        socket?.cancel()
     }
 
     /** A command (any device): its action and fields, as in connect.md. Answers when the server applied or refused it
@@ -180,6 +192,10 @@ class SessionClient(
             val closed = CompletableDeferred<Unit>()
             val listener = object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    // what the app is asked for is read first, each on its own: one that throws is left out of the
+                    // hello, never the hello itself (OkHttp would fail the connection, and every reconnect after it)
+                    val volume = asked("volume") { volumeNow?.invoke() }
+                    val resumed = asked("resume") { resume?.invoke() }
                     val hello = buildJsonObject {
                         put("type", "hello")
                         put("deviceId", deviceId)
@@ -187,11 +203,11 @@ class SessionClient(
                         put("kind", kind)
                         put("canPlay", canPlay)
                         put("client", clientLabel)
-                        volumeNow?.invoke()?.let { (volume, muted) ->
+                        volume?.let { (volume, muted) ->
                             put("volume", Math.round(volume * 1000) / 1000.0)
                             put("muted", muted)
                         }
-                        resume?.invoke()?.let { r ->
+                        resumed?.let { r ->
                             put("resume", buildJsonObject { put("rev", r.rev); put("playing", r.playing); put("positionMs", r.positionMs) })
                         }
                     }
@@ -212,6 +228,7 @@ class SessionClient(
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    if (!closed.isCompleted) onProblem?.invoke("the connection failed: $t")
                     closed.complete(Unit)
                 }
             }
@@ -236,6 +253,15 @@ class SessionClient(
             }
         }
     }
+
+    /** What [read] answers for the hello; null, and said as a problem, when it throws. */
+    private inline fun <T> asked(what: String, read: () -> T?): T? =
+        try {
+            read()
+        } catch (e: Exception) {
+            onProblem?.invoke("$what left out of the hello: $e")
+            null
+        }
 
     /** One message from the server; true for the welcome. */
     internal fun handle(text: String): Boolean {

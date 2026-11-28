@@ -506,6 +506,36 @@ try {
       await until(async () => (await state()).engine === 'Playing', `playing on ${orig}`, 10000);
       await app.send('do pause');
     });
+    await check('播放栏音质徽标与设置 › 音质与音量 / 高级（含无障碍检查）', async () => {
+      await app.send(`do play album ${cat.playable.id} 0`);
+      await until(async () => (await state()).engine === 'Playing', 'playing');
+      const s0 = await state();
+      assert(s0.qualityBadge && s0.qualityBadge.length > 0, `没有音质徽标：${JSON.stringify(s0.qualityBadge)}`);
+      assert((await app.texts()).includes(s0.qualityBadge), `界面未显示音质徽标 ${s0.qualityBadge}`);
+      assert(s0.wifiQuality === 'Auto' && s0.cellularQuality === 'Auto' && s0.loudnessLevel === 'Off' && s0.alwaysOriginal === false,
+        `默认值不对：${JSON.stringify({ w: s0.wifiQuality, c: s0.cellularQuality, l: s0.loudnessLevel, o: s0.alwaysOriginal })}`);
+      await app.send('nav settings'); await sleep(600);
+      await app.send('scroll 18'); await sleep(300);
+      await shot('settings-quality');
+      await app.invoke('Wi-Fi 音质：无损');
+      await app.invoke('移动网络音质：高');
+      await app.invoke('音量均衡：正常');
+      await until(async () => { const s = await state(); return s.wifiQuality === 'Lossless' && s.cellularQuality === 'High' && s.loudnessLevel === 'Normal'; }, 'quality & loudness updated');
+      await app.invoke('音量均衡方式：按歌曲');
+      await until(async () => (await state()).loudnessMode === 'Track', 'loudness mode Track');
+      const unnamed = (await audit()).filter(x => x.startsWith('no name:'));
+      assert(unnamed.length === 0, unnamed.join(' | '));
+      await app.send('scroll 92'); await sleep(300);
+      await app.invoke('始终用原文件');
+      await until(async () => (await state()).alwaysOriginal === true, 'alwaysOriginal on');
+      await app.invoke('始终用原文件');
+      await until(async () => (await state()).alwaysOriginal === false, 'alwaysOriginal off');
+      // restore clean defaults
+      await app.send('do quality wifi Auto');
+      await app.send('do quality cellular Auto');
+      await app.send('do loudness Off Album');
+      await app.send('do pause');
+    });
     quiet(app);
   }
 
@@ -953,12 +983,19 @@ try {
   // ---------------------------------------------------------------- 10. restart, sign out
   if (want('restart')) {
     round('restart', '第 10 轮：重新启动与退出登录');
-    await check('关掉再打开：不用再登录，音量等设置还在', async () => {
+    await check('关掉再打开：不用再登录，音量和音质等设置还在', async () => {
       await app.send('do volume 0.42');
+      await app.send('do quality wifi Lossless');
+      await app.send('do loudness Normal Track');
       await app.stop();
       app = await new TestApp('main', { demo: demoUrl, fresh: false, exe, env: appEnv }).start();
       await until(async () => (await app.send('ready')) === 'yes', 'signed in from Credential Manager', 30000);
-      assert(Math.abs((await state()).volume - 0.42) < 0.02 || (await state()).volume <= 0.42, `音量 ${(await state()).volume}`);
+      const s = await state();
+      assert(Math.abs(s.volume - 0.42) < 0.02 || s.volume <= 0.42, `音量 ${s.volume}`);
+      assert(s.wifiQuality === 'Lossless' && s.loudnessLevel === 'Normal' && s.loudnessMode === 'Track',
+        `音质/响度设置未持久化：${JSON.stringify({ w: s.wifiQuality, l: s.loudnessLevel, m: s.loudnessMode })}`);
+      await app.send('do quality wifi Auto');
+      await app.send('do loudness Off Album');
     });
     await check('设置页“退出登录”：回到登录页，凭据被删除', async () => {
       await app.send('nav settings'); await sleep(800);

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Sonus.Core;
+using Sonus.Core.Audio;
 using Sonus.Core.Connect;
 using Sonus.Playback;
 using Microsoft.UI.Dispatching;
@@ -31,6 +32,13 @@ public sealed class MusicService : IDisposable
     private bool _counted;
     private DateTimeOffset _savedAt = DateTimeOffset.MinValue, _refreshedAt = DateTimeOffset.MinValue;
     private DispatcherQueueTimer? _saveTimer;
+    private readonly Dictionary<string, SongRenditions> _renditions = [];
+    private readonly HashSet<string> _renditionsLoading = [];
+    private readonly Dictionary<string, string?> _requestedTier = [];
+    private int _autoDowngradeSteps;
+    private int _smoothTracksSinceDowngrade;
+    private long _bufferingSinceTick;
+    private bool _downgradedThisStall;
 
     public MusicService(SubsonicClient client, AppSettings settings, DispatcherQueue ui)
     {
@@ -51,6 +59,14 @@ public sealed class MusicService : IDisposable
         _tick.Tick += (_, _) => UiThread.Run("the player's tick", OnTick);
         _tick.Start();
         ReplayGain = settings.ReplayGain;
+        WifiQuality = settings.WifiQuality;
+        CellularQuality = settings.CellularQuality;
+        LoudnessLevel = settings.LoudnessLevel;
+        LoudnessMode = settings.LoudnessMode;
+        AlwaysOriginal = settings.AlwaysOriginal;
+        IsMeteredNetwork = DetectMeteredNetwork();
+        try { Windows.Networking.Connectivity.NetworkInformation.NetworkStatusChanged += OnNetworkStatusChanged; }
+        catch { /* headless / unsupported connectivity profile */ }
     }
 
     private void OnConnection(object? sender, bool online) => UiThread.Post(_ui, "server reachable", () => { if (_disposed) return; IsOnline = online; ConnectionChanged?.Invoke(); });
@@ -64,6 +80,7 @@ public sealed class MusicService : IDisposable
         _tick.Stop();
         _saveTimer?.Stop();
         Client.ConnectionChanged -= OnConnection;
+        try { Windows.Networking.Connectivity.NetworkInformation.NetworkStatusChanged -= OnNetworkStatusChanged; } catch { }
         LibraryChanged = PlaylistsChanged = PlayerChanged = QueueChanged = ConnectionChanged = null;
         TrackChanged = null; PositionChanged = null; Toast = null;
         Engine.Stop();
@@ -90,7 +107,22 @@ public sealed class MusicService : IDisposable
     public double Volume { get; private set; }
     public bool Muted => Engine.Muted;
     public ReplayGainMode ReplayGain { get; private set; }
-    public Sonus.Core.Audio.AudioCore PlaybackCore => Engine.Core;
+    public AudioQuality WifiQuality { get; private set; }
+    public AudioQuality CellularQuality { get; private set; }
+    public LoudnessLevel LoudnessLevel { get; private set; }
+    public LoudnessMode LoudnessMode { get; private set; }
+    public bool AlwaysOriginal { get; private set; }
+    public bool IsMeteredNetwork { get; private set; }
+    public int AutoDowngradeSteps => _autoDowngradeSteps;
+    public AudioQuality ActiveNetworkQuality => IsMeteredNetwork ? CellularQuality : WifiQuality;
+    public QualityBadgeInfo QualityBadge => Current is { } t && State != PlayerState.Stopped
+        ? QualityPolicy.FormatBadge(
+            Engine.CurrentId == t.Id ? Engine.ActiveStream : null,
+            _renditions.GetValueOrDefault(t.Id),
+            t,
+            _requestedTier.GetValueOrDefault(t.Id))
+        : QualityBadgeInfo.Empty;
+    public AudioCore PlaybackCore => Engine.Core;
     public string OutputId => _settings.OutputDeviceId ?? "";
     public bool IsActive => State is PlayerState.Playing or PlayerState.Loading;
 
@@ -250,11 +282,52 @@ public sealed class MusicService : IDisposable
 
     private EngineItem ItemFor(Track t, double startAt = 0)
     {
-        // Media Foundation decodes FLAC, ALAC, AAC, MP3, WAV, Opus/Vorbis (Windows' web media extensions); the rest is
-        // asked for as MP3, which every server can transcode to (Navidrome's default transcodings include it)
-        string? transcode = t.Suffix is "dsf" or "dff" or "ape" or "wv" or "tta" or "tak" or "mpc" or "wma" ? "mp3" : null;
+        string? tier = QualityPolicy.ResolveTier(ActiveNetworkQuality, IsMeteredNetwork, AlwaysOriginal, _autoDowngradeSteps, Client.SupportsRenditions);
+        _requestedTier[t.Id] = tier;
+        string url;
+        if (tier is not null)
+        {
+            url = Client.StreamUrl(t.Id, sonusQuality: tier);
+        }
+        else
+        {
+            // Media Foundation decodes FLAC, ALAC, AAC, MP3, WAV, Opus/Vorbis (Windows' web media extensions); the rest is
+            // asked for as MP3, which every server can transcode to (Navidrome's default transcodings include it)
+            string? transcode = t.Suffix is "dsf" or "dff" or "ape" or "wv" or "tta" or "tak" or "mpc" or "wma" ? "mp3" : null;
+            url = Client.StreamUrl(t.Id, transcode);
+        }
         string? cover = (Library.Album(t.AlbumId)?.CoverArt ?? t.CoverArt) is { } art ? Client.CoverUrl(art, 512) : null;
-        return new EngineItem(t.Id, Client.StreamUrl(t.Id, transcode), t.Title, t.Artist, t.Album, cover, startAt);
+        return new EngineItem(t.Id, url, t.Title, t.Artist, t.Album, cover, startAt);
+    }
+
+    private void EnsureRenditions(params string?[] ids)
+    {
+        if (!Client.SupportsRenditions) return;
+        var need = ids.Where(id => !string.IsNullOrEmpty(id) && !_renditions.ContainsKey(id!) && _renditionsLoading.Add(id!)).Select(id => id!).Distinct().ToList();
+        if (need.Count == 0) return;
+        _ = FetchRenditionsAsync(need);
+    }
+
+    private async Task FetchRenditionsAsync(List<string> ids)
+    {
+        try
+        {
+            var found = await Client.GetSonusRenditionsAsync(ids);
+            UiThread.Post(_ui, "renditions", () =>
+            {
+                if (_disposed) return;
+                foreach (var id in ids) _renditionsLoading.Remove(id);
+                if (found.Count == 0) return;
+                foreach (var (id, info) in found) _renditions[id] = info;
+                if (Current is { } cur && found.ContainsKey(cur.Id)) ApplyVolume(cur);
+                PlayerChanged?.Invoke();
+            });
+        }
+        catch (Exception ex)
+        {
+            UiThread.Post(_ui, "renditions failed", () => { foreach (var id in ids) _renditionsLoading.Remove(id); });
+            Log.Write($"[quality] getSonusRenditions: {ex.Message}");
+        }
     }
 
     private void Load(string trackId, bool autoplay, double at = 0)
@@ -262,10 +335,14 @@ public sealed class MusicService : IDisposable
         if (Library.Track(trackId) is not { } t) { SetState(PlayerState.Error, "这首歌已不在媒体库中。"); return; }
         _counted = false;
         _started = DateTimeOffset.Now;
+        _bufferingSinceTick = 0;
+        _downgradedThisStall = false;
         Position = at;
         Error = null;
         ApplyVolume(t);
-        Engine.Load(ItemFor(t, at), PreloadFor(trackId), autoplay);
+        var next = PreloadFor(trackId);
+        EnsureRenditions(trackId, next?.Id);
+        Engine.Load(ItemFor(t, at), next, autoplay);
         SetState(autoplay ? PlayerState.Loading : PlayerState.Paused);
         PositionChanged?.Invoke(at);
     }
@@ -297,6 +374,8 @@ public sealed class MusicService : IDisposable
             if (!s.IsConnected && Queue.Peek() == id) Queue.Next(ended: true); // shown at once while the server can't be told
             _counted = false;
             _started = DateTimeOffset.Now;
+            NoteSmoothTrackAdvance();
+            EnsureRenditions(id, _session?.Next);
             ApplyVolume(Library.Track(id));
             SetState(PlayerState.Playing);
             NowPlaying(Library.Track(id));
@@ -307,6 +386,8 @@ public sealed class MusicService : IDisposable
         else if (Queue.Current != id) { Load(Queue.Next(ended: true) ?? id, autoplay: true); return; }
         _counted = false;
         _started = DateTimeOffset.Now;
+        NoteSmoothTrackAdvance();
+        EnsureRenditions(id, Queue.Peek());
         ApplyVolume(Current);
         SetState(PlayerState.Playing);
         NowPlaying();
@@ -368,6 +449,26 @@ public sealed class MusicService : IDisposable
             return;
         }
         if (Session is not null && _sayPositionAt > 0 && Environment.TickCount64 >= _sayPositionAt) { _sayPositionAt = 0; SayHere("position"); } // a seek done
+        // Monitor sustained buffering stalls; only auto-downgrade when the active network setting is Auto
+        if (State == PlayerState.Loading && Engine.State == EngineState.Loading)
+        {
+            long now = Environment.TickCount64;
+            if (_bufferingSinceTick == 0) _bufferingSinceTick = now;
+            else if (!_downgradedThisStall && now - _bufferingSinceTick >= 4500 && Client.SupportsRenditions && !AlwaysOriginal && ActiveNetworkQuality == AudioQuality.Auto && _autoDowngradeSteps < 3)
+            {
+                _downgradedThisStall = true;
+                _autoDowngradeSteps++;
+                _smoothTracksSinceDowngrade = 0;
+                Log.Write($"[quality] slow buffering (>4.5s), auto-downgrade step -> {_autoDowngradeSteps} (next track)");
+                RefreshPreload();
+                PlayerChanged?.Invoke();
+            }
+        }
+        else
+        {
+            _bufferingSinceTick = 0;
+            _downgradedThisStall = false;
+        }
         if (State != PlayerState.Playing) return;
         Position = Engine.Position;
         PositionChanged?.Invoke(Position);
@@ -459,15 +560,97 @@ public sealed class MusicService : IDisposable
 
     public void SetReplayGain(ReplayGainMode mode) { ReplayGain = mode; _settings.ReplayGain = mode; _settings.Save(); ApplyVolume(); PlayerChanged?.Invoke(); }
 
-    private static Sonus.Core.Audio.AudioCore ResolveInitialCore(Sonus.Core.Audio.AudioCore saved) =>
+    public void SetWifiQuality(AudioQuality quality)
+    {
+        if (WifiQuality == quality) return;
+        WifiQuality = quality; _settings.WifiQuality = quality; _settings.Save();
+        _autoDowngradeSteps = 0; _smoothTracksSinceDowngrade = 0;
+        RefreshPreload();
+        PlayerChanged?.Invoke();
+    }
+
+    public void SetCellularQuality(AudioQuality quality)
+    {
+        if (CellularQuality == quality) return;
+        CellularQuality = quality; _settings.CellularQuality = quality; _settings.Save();
+        _autoDowngradeSteps = 0; _smoothTracksSinceDowngrade = 0;
+        RefreshPreload();
+        PlayerChanged?.Invoke();
+    }
+
+    public void SetLoudnessLevel(LoudnessLevel level)
+    {
+        if (LoudnessLevel == level) return;
+        LoudnessLevel = level; _settings.LoudnessLevel = level;
+        if (level != LoudnessLevel.Off && ReplayGain != ReplayGainMode.Off) { ReplayGain = ReplayGainMode.Off; _settings.ReplayGain = ReplayGainMode.Off; }
+        _settings.Save();
+        ApplyVolume();
+        PlayerChanged?.Invoke();
+    }
+
+    public void SetLoudnessMode(LoudnessMode mode)
+    {
+        if (LoudnessMode == mode) return;
+        LoudnessMode = mode; _settings.LoudnessMode = mode; _settings.Save();
+        ApplyVolume();
+        PlayerChanged?.Invoke();
+    }
+
+    public void SetAlwaysOriginal(bool on)
+    {
+        if (AlwaysOriginal == on) return;
+        AlwaysOriginal = on; _settings.AlwaysOriginal = on; _settings.Save();
+        _autoDowngradeSteps = 0; _smoothTracksSinceDowngrade = 0;
+        RefreshPreload();
+        PlayerChanged?.Invoke();
+    }
+
+    private void NoteSmoothTrackAdvance()
+    {
+        if (_autoDowngradeSteps > 0 && !_downgradedThisStall && ++_smoothTracksSinceDowngrade >= 2)
+        {
+            _autoDowngradeSteps--;
+            _smoothTracksSinceDowngrade = 0;
+            Log.Write($"[quality] recovered one quality step -> downgrade={_autoDowngradeSteps}");
+        }
+    }
+
+    private static bool DetectMeteredNetwork()
+    {
+        if (Environment.GetEnvironmentVariable("SONUS_TEST_METERED") is { Length: > 0 } env)
+            return env == "1" || env.Equals("true", StringComparison.OrdinalIgnoreCase);
+        try
+        {
+            var cost = Windows.Networking.Connectivity.NetworkInformation.GetInternetConnectionProfile()?.GetConnectionCost();
+            if (cost is null) return false;
+            return cost.NetworkCostType is Windows.Networking.Connectivity.NetworkCostType.Fixed or Windows.Networking.Connectivity.NetworkCostType.Variable
+                || cost.Roaming || cost.OverDataLimit;
+        }
+        catch { return false; }
+    }
+
+    private void OnNetworkStatusChanged(object? sender) => UiThread.Post(_ui, "network status", () =>
+    {
+        if (_disposed) return;
+        bool metered = DetectMeteredNetwork();
+        if (metered == IsMeteredNetwork) return;
+        IsMeteredNetwork = metered;
+        _autoDowngradeSteps = 0;
+        _smoothTracksSinceDowngrade = 0;
+        Log.Write($"[quality] network changed -> {(metered ? "metered" : "unmetered")} (next track)");
+        RefreshPreload();
+        PlayerChanged?.Invoke();
+    });
+
+    private static AudioCore ResolveInitialCore(AudioCore saved) =>
         Environment.GetEnvironmentVariable("SONUS_AUDIO_CORE") switch
         {
-            var s when string.Equals(s, "legacy", StringComparison.OrdinalIgnoreCase) => Sonus.Core.Audio.AudioCore.Legacy,
-            var s when string.Equals(s, "native", StringComparison.OrdinalIgnoreCase) => Sonus.Core.Audio.AudioCore.Native,
+            var s when string.Equals(s, "legacy", StringComparison.OrdinalIgnoreCase) => AudioCore.Legacy,
+            var s when string.Equals(s, "native", StringComparison.OrdinalIgnoreCase) => AudioCore.Native,
             _ => saved,
         };
 
-    public void SetPlaybackCore(Sonus.Core.Audio.AudioCore core)
+    public void SetPlaybackCore(AudioCore core)
     {
         if (core == Engine.Core) return;
         bool wasPlaying = State is PlayerState.Playing or PlayerState.Loading;
@@ -476,6 +659,7 @@ public sealed class MusicService : IDisposable
         _settings.PlaybackCore = core;
         _settings.Save();
         Engine.SetCore(core);
+        ApplyVolume();
         if (trackId is not null && State != PlayerState.Stopped)
             Load(trackId, autoplay: wasPlaying, at: at);
         PlayerChanged?.Invoke();
@@ -489,7 +673,23 @@ public sealed class MusicService : IDisposable
         return Volume * (gain is { } g ? Math.Min(1, Math.Pow(10, g / 20)) : 1);
     }
 
-    private void ApplyVolume(Track? t = null) => Engine.Volume = EffectiveVolume(t ?? Current);
+    private void ApplyVolume(Track? t = null)
+    {
+        var track = t ?? Current;
+        if (LoudnessLevel != LoudnessLevel.Off)
+        {
+            var loudness = track is not null ? _renditions.GetValueOrDefault(track.Id)?.Loudness : null;
+            Engine.Volume = Volume;
+            Engine.GainMultiplier = QualityPolicy.ComputeLoudnessGain(
+                LoudnessLevel, LoudnessMode, loudness, track?.AlbumGain, track?.TrackGain,
+                allowBoost: Engine.Core == AudioCore.Native);
+        }
+        else
+        {
+            Engine.GainMultiplier = 1.0;
+            Engine.Volume = EffectiveVolume(track);
+        }
+    }
 
     public void SetOrder(PlaybackOrder order)
     {

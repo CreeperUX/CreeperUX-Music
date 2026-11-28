@@ -83,6 +83,8 @@ public sealed class SubsonicClient
     public HashSet<string> Extensions { get; } = [];
     /// <summary>The versions of each OpenSubsonic extension the server offers (Sonus Connect: 1, 2).</summary>
     public Dictionary<string, IReadOnlyList<int>> ExtensionVersions { get; } = [];
+    /// <summary>Whether the server advertises the Sonus playback library extension (sonusRenditions v1).</summary>
+    public bool SupportsRenditions => Extensions.Contains("sonusRenditions");
     public bool IsOnline => _online;
 
     /// <summary>Reachable / not reachable, as the last request found it.</summary>
@@ -468,7 +470,58 @@ public sealed class SubsonicClient
     /// <summary>The cover at a size: the URL is the same every time (a fixed salt), so caches keep it.</summary>
     public string CoverUrl(string coverArt, int size = 600) => Url("getCoverArt", ("id", coverArt), ("size", size));
 
-    /// <summary>The song's audio; <paramref name="transcodeTo"/> asks the server to convert it (e.g. "mp3").</summary>
-    public string StreamUrl(string songId, string? transcodeTo = null) =>
-        transcodeTo is null ? Url("stream", ("id", songId)) : Url("stream", ("id", songId), ("format", transcodeTo), ("maxBitRate", 320));
+    /// <summary>The song's audio; <paramref name="sonusQuality"/> requests a playback-library tier when supported,
+    /// while <paramref name="transcodeTo"/> asks a plain Subsonic server to convert it (e.g. "mp3").</summary>
+    public string StreamUrl(string songId, string? transcodeTo = null, string? sonusQuality = null) =>
+        !string.IsNullOrEmpty(sonusQuality)
+            ? Url("stream", ("id", songId), ("sonusQuality", sonusQuality))
+            : transcodeTo is null
+                ? Url("stream", ("id", songId))
+                : Url("stream", ("id", songId), ("format", transcodeTo), ("maxBitRate", 320));
+
+    /// <summary>Queries ready renditions and EBU R128 loudness measurements for a batch of songs (sonusRenditions v1).</summary>
+    public async Task<Dictionary<string, Audio.SongRenditions>> GetSonusRenditionsAsync(IEnumerable<string> songIds, CancellationToken cancel = default)
+    {
+        var result = new Dictionary<string, Audio.SongRenditions>();
+        if (!SupportsRenditions) return result;
+        var ids = songIds.Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().Take(500).ToList();
+        if (ids.Count == 0) return result;
+        try
+        {
+            var body = await CallAsync("getSonusRenditions", P(("id", ids)), cancel: cancel).ConfigureAwait(false);
+            var root = Obj(body, "sonusRenditions");
+            if (root.ValueKind != JsonValueKind.Object || !Bool(root, "enabled")) return result;
+            foreach (var s in Array(root, "songs"))
+            {
+                if (Str(s, "id") is not { Length: > 0 } id) continue;
+                var lObj = Obj(s, "loudness");
+                Audio.LoudnessInfo? loudness = lObj.ValueKind == JsonValueKind.Object
+                    ? new Audio.LoudnessInfo(NumOrNull(lObj, "trackLufs"), NumOrNull(lObj, "trackPeak"), NumOrNull(lObj, "albumLufs"), NumOrNull(lObj, "albumPeak"))
+                    : null;
+                var renditions = Array(s, "renditions")
+                    .Select(r => new Audio.RenditionInfo(
+                        Str(r, "tier") ?? "",
+                        Str(r, "format") ?? "",
+                        Int(r, "sampleRate"),
+                        Int(r, "bitDepth"),
+                        Int(r, "channels"),
+                        (long)Num(r, "totalSamples"),
+                        Int(r, "bitRate"),
+                        (long)Num(r, "fileSize")))
+                    .Where(r => r.Tier.Length > 0)
+                    .ToList();
+                result[id] = new Audio.SongRenditions(
+                    id,
+                    Str(s, "sourceFormat") ?? "",
+                    Bool(s, "sourceLossless"),
+                    Int(s, "sourceSampleRate"),
+                    Int(s, "sourceBitDepth"),
+                    Int(s, "sourceBitRate"),
+                    loudness,
+                    renditions);
+            }
+        }
+        catch (SubsonicException) { /* server disabled renditions or unsupported */ }
+        return result;
+    }
 }

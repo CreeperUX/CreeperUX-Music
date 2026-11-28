@@ -300,7 +300,8 @@ internal static class E2EChannel
             syncContext = SynchronizationContext.Current?.GetType().Name, // UiSynchronizationContext, also after signing in again
             ready = W?.Ready == true, route = W?.Route, title = W?.Title, view = W?.CurrentView?.GetType().Name,
             track = m?.Queue.Current, trackTitle = m?.Current?.Title, state = m?.State.ToString(), error = m?.Error, position = m?.Position, duration = m?.Duration,
-            engine = m?.Engine.State.ToString(), engineTrack = m?.Engine.CurrentId, engineNext = m?.Engine.NextId, enginePosition = m?.Engine.Position, engineDuration = m?.Engine.Duration, volume = m?.Engine.Volume,
+            engine = m?.Engine.State.ToString(), engineCore = m?.Engine.Core.ToString(), engineTrack = m?.Engine.CurrentId, engineNext = m?.Engine.NextId, enginePosition = m?.Engine.Position, engineDuration = m?.Engine.Duration, volume = m?.Engine.Volume,
+            streamQuality = m?.Engine.ActiveStream?.Quality, streamFormat = m?.Engine.ActiveStream?.Format,
             order = m?.Queue.Order.ToString(), context = m?.Queue.Context, queue = m?.Queue.Entries.Select(e => e.TrackId).Take(20), manual = m?.Queue.Entries.Count(e => e.Manual),
             online = m?.IsOnline, lyric = W?.Panel?.CurrentLyric, services = Services.MusicService.Alive, songs = m?.Library.Tracks.Count, albums = m?.Library.Albums.Count, artists = m?.Library.Artists.Count,
             playlists = m?.Playlists.Select(p => new { p.Id, p.Name, kind = p.Kind.ToString(), count = p.TrackIds.Count, p.Owner }),
@@ -348,6 +349,7 @@ internal static class E2EChannel
             case "order": m.SetOrder(Enum.Parse<PlaybackOrder>(Arg(1))); return "ok";
             case "stopafter": m.SetStopAfterCurrent(Arg(1) == "on"); return "ok";
             case "replaygain": m.SetReplayGain(Enum.Parse<ReplayGainMode>(Arg(1))); return "ok";
+            case "core": m.SetPlaybackCore(Enum.Parse<Sonus.Core.Audio.AudioCore>(Arg(1), ignoreCase: true)); return "ok";
             case "queue": m.QueueAdd(p.Skip(1), next: false); return "ok";
             case "clearqueue": m.QueueClear(manual: true); return "ok"; // the songs queued by hand (a run against a server that keeps them)
             case "like": _ = m.SetLikedAsync(Arg(1), Arg(2) == "on"); return "ok";

@@ -318,10 +318,38 @@ try {
       await app.invoke('播放');
       await until(async () => (await state()).engine === 'Playing', 'playing again');
     });
-    await check('拖动进度：MediaPlayer 跳到 30 秒', async () => {
+    await check('拖动进度：跳到 30 秒（新核心 1 秒内出声）', async () => {
+      const t0 = Date.now();
       await app.send('do seek 30');
-      await until(async () => Math.abs((await state()).enginePosition - 30) < 1.5, 'at 30 s');
+      await until(async () => { const s = await state(); return s.engine === 'Playing' && Math.abs(s.enginePosition - 30) < 1.5; }, 'at 30 s');
+      const ms = Date.now() - t0;
+      const core = (await state()).engineCore;
+      log(`    核心=${core}，跳到 30 s 耗时 ${ms} ms`);
+      if (core === 'Native') assert(ms < 1000, `新核心跳进度超过 1 秒：${ms} ms`);
     });
+    if ((await state()).engineCore === 'Native') await check('FLAC 开播立刻跳进度（仅要求新核心通过，1 秒内出声）', async () => {
+      const songs = (await api('search3', { query: '', songCount: 1000, albumCount: 0, artistCount: 0 })).searchResult3?.song ?? [];
+      const flac = songs.find(x => x.suffix === 'flac' && x.duration >= 90);
+      if (!flac) throw new Skip('曲库里没有 90 秒以上的 FLAC');
+      const al = (await api('getAlbum', { id: flac.albumId })).album;
+      const idx = al.song.findIndex(x => x.id === flac.id);
+      const t0 = Date.now();
+      await app.send(`do play album ${al.id} ${idx}`);
+      await until(async () => (await state()).engineTrack === flac.id, 'FLAC loaded', 5000);
+      // Seek immediately without waiting 2 s (what Media Foundation failed on)
+      await app.send('do seek 60');
+      await until(async () => { const s = await state(); return s.engine === 'Playing' && s.engineTrack === flac.id && Math.abs(s.enginePosition - 60) < 2; }, 'FLAC playing at 60 s', 8000);
+      const ms = Date.now() - t0;
+      log(`    FLAC 开播即跳 60 s 耗时 ${ms} ms`);
+      assert(ms < 1000, `新核心 FLAC 开播即跳超过 1 秒：${ms} ms`);
+      await sleep(1500);
+      const after = await state();
+      assert(after.engine === 'Playing' && after.engineTrack === flac.id && after.enginePosition > 60.5, `跳后没接着放：${after.engine} ${after.enginePosition}`);
+      // Return to playable album first track for the rest of round 3
+      await app.send(`do play album ${cat.playable.id} 0`);
+      await until(async () => { const s = await state(); return s.engineTrack === pt[0] && s.engine === 'Playing'; }, 'back to playable track 0', 10000);
+    });
+    else skip('FLAC 开播立刻跳进度（仅要求新核心通过，1 秒内出声）', '旧核心（Media Foundation）开播立刻跳 FLAC 已知失败');
     await check('播过一半计一次播放（scrobble），服务器和界面都 +1', async () => {
       const before = (await api('getSong', { id: pt[0] })).song.playCount ?? 0;
       const d = (await state()).duration;
@@ -462,6 +490,22 @@ try {
       await shot('lyrics');
     });
     else skip('全屏歌词：当前行随播放变亮', '服务器上找不到有同步歌词的歌（track.syncedLyrics）');
+    await check('设置 › 高级：新旧播放核心可以切换，切完继续播放', async () => {
+      const orig = (await state()).engineCore;
+      const otherLabel = orig === 'Native' ? '旧（Windows Media Foundation）' : '新（自带解码）';
+      const origLabel = orig === 'Native' ? '新（自带解码）' : '旧（Windows Media Foundation）';
+      const otherCore = orig === 'Native' ? 'Legacy' : 'Native';
+      await app.send('nav settings'); await sleep(600);
+      await app.send('scroll 90'); await sleep(300);
+      await shot('settings-advanced');
+      await app.invoke(otherLabel);
+      await until(async () => (await state()).engineCore === otherCore, `switched to ${otherCore}`, 5000);
+      await until(async () => (await state()).engine === 'Playing', `playing on ${otherCore}`, 10000);
+      await app.invoke(origLabel);
+      await until(async () => (await state()).engineCore === orig, `switched back to ${orig}`, 5000);
+      await until(async () => (await state()).engine === 'Playing', `playing on ${orig}`, 10000);
+      await app.send('do pause');
+    });
     quiet(app);
   }
 
@@ -682,8 +726,13 @@ try {
       });
       await check('选“这台电脑”：播放转到第二台，同一首、同一位置；第一台停下，显示“正在「第二台」上播放”（规则 4）', async () => {
         const before = await state();
+        const tTakeover = Date.now();
         await b.invoke('这台电脑');
         await b.until(async () => { const s = await b.state(); return s.engine === 'Playing' && s.engineTrack === before.engineTrack; }, 'B plays A\'s song', 10000);
+        const takeoverMs = Date.now() - tTakeover;
+        const bCore = (await b.state()).engineCore;
+        log(`    接手耗时（${bCore}）：${takeoverMs} ms`);
+        if (bCore === 'Native') assert(takeoverMs < 1000, `新核心接手超过 1 秒：${takeoverMs} ms`);
         await until(async () => (await state()).engine === 'Stopped', 'A stopped', 5000);
         // the position it starts from is applied once the stream is open (a far one takes a moment)
         await b.until(async () => Math.abs((await b.state()).enginePosition - before.enginePosition) < 5, 'B at A’s position', 5000)
@@ -722,11 +771,16 @@ try {
           const at = (await from.state()).enginePosition;
           if (!(await to.names()).some(n => n.startsWith('这台电脑 ['))) await to.invoke(`正在「${fromName}」上播放，选择设备`);
           await to.until(async () => (await to.names()).some(n => n.startsWith('这台电脑 [')), `${toName}'s device list`, 5000);
+          const tTakeover = Date.now();
           await to.invoke('这台电脑');
-          // it plays once its stream has reached the position: a few seconds for a FLAC taken over late
+          // it plays once its stream has reached the position: sub-second on native core, a few seconds on legacy MF
           await to.until(async () => { const s = await to.state(); return s.engine === 'Playing' && s.engineTrack === flac.id; }, `${toName} plays the FLAC`, 15000)
             .catch(async () => { const s = await to.state(); throw new Error(`${toName}：${s.engine} ${s.engineTrack === flac.id ? '那首 FLAC' : s.engineTrack}，${s.error ?? ''}`); });
+          const takeoverMs = Date.now() - tTakeover;
           const p = (await to.state()).enginePosition;
+          const toCore = (await to.state()).engineCore;
+          log(`    ${fromName} → ${toName}（${toCore}）：${takeoverMs} ms 出声（${at?.toFixed(1)} s → ${p?.toFixed(1)} s）`);
+          if (toCore === 'Native') assert(takeoverMs < 1000, `${toName} 新核心接手 FLAC 超过 1 秒：${takeoverMs} ms`);
           assert(Math.abs(p - at) < 8, `${toName} 从 ${p?.toFixed(1)} s 开始放，${fromName} 在 ${at?.toFixed(1)} s`);
           await sleep(4000);
           const s = await to.state();

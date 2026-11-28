@@ -403,6 +403,31 @@ public sealed class SettingsPage : View
         foreach (var (k, what) in new[] { ("空格", "播放 / 暂停"), ("Ctrl + →  /  Ctrl + ←", "下一首 / 上一首"), ("Ctrl + ↑  /  Ctrl + ↓", "音量"), ("Ctrl + K  或  /", "搜索"), ("Alt + ←", "后退"), ("Alt + Shift + B", "喜欢正在播放的歌曲"), ("Ctrl + =  /  Ctrl + -  /  Ctrl + 0", "放大 / 缩小 / 恢复 100%"), ("媒体键", "播放、暂停、上一首、下一首") })
             keys.Children.Add(Fact(k, what));
 
+        var advanced = Section("高级");
+        bool syncingCore = false;
+        var coreButtons = new Dictionary<Core.Audio.AudioCore, RadioButton>();
+        var coreRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 20 };
+        foreach (var (core, label) in new[] { (Core.Audio.AudioCore.Native, "新（自带解码）"), (Core.Audio.AudioCore.Legacy, "旧（Windows Media Foundation）") })
+        {
+            var rb = new RadioButton { Content = label, GroupName = "PlaybackCore", MinWidth = 0, IsChecked = core == music.PlaybackCore };
+            rb.Checked += (_, _) => { if (!syncingCore && core != music.PlaybackCore) music.SetPlaybackCore(core); };
+            coreRow.Children.Add(rb);
+            coreButtons[core] = rb;
+        }
+        var coreBox = Ui.Column(6, Ui.Text("播放核心", size: 14, foreground: Ui.Brush("TextPrimaryBrush")), coreRow);
+        AutomationProperties.SetName(coreBox, "播放核心");
+        advanced.Children.Add(coreBox);
+        var coreNote = Ui.Text("新核心自带 FLAC、Opus、WAV 和 MP3 解码，支持按寻址表即时跳进度和精确无缝衔接；如遇问题可随时切回旧核心。", "MutedTextStyle");
+        coreNote.TextWrapping = TextWrapping.Wrap;
+        advanced.Children.Add(coreNote);
+        void SyncCore()
+        {
+            syncingCore = true;
+            if (coreButtons.TryGetValue(music.PlaybackCore, out var rb)) rb.IsChecked = true;
+            syncingCore = false;
+        }
+        On(() => music.PlayerChanged += SyncCore, () => music.PlayerChanged -= SyncCore);
+
         var about = Section("关于");
         about.Children.Add(Fact("程序", $"Sonus {typeof(App).Assembly.GetName().Version?.ToString(3)} · WinUI 3"));
         about.Children.Add(Fact("服务器", music.Server.Version));

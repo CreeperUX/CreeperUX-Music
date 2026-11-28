@@ -42,6 +42,8 @@ public sealed class AppSettings
     /// <summary>Offer test versions (GitHub pre-releases) too.</summary>
     public bool UpdatePrerelease { get; set; }
     public DateTime? LastUpdateCheck { get; set; }
+    /// <summary>Which Windows playback core to use (built-in pure C# + WASAPI by default; legacy Media Foundation kept as fallback).</summary>
+    public Sonus.Core.Audio.AudioCore PlaybackCore { get; set; } = Sonus.Core.Audio.AudioCore.Native;
     /// <summary>This installation's own id in Sonus Connect, made once and kept: after a reconnect or a restart it is the
     /// same device.</summary>
     public string? ConnectDeviceId { get; set; }

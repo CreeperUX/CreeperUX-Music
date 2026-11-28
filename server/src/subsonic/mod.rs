@@ -132,6 +132,8 @@ const PROTECTED: &[&str] = &[
     "getVideoInfo",
     "getCaptions",
     "hls",
+    "getSonusRenditions",
+    "getSonusLibraryHealth",
 ];
 
 /// The protected method a path under `/rest/` names (`ping`, `ping.view`), exactly as Navidrome's router matches it.

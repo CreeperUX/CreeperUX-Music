@@ -21,7 +21,8 @@ use rusqlite::OptionalExtension;
 use rusqlite::types::Value;
 
 use crate::gotime;
-use crate::subsonic::respond::MISSING_PARAMETER;
+use crate::renditions::{self, Quality, Tier};
+use crate::subsonic::respond::{GENERIC, MISSING_PARAMETER};
 
 use super::browse::{int_or, string};
 use super::query::{self, Cond, ListOptions, QueryError, Song};
@@ -47,12 +48,21 @@ pub enum MediaBody {
     Held(Vec<u8>, tokio::sync::mpsc::Receiver<transcoder::Chunk>),
 }
 
-/// `stream`: the song's file as it is, transcoded, or Navidrome's to answer.
+/// `stream`: the song's file as it is, a pre-generated rendition (when `sonusQuality` is given), transcoded, or
+/// Navidrome's to answer. Requests without `sonusQuality` take the exact unchanged path.
 pub fn stream(scope: &Scope) -> Result<Reply, QueryError> {
     let params = scope.params;
     let id = match string(params, "id") {
         Ok(Some(id)) => id,
         Ok(None) => return Ok(Reply::error(MISSING_PARAMETER, "missing parameter: 'id'")),
+        Err(reply) => return Ok(reply),
+    };
+    let quality = match string(params, "sonusQuality") {
+        Ok(Some(raw)) => match Quality::parse(raw) {
+            Some(q) => Some(q),
+            None => return Ok(Reply::error(GENERIC, format!("invalid parameter 'sonusQuality': '{raw}'"))),
+        },
+        Ok(None) => None,
         Err(reply) => return Ok(reply),
     };
     let max_bit_rate = int_or(params, "maxBitRate", 0);
@@ -65,6 +75,11 @@ pub fn stream(scope: &Scope) -> Result<Reply, QueryError> {
     let songs = query::songs(scope.conn, scope.viewer, scope.options, &list)?;
     let Some(song) = songs.first() else { return Ok(Reply::error(NOT_FOUND, "data not found")) };
     let Some(player) = scope.player else { return Ok(Reply::Navidrome("no player: Navidrome's")) };
+
+    if let Some(quality) = quality {
+        return stream_with_quality(song, quality, format, max_bit_rate, offset, player, scope);
+    }
+
     // the player's transcoding, as Navidrome's middleware loads it
     let forced = if player.transcoding_id.is_empty() {
         None
@@ -88,9 +103,133 @@ pub fn stream(scope: &Scope) -> Result<Reply, QueryError> {
         if let Some(link) = scope.mirror.filter(|_| scope.redirect).and_then(|mirror| mirror_link(mirror, song, scope.http_method)) {
             return Ok(Reply::Redirect(link));
         }
-        return Ok(serve_raw(song, scope.http_method, scope.headers));
+        return Ok(serve_raw(song, scope.http_method, scope.headers, Vec::new()));
     }
-    Ok(transcoded(song, &request, offset, scope, &find))
+    Ok(transcoded(song, &request, offset, scope, &find, Vec::new()))
+}
+
+/// Serves a `stream` request that carries `sonusQuality=...` (`docs/protocol/renditions.md`).
+fn stream_with_quality(
+    song: &Song,
+    quality: Quality,
+    format: &str,
+    max_bit_rate: i64,
+    offset: i64,
+    player: &super::player::Player,
+    scope: &Scope,
+) -> Result<Reply, QueryError> {
+    let source_headers = || {
+        let fmt = song.suffix.to_ascii_lowercase();
+        let sr = (song.sample_rate > 0).then_some(song.sample_rate as u32);
+        let bd = song.bit_depth.filter(|&b| b > 0).map(|b| b as u8);
+        let br = (song.bit_rate > 0).then_some(song.bit_rate as u32);
+        quality_headers("original", &fmt, sr, bd, br)
+    };
+
+    match quality {
+        Quality::Original => {
+            if let Some(link) = scope.mirror.filter(|_| scope.redirect).and_then(|mirror| mirror_link(mirror, song, scope.http_method)) {
+                return Ok(Reply::Redirect(link));
+            }
+            return Ok(serve_raw(song, scope.http_method, scope.headers, source_headers()));
+        }
+        Quality::Tier(tier) => {
+            let lossless_src = renditions::is_lossless_source(&song.suffix, &song.codec, song.bit_depth);
+            // Lossy original (e.g. MP3) asked at lossless or veryHigh: serve original directly without re-encoding.
+            if !lossless_src && matches!(tier, Tier::Lossless | Tier::VeryHigh) {
+                if let Some(link) = scope.mirror.filter(|_| scope.redirect).and_then(|mirror| mirror_link(mirror, song, scope.http_method)) {
+                    return Ok(Reply::Redirect(link));
+                }
+                return Ok(serve_raw(song, scope.http_method, scope.headers, source_headers()));
+            }
+            if let Some(renditions) = scope.renditions {
+                if inside_library(&song.path) {
+                    if let Ok(stamp) = crate::mirror::s3::Stamp::of(&file_of(song)) {
+                        if let Some((row, path)) = renditions.ready_file(&song.id, &stamp.version(), tier) {
+                            if let Ok(file) = std::fs::File::open(&path) {
+                                let stored = song_time(song).ok().flatten();
+                                let duration = if song.duration > 0.0 {
+                                    song.duration
+                                } else if row.sample_rate > 0 {
+                                    row.total_samples as f64 / row.sample_rate as f64
+                                } else {
+                                    0.0
+                                };
+                                let br = renditions::api::rendition_bitrate_kbps(row.tier, row.file_size, row.total_samples, row.sample_rate);
+                                let extra = quality_headers(
+                                    row.tier.as_str(),
+                                    &row.format,
+                                    (row.sample_rate > 0).then_some(row.sample_rate),
+                                    (row.bit_depth > 0).then_some(row.bit_depth),
+                                    (br > 0).then_some(br),
+                                );
+                                return Ok(serve_file(file, tier.content_type(), duration, stored, scope.http_method, scope.headers, extra));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Requested rendition is not ready (or playback library disabled): fall back to existing raw / on-demand transcode.
+    let forced = if player.transcoding_id.is_empty() {
+        None
+    } else {
+        match transcoding(scope.conn, "id", &player.transcoding_id)? {
+            Some(row) => Some(row),
+            None => return Ok(Reply::Navidrome("a player whose transcoding is not there")),
+        }
+    };
+    let find = |format: &str| transcoding(scope.conn, "target_format", format).ok().flatten();
+    let cx = transcode::Context {
+        player_max_bit_rate: player.max_bit_rate,
+        player_transcoding: forced.as_ref(),
+        default_downsampling_format: &scope.options.default_downsampling_format,
+        find: &find,
+    };
+    let request = transcode::resolve_request(song, format, max_bit_rate, &cx);
+    if request.is_raw() {
+        if let Some(link) = scope.mirror.filter(|_| scope.redirect).and_then(|mirror| mirror_link(mirror, song, scope.http_method)) {
+            return Ok(Reply::Redirect(link));
+        }
+        return Ok(serve_raw(song, scope.http_method, scope.headers, source_headers()));
+    }
+    let extra = quality_headers(
+        "transcode",
+        &request.format,
+        (request.sample_rate > 0).then_some(request.sample_rate as u32),
+        (request.bit_depth > 0).then_some(request.bit_depth as u8),
+        (request.bit_rate > 0).then_some(request.bit_rate as u32),
+    );
+    Ok(transcoded(song, &request, offset, scope, &find, extra))
+}
+
+/// Builds `X-Sonus-*` response headers describing the audio stream delivered for a `sonusQuality` request.
+fn quality_headers(quality: &str, format: &str, sample_rate: Option<u32>, bit_depth: Option<u8>, bit_rate: Option<u32>) -> Vec<(HeaderName, HeaderValue)> {
+    let mut out = Vec::with_capacity(6);
+    if let Ok(v) = HeaderValue::from_str(quality) {
+        out.push((HeaderName::from_static("x-sonus-quality"), v));
+    }
+    if !format.is_empty() {
+        if let Ok(v) = HeaderValue::from_str(format) {
+            out.push((HeaderName::from_static("x-sonus-format"), v));
+        }
+    }
+    if let Some(sr) = sample_rate {
+        out.push((HeaderName::from_static("x-sonus-sample-rate"), HeaderValue::from(sr)));
+    }
+    if let Some(bd) = bit_depth {
+        out.push((HeaderName::from_static("x-sonus-bit-depth"), HeaderValue::from(u16::from(bd))));
+    }
+    if let Some(br) = bit_rate {
+        out.push((HeaderName::from_static("x-sonus-bit-rate"), HeaderValue::from(br)));
+    }
+    out.push((
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("X-Sonus-Quality, X-Sonus-Format, X-Sonus-Sample-Rate, X-Sonus-Bit-Depth, X-Sonus-Bit-Rate"),
+    ));
+    out
 }
 
 /// `ds.Transcoding(ctx)`: a row by its id or its format.
@@ -131,7 +270,7 @@ fn song_time(song: &Song) -> Result<Option<DateTime<Utc>>, ()> {
 }
 
 /// The song's file as `http.ServeContent` serves it, or Navidrome's to answer.
-fn serve_raw(song: &Song, method: &str, request: &HeaderMap) -> Reply {
+fn serve_raw(song: &Song, method: &str, request: &HeaderMap, extra: Vec<(HeaderName, HeaderValue)>) -> Reply {
     if !inside_library(&song.path) {
         return Reply::Navidrome("a song whose stored path leaves its library's folder");
     }
@@ -147,11 +286,18 @@ fn serve_raw(song: &Song, method: &str, request: &HeaderMap) -> Reply {
         Ok(file) => file,
         Err(_) => return Reply::Navidrome("the song's file cannot be opened: Navidrome's error"),
     };
-    serve_file(file, content_type, song.duration, stored, method, request)
+    serve_file(file, content_type, song.duration, stored, method, request, extra)
 }
 
 /// A transcoded stream (`NewStream` past `ResolveRequest`): the finished cache entry as a file, or a transcode to run.
-fn transcoded(song: &Song, request: &transcode::Request, offset: i64, scope: &Scope, find: &dyn Fn(&str) -> Option<transcode::Transcoding>) -> Reply {
+fn transcoded(
+    song: &Song,
+    request: &transcode::Request,
+    offset: i64,
+    scope: &Scope,
+    find: &dyn Fn(&str) -> Option<transcode::Transcoding>,
+    extra: Vec<(HeaderName, HeaderValue)>,
+) -> Reply {
     if !transcode::is_default_command(&request.format, &transcode::command_for(&request.format, find)) {
         return Reply::Navidrome("a transcoding with a command of its own, which only Navidrome runs");
     }
@@ -182,7 +328,7 @@ fn transcoded(song: &Song, request: &transcode::Request, offset: i64, scope: &Sc
     if let Some(cached) = scope.transcoder.cached(&key) {
         // a finished transcode is a file: ranges and conditions as for the song's own
         if let Ok(file) = std::fs::File::open(&cached) {
-            return serve_file(file, content_type, song.duration, stored, scope.http_method, scope.headers);
+            return serve_file(file, content_type, song.duration, stored, scope.http_method, scope.headers, extra);
         }
     }
     let Some(input) = transcoder::ffmpeg_input(&path) else { return Reply::Navidrome("a path ffmpeg cannot be given") };
@@ -199,6 +345,7 @@ fn transcoded(song: &Song, request: &transcode::Request, offset: i64, scope: &Sc
         duration: go_float32(song.duration as f32),
         length: estimate.then(|| transcode::estimated_length(song.duration, request.bit_rate)),
         head: scope.http_method == "HEAD",
+        extra_headers: extra,
     }))
 }
 
@@ -211,10 +358,19 @@ pub struct Pending {
     /// `estimateContentLength`: the length announced.
     pub length: Option<i64>,
     pub head: bool,
+    pub extra_headers: Vec<(HeaderName, HeaderValue)>,
 }
 
 /// `http.ServeContent` of an open file, with the song's time and duration.
-fn serve_file(mut file: std::fs::File, content_type: &'static str, duration: f64, stored: Option<DateTime<Utc>>, method: &str, request: &HeaderMap) -> Reply {
+fn serve_file(
+    mut file: std::fs::File,
+    content_type: &'static str,
+    duration: f64,
+    stored: Option<DateTime<Utc>>,
+    method: &str,
+    request: &HeaderMap,
+    extra: Vec<(HeaderName, HeaderValue)>,
+) -> Reply {
     // the conditions and Last-Modified leave out the epoch as well as Go's zero time
     let modtime = stored.filter(|time| !is_zero_time(time));
     let size = match file.metadata() {
@@ -222,6 +378,7 @@ fn serve_file(mut file: std::fs::File, content_type: &'static str, duration: f64
         _ => return Reply::Navidrome("the song's path is not a file"),
     };
     let mut headers = vec![(HeaderName::from_static("x-content-duration"), HeaderValue::from_str(&go_float32(duration as f32)).expect("digits"))];
+    headers.extend(extra);
     if let Some(time) = &modtime {
         headers.push((header::LAST_MODIFIED, HeaderValue::from_str(&http_date(time)).expect("a date")));
     }

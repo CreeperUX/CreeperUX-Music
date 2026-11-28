@@ -39,6 +39,8 @@ pub fn answer(method: &str, scope: &Scope) -> Result<Reply, QueryError> {
         "scrobble" => playing::scrobble(scope, scope.now_playing, scope.client_id),
         "getNowPlaying" => playing::get_now_playing(scope, scope.now_playing),
         "reportPlayback" => playing::report_playback(scope, scope.now_playing, scope.client_id),
+        "getSonusRenditions" => crate::renditions::api::get_renditions(scope),
+        "getSonusLibraryHealth" => crate::renditions::api::get_health(scope),
         _ => Ok(Reply::Navidrome("not a method answered here")),
     }
 }
@@ -74,7 +76,7 @@ pub(super) fn required_int(params: &Params, name: &str) -> Result<i64, Reply> {
 }
 
 /// `req.Params.IntOr`: the default when missing or not a number.
-pub(super) fn int_or(params: &Params, name: &str, default: i64) -> i64 {
+pub fn int_or(params: &Params, name: &str, default: i64) -> i64 {
     std::str::from_utf8(params.get(name)).ok().and_then(parse_int).unwrap_or(default)
 }
 

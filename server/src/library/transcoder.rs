@@ -114,6 +114,16 @@ impl Transcoder {
         self.settings.ffmpeg.is_some()
     }
 
+    /// Configured or PATH-resolved ffmpeg executable, when available.
+    pub fn ffmpeg_path(&self) -> Option<PathBuf> {
+        self.settings.ffmpeg.clone()
+    }
+
+    /// How many live on-demand transcodes are running right now (used by background renditions to yield).
+    pub fn active_count(&self) -> usize {
+        self.running.lock().expect("the transcodes' lock").total
+    }
+
     /// The finished cache entry for a key, if there is one.
     pub fn cached(&self, key: &str) -> Option<PathBuf> {
         self.cache.as_ref()?.get(key)

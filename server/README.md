@@ -618,6 +618,29 @@ in step with the library.
 | `SONUS_R2_ACCESS_KEY_ID`, `SONUS_R2_SECRET_ACCESS_KEY` | A token for this bucket alone, with object read and write. The secret may come from a file instead, `SONUS_R2_SECRET_ACCESS_KEY_FILE` (for example `/data/r2-secret`, mode 600) |
 | `SONUS_R2_UPLOAD_RATE` | Default `2MB` (a second); `0`: no cap |
 | `SONUS_R2_UPLOAD_HOURS` | Default `00:00-07:00`, the server's time zone; `all`: any time. An upload under way at the end is finished |
+
+**Part 6: the playback library (renditions)** (`src/renditions/`, design in `docs/streaming-renditions.md`, protocol in
+`docs/protocol/renditions.md`, off by default). Pre-generates seekable lossless FLAC (with a 1-second `SEEKTABLE`
+inserted in pure Rust) and Opus 256 / 160 / 96 kbps (`audio/ogg`) renditions plus EBU R128 track and album loudness into
+the server's own SQLite ledger (`<DataFolder>/sonus-renditions.db`) and folder, leaving original files and Navidrome's
+database untouched.
+
+| Setting | |
+|---|---|
+| `SONUS_RENDITIONS_ENABLED` | Default `false`. When off, nothing runs, `sonusRenditions` is not advertised, and existing requests are byte-for-byte unchanged |
+| `SONUS_RENDITIONS_DIR` | Where generated rendition files live; default `<DataFolder>/sonus-renditions` |
+| `SONUS_RENDITIONS_CONCURRENCY` | Maximum concurrent background ffmpeg jobs; default `8` (`1`–`32`), low OS priority, yields to live on-demand transcodes |
+| `SONUS_RENDITIONS_HOURS` | Time window in server local time (`00:00-07:00`, or `all`); default `all` |
+| `SONUS_RENDITIONS_DELETE_BRAKE` | Hold deletions when more than this share of songs (> 20) disappear at once; default `10%` (`off` disables). Release with `sonus-server renditions-allow-deletions` |
+
+- **Streaming (`stream?sonusQuality=lossless|veryHigh|high|normal|original`)**: serves ready renditions with full
+  `Range` / `HEAD` / `If-*` support and `X-Sonus-*` response headers (`X-Sonus-Quality`, `X-Sonus-Format`,
+  `X-Sonus-Sample-Rate`, `X-Sonus-Bit-Depth`, `X-Sonus-Bit-Rate`). Lossy originals (e.g. MP3) are served directly on
+  `lossless` and `veryHigh`; ungenerated tiers transparently fall back to raw/on-demand transcoding. Requests without
+  `sonusQuality` are completely unchanged.
+- **Query endpoints**: `getSonusRenditions` (ready renditions and EBU R128 track/album loudness for visible songs) and
+  `getSonusLibraryHealth` (admin-only progress counts and failed health-check list). Advertised as `sonusRenditions`
+  version `1` in `getOpenSubsonicExtensions` when enabled.
 | `SONUS_R2_DAILY_UPLOAD` | Default `20GB`; `0`: no cap. A file larger than the cap still goes, alone, on a day of its own |
 | `SONUS_R2_REGION` | Default `auto` (R2's) |
 

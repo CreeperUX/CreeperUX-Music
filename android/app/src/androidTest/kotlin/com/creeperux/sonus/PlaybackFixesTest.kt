@@ -20,6 +20,7 @@ import com.creeperux.sonus.core.Album
 import com.creeperux.sonus.core.SubsonicClient
 import com.creeperux.sonus.core.connect.PlaybackSession
 import com.creeperux.sonus.core.connect.SessionClient
+import com.creeperux.sonus.core.connect.SessionResume
 import com.creeperux.sonus.playback.PlayerStatus
 import com.google.common.collect.Range
 import com.google.common.truth.Truth.assertThat
@@ -295,12 +296,21 @@ class PlaybackFixesTest {
         playHere(album, 0)
         val link = graph.link!!
         waitFor(what = "this device plays the session") { link.isActiveHere && link.session.playing }
+        // what the reconnect's hello says, and what goes wrong, heard alongside the app's own handlers
+        val problems = Collections.synchronizedList(mutableListOf<String>())
+        val resumes = Collections.synchronizedList(mutableListOf<SessionResume?>())
+        val logProblem = link.client.onProblem
+        val askResume = link.client.resume
+        link.client.onProblem = { problems += it; logProblem?.invoke(it) }
+        link.client.resume = { askResume?.invoke().also { resumes += it } }
         // the connection breaks without a goodbye, as when the screen is off and the network sleeps: the app reconnects
         // by itself, its hello saying it still plays (until 0.5.1 that hello read the player off the main thread, Media3
         // threw, and the connection failed before it, and every reconnect after it: the phone played on, alone)
         link.client.simulateNetworkLoss()
-        waitFor(5_000, "the loss noticed") { !link.isConnected }
-        waitFor(15_000, "connected again") { link.isConnected }
+        waitFor(15_000, "connected again after its hello") { resumes.isNotEmpty() && link.isConnected }
+        assertThat(problems.joinToString(" | ")).contains("the connection failed")
+        assertThat(problems.joinToString(" | ")).doesNotContain("left out of the hello")
+        assertThat(resumes.first()?.playing).isTrue()
         waitFor(10_000, "still this device, still playing") { link.isActiveHere && link.session.playing }
         assertThat(main { graph.playback.exo.isPlaying }).isTrue()
         assertThat(main { state.trackId }).isEqualTo(album.trackIds[0])
